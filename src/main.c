@@ -27,7 +27,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.0.1"
+#define DOWNSEE_VERSION "0.1.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -915,16 +915,26 @@ static int load_note(App* a, const char* path)
 static void app_render(App* a);
 static int SDLCALL resize_event_watch(void* userdata, SDL_Event* e);
 
+/* Count '\n'-separated message lines (treats empty msg as 1). */
+static int confirm_msg_line_count(const App* a)
+{
+    if (!a->confirm_msg[0]) return 1;
+    int n = 1;
+    for (const char* p = a->confirm_msg; *p; ++p) if (*p == '\n') n++;
+    return n;
+}
+
 /* Confirm-modal layout helpers. Buttons: 0 = Discard, 1 = Cancel (default).
- * Vertical layout (top → bottom): pad / title row / gap / msg row / large gap
- * / hint row / small gap / button row / pad. Each row is sz_y tall; rows
- * never overlap so callers can swap messages without re-tuning. */
+ * Vertical layout (top → bottom): pad / title row / gap / msg row(s) /
+ * large gap / hint row / small gap / button row / pad. Message can be
+ * multi-line — height grows to fit. */
 static SDL_Rect confirm_box_rect(const App* a)
 {
     int sz_y  = font_line_height(a->font_body);
     int btn_h = sz_y + 16;
     int box_w = 480;
-    int box_h = 20 + sz_y + 14 + sz_y + 24 + sz_y + 12 + btn_h + 20;
+    int msg_h = sz_y * confirm_msg_line_count(a);
+    int box_h = 20 + sz_y + 14 + msg_h + 24 + sz_y + 12 + btn_h + 20;
     return (SDL_Rect){ (a->win_w - box_w) / 2,
                        (a->win_h - box_h) / 2,
                        box_w, box_h };
@@ -982,10 +992,22 @@ static void render_confirm_modal(App* a)
     font_draw_line(a->font_body, a->confirm_title, strlen(a->confirm_title),
                    box.x + 20, title_top + font_ascent(a->font_body),
                    a->fg_link);
-    /* Message */
-    font_draw_line(a->font_body, a->confirm_msg, strlen(a->confirm_msg),
-                   box.x + 20, msg_top + font_ascent(a->font_body),
-                   a->fg);
+    /* Message — split on '\n' so the About dialog (and any future
+     * multi-paragraph prompt) renders each line. */
+    {
+        const char* p = a->confirm_msg;
+        int ly = msg_top;
+        while (*p) {
+            const char* nl = strchr(p, '\n');
+            size_t n = nl ? (size_t)(nl - p) : strlen(p);
+            font_draw_line(a->font_body, p, n,
+                           box.x + 20, ly + font_ascent(a->font_body),
+                           a->fg);
+            ly += sz_y;
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
 
     /* lab0 empty means "no left button" — used by info_modal for a single
      * OK dialog. Anything non-empty renders. */
@@ -2138,20 +2160,41 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
             i = w_start;
             continue;
         }
-        /* Find-match highlight in preview (orange tint behind matches). */
+        /* Find-match highlight in preview. For each match overlapping
+         * this word, we size the rect to just the matched bytes (not the
+         * whole word) by measuring the prefix and the match itself with
+         * the same styled-run logic the text uses. */
         if (draw && a->search_mode != 0 && a->search_count > 0) {
             size_t doc_w_start = line->start + w_start;
             size_t doc_w_end   = doc_w_start + w_len;
             for (size_t mi = 0; mi < a->search_count; ++mi) {
                 size_t ms = a->search_matches[mi];
-                size_t me = ms + a->search_qlen;
+                size_t mlen = a->search_match_lens
+                              ? a->search_match_lens[mi]
+                              : a->search_qlen;
+                size_t me = ms + mlen;
                 if (me <= doc_w_start || ms >= doc_w_end) continue;
+
+                /* Clip the match to this word run. */
+                size_t hs = ms > doc_w_start ? ms : doc_w_start;
+                size_t he = me < doc_w_end   ? me : doc_w_end;
+                size_t off_s = hs - doc_w_start;
+                size_t off_e = he - doc_w_start;
+
+                int px_to_s = styled_run(a, line->kind,
+                                         data + w_start, style + w_start,
+                                         off_s, 0, 0, false);
+                int px_to_e = styled_run(a, line->kind,
+                                         data + w_start, style + w_start,
+                                         off_e, 0, 0, false);
+                if (px_to_e <= px_to_s) continue;
+
                 bool current = ((int)mi == a->search_current);
-                SDL_Rect r = { x, y, w, lh };
+                SDL_Rect r = { x + px_to_s, y,
+                               px_to_e - px_to_s, lh };
                 if (current) SDL_SetRenderDrawColor(a->renderer, 220,160, 60,140);
                 else         SDL_SetRenderDrawColor(a->renderer, 180,130, 40, 90);
                 SDL_RenderFillRect(a->renderer, &r);
-                break;
             }
         }
         styled_run(a, line->kind, data + w_start, style + w_start,
@@ -4380,10 +4423,12 @@ static const MenuItem MENU_VIEW[] = {
     { "Settings\xe2\x80\xa6", NULL,    action_settings },
     { NULL, NULL, NULL }
 };
+static void action_about         (App* a);
 static const MenuItem MENU_HELP[] = {
     { "Help",         "F1",     action_help },
     { "Keybindings\xe2\x80\xa6","Ctrl+K",action_keybindings },
     { "Color Picker\xe2\x80\xa6",NULL,action_colors },
+    { "About Downsee\xe2\x80\xa6",NULL, action_about },
     { NULL, NULL, NULL }
 };
 static const MenuItem* MENU_TABLES[4] = {
@@ -6071,6 +6116,7 @@ static void render_picker(App* a)
  * mode and scrolling the cursor into view. */
 static void enter_edit_mode      (App* a);
 static void ensure_cursor_visible(App* a);
+static void search_rebuild       (App* a);
 
 #define OUTLINE_BOX_W   520
 #define OUTLINE_BOX_Y    60
@@ -6344,6 +6390,13 @@ static void render_outline_panel(App* a)
                    a->fg);
 
     int rows_top = top + font_line_height(a->font_body) + 18;
+    /* Hairline divider under the header so it reads as a section, not as
+     * just another row in the list. */
+    SDL_Rect hdiv = { px + 12, rows_top - 6, pw - 24, 1 };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 70);
+    SDL_RenderFillRect(a->renderer, &hdiv);
+
     SDL_Rect clip = { px + 1, rows_top - 2, pw - 1, bot - rows_top };
     SDL_RenderSetClipRect(a->renderer, &clip);
 
@@ -7962,6 +8015,78 @@ static void render_resize_badge(App* a)
     a->wants_anim_frame = true;
 }
 
+/* Floating tooltip that follows the cursor when over a link in preview.
+ * The text is filled in by the MOUSEMOTION handler — this just renders
+ * the pill. Color signals state: muted for resolved links, red-ish for
+ * broken wiki targets so the user sees the dead-end before clicking. */
+static void render_link_tooltip(App* a)
+{
+    if (!a->tip_active || !a->tip_text[0]) return;
+    Font* f = a->font_body;
+    int sz_y  = font_line_height(f);
+    int pad_x = 10;
+    int pad_y = 6;
+    int tw    = font_measure(f, a->tip_text, strlen(a->tip_text));
+    int max_w = a->win_w - 24;
+    /* Truncate with leading "..." so the URL / path tail remains visible. */
+    char shown[256];
+    if (tw > max_w) {
+        const char* ell = "...";
+        int ell_w = font_measure(f, ell, strlen(ell));
+        int budget = max_w - ell_w - 2 * pad_x;
+        if (budget < 40) budget = 40;
+        size_t n = strlen(a->tip_text);
+        size_t keep = 0;
+        int w = 0;
+        for (size_t i = n; i > 0; ) {
+            size_t j = i - 1;
+            while (j > 0 && ((unsigned char)a->tip_text[j] & 0xC0) == 0x80) j--;
+            int cw = font_measure(f, a->tip_text + j, i - j);
+            if (w + cw > budget) break;
+            w += cw;
+            keep = n - j;
+            i = j;
+        }
+        snprintf(shown, sizeof shown, "%s%s", ell,
+                 a->tip_text + (n - keep));
+        tw = font_measure(f, shown, strlen(shown));
+    } else {
+        snprintf(shown, sizeof shown, "%s", a->tip_text);
+    }
+
+    int w = tw + 2 * pad_x;
+    int h = sz_y + 2 * pad_y;
+    /* Anchor just below-right of the cursor; clamp into the window. */
+    int x = a->tip_anchor_x + 16;
+    int y = a->tip_anchor_y + 20;
+    if (x + w > a->win_w - 6) x = a->win_w - 6 - w;
+    if (y + h > a->win_h - 6) y = a->tip_anchor_y - h - 8;
+    if (x < 6) x = 6;
+    if (y < 6) y = 6;
+
+    /* Soft drop shadow + body fill. */
+    SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 110);
+    fill_rrect(a->renderer, (SDL_Rect){x + 2, y + 3, w, h}, h / 2);
+    SDL_Color body = a->bg_sidebar_active;
+    body.a = 240;
+    SDL_SetRenderDrawColor(a->renderer, body.r, body.g, body.b, body.a);
+    fill_rrect(a->renderer, (SDL_Rect){x, y, w, h}, h / 2);
+
+    /* Subtle accent border that matches link / broken-link semantics. */
+    SDL_Color border = a->tip_broken
+        ? (SDL_Color){230, 110, 110, 200}
+        : (SDL_Color){a->fg_link.r, a->fg_link.g, a->fg_link.b, 200};
+    SDL_SetRenderDrawColor(a->renderer,
+        border.r, border.g, border.b, border.a);
+    draw_rrect(a->renderer, (SDL_Rect){x, y, w, h}, h / 2);
+
+    SDL_Color tc = a->tip_broken
+        ? (SDL_Color){240, 180, 180, 255}
+        : a->fg;
+    font_draw_line(f, shown, strlen(shown),
+                   x + pad_x, y + pad_y + font_ascent(f), tc);
+}
+
 /* Event watch: fires synchronously when SDL pushes a window event. On
  * Windows this is the ONLY way to react during the modal resize drag —
  * the main loop is stuck inside DefWindowProc, but the WndProc still
@@ -8089,6 +8214,7 @@ static void render_switcher      (App* a);
 static void render_cmdp          (App* a);
 static void render_plugins       (App* a);
 static void render_resize_badge  (App* a);
+static void render_link_tooltip  (App* a);
 static void render_wiki_complete (App* a);
 static void render_context_menu  (App* a);
 static void render_settings      (App* a);
@@ -8220,10 +8346,11 @@ static void app_render(App* a)
     render_help(a);
     render_dnd_ghost(a);
     render_status(a);
-    /* Resize badge / confirm + text-input modals render LAST so they sit
-     * on top of everything else, including overlays that may still be
-     * visible. */
+    /* Resize badge / link tooltip / confirm + text-input modals render
+     * LAST so they sit on top of everything else, including overlays
+     * that may still be visible. */
     render_resize_badge(a);
+    render_link_tooltip(a);
     render_confirm_modal(a);
     render_tinput_modal(a);
 
@@ -8294,6 +8421,9 @@ static void enter_edit_mode(App* a)
     a->edit_mode = true;
     a->scroll_y  = 0;
     SDL_StartTextInput();
+    /* Match positions are tied to whichever buffer is shown; re-scan so
+     * highlights line up with the new view. */
+    if (a->search_mode != 0) search_rebuild(a);
 }
 
 static void enter_preview_mode(App* a)
@@ -8303,6 +8433,7 @@ static void enter_preview_mode(App* a)
     a->scroll_y  = 0;
     SDL_StopTextInput();
     reparse_preview(a);
+    if (a->search_mode != 0) search_rebuild(a);
 }
 
 static void ensure_cursor_visible(App* a)
@@ -9654,8 +9785,21 @@ static void search_rebuild(App* a)
     search_clear_matches(a);
     a->search_re_err[0] = 0;
     if (a->search_qlen == 0) return;
-    const char*  data = a->buf.data;
-    const size_t len  = a->buf.len;
+    /* CRITICAL: the highlight overlay in preview uses doc-byte offsets
+     * (because each preview run only knows its position inside doc.data),
+     * while the edit-mode highlight uses buffer-byte offsets. Searching
+     * the WRONG buffer makes preview highlights land on completely
+     * unrelated glyphs (the `## ` / `**` / etc. that md4c strips out
+     * shift every offset). So we scan whichever buffer is being shown. */
+    const char*  data;
+    size_t       len;
+    if (a->edit_mode) {
+        data = a->buf.data;
+        len  = a->buf.len;
+    } else {
+        data = a->doc.data ? a->doc.data : "";
+        len  = a->doc.len;
+    }
 
     if (a->search_regex) {
         /* Compile the pattern; on failure leave the error string set so the
@@ -9751,6 +9895,10 @@ static void search_close(App* a)
 static void search_replace_one(App* a)
 {
     if (a->search_mode != 2) return;
+    if (!a->edit_mode) {
+        app_notify(a, "switch to edit mode (Ctrl+E) to replace");
+        return;
+    }
     if (a->search_current < 0) return;
     size_t pos = a->search_matches[a->search_current];
     size_t len = a->search_match_lens
@@ -9776,6 +9924,10 @@ static void search_replace_one(App* a)
 static void search_replace_all(App* a)
 {
     if (a->search_mode != 2 || a->search_count == 0) return;
+    if (!a->edit_mode) {
+        app_notify(a, "switch to edit mode (Ctrl+E) to replace");
+        return;
+    }
     buffer_undo_break(&a->buf);
     /* Walk matches in reverse so earlier indices stay valid. */
     for (int i = (int)a->search_count - 1; i >= 0; --i) {
@@ -9883,21 +10035,23 @@ static bool search_geometry(const App* a, SDL_Rect* bar, SDL_Rect* input,
         chips[2] = (SDL_Rect){ cx, chip_y, chip_w_w,  chip_h };
     }
     /* Replace / Replace-all buttons live on the replace row's right side,
-     * where the chips sit on the find row above. Pill-shaped, 80px wide. */
+     * where the chips sit on the find row above. Width is sized to fit the
+     * widest label so they never collide. */
     int repl_btn_h = chip_h;
-    int repl_btn_w = 86;
-    int repl_pad   = 6;
+    int repl_pad_h = 14;        /* horizontal pad inside each button       */
+    int repl_gap   = 10;        /* gap between the two buttons             */
+    int w1 = font_measure(a->font_body, "Replace",     7) + 2 * repl_pad_h;
+    int w2 = font_measure(a->font_body, "Replace all", 11) + 2 * repl_pad_h;
     int repl_x_far = input_x + input_w + 12 + chips_total - 12;     /* same right edge as chips */
     int repl_y     = input_y + input_h + gap + (input_h - repl_btn_h) / 2;
     if (btn_repl_all)
         *btn_repl_all = (a->search_mode == 2)
-            ? (SDL_Rect){ repl_x_far - repl_btn_w,        repl_y,
-                          repl_btn_w, repl_btn_h }
+            ? (SDL_Rect){ repl_x_far - w2, repl_y, w2, repl_btn_h }
             : (SDL_Rect){ 0,0,0,0 };
     if (btn_repl)
         *btn_repl = (a->search_mode == 2)
-            ? (SDL_Rect){ repl_x_far - repl_btn_w - repl_pad - repl_btn_w,
-                          repl_y, repl_btn_w, repl_btn_h }
+            ? (SDL_Rect){ repl_x_far - w2 - repl_gap - w1,
+                          repl_y, w1, repl_btn_h }
             : (SDL_Rect){ 0,0,0,0 };
     return true;
 }
@@ -10137,24 +10291,40 @@ static void render_search_overlay(App* a)
             SDL_RenderFillRect(a->renderer, &caret);
         }
 
-        /* Replace / Replace All buttons. Pill-shaped, accent-filled. */
+        /* Replace / Replace All buttons. Pill-shaped, accent-filled. No
+         * `draw_rrect` border — that path is Bresenham (not AA) and looks
+         * jagged against the analytically AA'd fill. Hover/enabled state
+         * is conveyed by alpha + accent tint instead of a stroke. */
         SDL_Rect br, bra;
         search_geometry(a, NULL, NULL, NULL, NULL, NULL, &br, &bra);
         bool can_replace = a->search_count > 0 && a->search_qlen > 0;
         for (int i = 0; i < 2; ++i) {
             const SDL_Rect r = (i == 0) ? br : bra;
             const char*    L = (i == 0) ? "Replace" : "Replace all";
-            Uint8 alpha = can_replace ? 220 : 120;
+            /* Right button (Replace All) is the strong action — accent
+             * fill. Left button (Replace one) is the soft action. */
+            bool primary = (i == 1);
+            SDL_Color fill_c;
+            if (primary) {
+                fill_c = a->fg_link;
+                fill_c.a = can_replace ? 220 : 90;
+            } else {
+                fill_c = a->bg_sidebar_hover;
+                fill_c.a = can_replace ? 220 : 130;
+            }
             SDL_SetRenderDrawColor(a->renderer,
-                a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
-                a->bg_sidebar_hover.b, alpha);
+                fill_c.r, fill_c.g, fill_c.b, fill_c.a);
             fill_rrect(a->renderer, r, r.h / 2);
-            SDL_SetRenderDrawColor(a->renderer,
-                a->fg_link.r, a->fg_link.g, a->fg_link.b,
-                can_replace ? 180 : 80);
-            draw_rrect(a->renderer, r, r.h / 2);
             int lw = font_measure(a->font_body, L, strlen(L));
-            SDL_Color tc = can_replace ? a->fg : a->fg_muted;
+            SDL_Color tc;
+            if (primary && can_replace) {
+                int lum = a->fg_link.r * 30 + a->fg_link.g * 59
+                        + a->fg_link.b * 11;
+                tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
+                                   : (SDL_Color){240, 240, 250, 255};
+            } else {
+                tc = can_replace ? a->fg : a->fg_muted;
+            }
             font_draw_line(a->font_body, L, strlen(L),
                            r.x + (r.w - lw) / 2,
                            row_text_baseline(a->font_body, r.y, r.h),
@@ -10343,6 +10513,14 @@ static void action_settings  (App* a) { settings_open(a); }
 static void action_help      (App* a) { help_open(a); }
 static void action_keybindings(App* a) { keybind_open(a); }
 static void action_colors    (App* a) { picker_open(a);  }
+static void action_about     (App* a) {
+    info_modal(a, "About Downsee " DOWNSEE_VERSION,
+        "A keyboard-driven markdown editor.\n"
+        "Made by fezcode <samil.bulbul@gmail.com>.\n\n"
+        "Stack: C11 + SDL2 + FreeType / HarfBuzz fonts,\n"
+        "md4c CommonMark parser, Lua 5.4 plugins,\n"
+        "nanosvg icon rasterizer, custom SDF pill AA.");
+}
 static void action_vsearch   (App* a) { vsearch_open(a); }
 static void action_outline   (App* a) { outline_open(a); }
 /* action_outline_pin is forward-declared near render_chrome and defined in
@@ -10998,6 +11176,85 @@ static void app_event(App* a, const SDL_Event* e)
             if (a->tpl_active)
                 a->tpl_hover =
                     tpl_hit_test(a, e->motion.x, e->motion.y);
+
+            /* Link tooltip in preview: walk the per-frame hit rects for
+             * the one under the cursor. Wiki targets resolve to a vault
+             * file or "no match"; inline links show their href. Cleared
+             * each motion so the tip disappears the instant the cursor
+             * leaves a link. */
+            a->tip_active = false;
+            if (!a->edit_mode && !a->switcher_active && !a->cmdp_active &&
+                !a->plugins_active && !a->settings_active &&
+                !a->keybind_active && !a->picker_active &&
+                !a->ctx_menu_active)
+            {
+                for (size_t hi = 0; hi < a->hit_count; ++hi) {
+                    struct ClickHit* h = &a->hits[hi];
+                    if (e->motion.x < h->rect.x ||
+                        e->motion.x >= h->rect.x + h->rect.w ||
+                        e->motion.y < h->rect.y ||
+                        e->motion.y >= h->rect.y + h->rect.h) continue;
+                    if (h->kind != HIT_WIKI) continue;
+                    /* Inline `[text](url)` ranges win over wiki resolution
+                     * since they may overlap byte-wise. */
+                    bool resolved = false;
+                    for (size_t li = 0; li < a->doc.link_count; ++li) {
+                        MdLink* lk = &a->doc.links[li];
+                        if (h->byte_start < lk->start ||
+                            h->byte_start >= lk->end) continue;
+                        snprintf(a->tip_text, sizeof a->tip_text,
+                                 "Open external -- %.220s",
+                                 lk->href ? lk->href : "");
+                        a->tip_broken = false;
+                        resolved = true;
+                        break;
+                    }
+                    if (!resolved) {
+                        for (size_t wi = 0; wi < a->doc.wiki_count; ++wi) {
+                            MdWiki* wk = &a->doc.wikis[wi];
+                            if (h->byte_start < wk->start ||
+                                h->byte_start >= wk->end) continue;
+                            char target[256];
+                            size_t n = wk->name_len < sizeof target - 1
+                                        ? wk->name_len : sizeof target - 1;
+                            memcpy(target, a->doc.data + wk->name_start, n);
+                            target[n] = 0;
+                            const char* found = NULL;
+                            for (size_t v = 0; v < a->vault.count; ++v) {
+                                if (a->vault.items[v].is_dir) continue;
+                                char base[256];
+                                snprintf(base, sizeof base, "%s",
+                                         a->vault.items[v].name);
+                                size_t bl = strlen(base);
+                                if (bl > 3 && strieq(base + bl - 3, ".md"))
+                                    base[bl - 3] = 0;
+                                if (strieq(base, target)) {
+                                    found = a->vault.items[v].path;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                snprintf(a->tip_text, sizeof a->tip_text,
+                                         "Open -- %.220s", found);
+                                a->tip_broken = false;
+                            } else {
+                                snprintf(a->tip_text, sizeof a->tip_text,
+                                         "[[%.180s]] -- no matching note",
+                                         target);
+                                a->tip_broken = true;
+                            }
+                            resolved = true;
+                            break;
+                        }
+                    }
+                    if (resolved) {
+                        a->tip_active   = true;
+                        a->tip_anchor_x = e->motion.x;
+                        a->tip_anchor_y = e->motion.y;
+                    }
+                    break;     /* first hit wins */
+                }
+            }
 
             /* Cursor change when hovering EITHER the sidebar resize handle
              * or the outline-panel resize handle (left edge of pinned panel). */

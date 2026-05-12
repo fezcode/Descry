@@ -193,6 +193,16 @@ typedef struct {
     size_t   hit_count;
     size_t   hit_cap;
 
+    /* Tooltip shown when hovering a wiki/external link in preview. Text
+     * resolves on each motion: where the link points or "no match" for
+     * unresolved wiki targets. anchor_x/y are the cursor position; the
+     * renderer places the pill just below-right of the cursor. */
+    bool     tip_active;
+    char     tip_text[256];
+    int      tip_anchor_x;
+    int      tip_anchor_y;
+    bool     tip_broken;          /* true when wiki target doesn't resolve */
+
     /* Sidebar visible-item map: indices of items currently shown after
      * applying folder collapse. Built per render; queried on click. */
     int*     sidebar_visible;
@@ -228,7 +238,7 @@ typedef struct {
     int      confirm_choice;         /* -1 pending, 0 = discard, 1 = cancel */
     int      confirm_hover;          /* 0 = discard btn, 1 = cancel btn */
     char     confirm_title[64];
-    char     confirm_msg[200];
+    char     confirm_msg[400];     /* multi-line — split on '\n' at render */
     /* Optional custom button labels. Empty falls back to "Discard"/"Cancel".
      * Set by confirm_action() for "Open link?", "Quit?" style prompts. */
     char     confirm_btn0_label[32];
