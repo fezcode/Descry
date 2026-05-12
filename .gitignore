@@ -1,0 +1,15 @@
+/build/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.pdb
+*.ilk
+.cache/
+compile_commands.json
+
+# Dev-time artifacts at the repo root
+/*.png
+/*.log
+/bash.exe.stackdump
