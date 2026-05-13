@@ -332,11 +332,8 @@ typedef struct {
     int      settings_font_idx;      /* index into g_font_choices */
     int      settings_theme_idx;     /* index into g_themes */
 
-    /* Help (F1) overlay state. */
-    bool     help_active;
-    int      help_scroll;            /* px scroll offset for long lists */
-
-    /* Keybindings overlay (Ctrl+K) state. */
+    /* Keybindings overlay (F1) state — also serves as the help surface;
+     * the standalone Help overlay was merged into it. */
     bool     keybind_active;
     int      keybind_selected;       /* row in the action list           */
     int      keybind_hover;          /* mouse hover row                  */

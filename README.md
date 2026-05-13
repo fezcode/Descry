@@ -14,7 +14,9 @@ preview rendering, plugin host — without the Electron tax.
   — headings, lists, task lists, code fences, block quotes, tables,
   inline styles, links, soft and hard breaks.
 - **Edit mode** with a real text buffer (undo/redo, multi-byte caret,
-  selection, smart Enter for lists, auto-pairs, find/replace).
+  selection, smart Enter for lists, auto-pairs, find/replace). Soft
+  word wrap on by default; toggle off (Alt+Z) for a horizontal
+  scrollbar with arrow buttons.
 - **Vault sidebar** with collapsible folders, drag-and-drop reorder,
   right-click context menu, recents tracking, and **image files** that
   open straight into the preview pane.
@@ -109,8 +111,11 @@ ninja -C build
 ./build/downsee
 ```
 
-The build copies `data/` next to the binary on each compile so plugins,
-themes, and the sample vault travel with the executable.
+On Windows the build pulls every transitive MinGW DLL next to the exe
+via `file(GET_RUNTIME_DEPENDENCIES)` so the build dir is portable —
+zip it and run anywhere without an MSYS2 install. The `data/` folder
+is *not* copied; the exe loads `data/` from its own directory at
+runtime, so put your vault wherever you like and point Downsee at it.
 
 ---
 
@@ -156,10 +161,7 @@ invoked by name or bound to a key.
 ## Keyboard
 
 A non-exhaustive list. Every binding is editable from `Settings >
-Keybindings` and persists to `settings.lua` next to the exe. Edit-mode
-soft wrap is on by default; toggle with **Alt+Z** (or *View > Toggle Word
-Wrap*). When off, long lines extend past the viewport and a horizontal
-scrollbar appears at the bottom (Shift+wheel pans).
+Keybindings` and persists to `settings.lua` next to the exe.
 
 | Action                | Shortcut          |
 |-----------------------|-------------------|
@@ -179,8 +181,13 @@ scrollbar appears at the bottom (Shift+wheel pans).
 | Tags                  | Ctrl+Shift+G      |
 | Daily note            | Ctrl+D            |
 | Toggle sidebar        | Ctrl+B            |
-| Help                  | F1                |
+| Toggle word wrap      | Alt+Z             |
+| Help & Keybindings    | F1                |
 | Settings              | Ctrl+, or F10     |
+
+When word wrap is off, long edit-mode lines extend past the viewport;
+Shift+wheel pans, or use the horizontal scrollbar that appears at the
+bottom of the editor.
 
 ---
 

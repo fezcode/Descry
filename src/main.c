@@ -487,6 +487,7 @@ static int line_step(const App* a, Font* f)
 
 /* Forward decl needed by settings_adjust (live preview of line spacing). */
 static void ensure_cursor_visible(App* a);
+static void path_to_forward(char* s);
 
 /* Right edge of the document area: pulls in by the outline panel width
  * when the outline is pinned to the right. */
@@ -881,6 +882,7 @@ static int load_note(App* a, const char* path)
         reparse_preview(a);
         free(a->note_path);
         a->note_path      = strdup(path);
+        path_to_forward(a->note_path);
         a->scroll_y       = 0;
         a->doc_height_px  = 0;
         a->vault.selected = vault_index_of(&a->vault, path);
@@ -905,6 +907,7 @@ static int load_note(App* a, const char* path)
 
     free(a->note_path);
     a->note_path      = strdup(path);
+    path_to_forward(a->note_path);
     a->scroll_y       = 0;
     a->scroll_x       = 0;
     a->doc_height_px  = 0;
@@ -1183,7 +1186,7 @@ static SDL_Rect tinput_box_rect(App* a)
     return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
 }
 
-static int tinput_list_row_h(App* a) { return font_line_height(a->font_body) + 6; }
+static int tinput_list_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
 static int tinput_list_top  (App* a)
 {
     SDL_Rect box = tinput_box_rect(a);
@@ -1338,6 +1341,17 @@ static bool path_dir_exists(const char* p)
     struct stat st;
     if (stat(p, &st) != 0) return false;
     return (st.st_mode & S_IFMT) == S_IFDIR;
+}
+
+/* Normalize backslashes to forward slashes in place. We do this at every
+ * boundary where a path enters our state (recents, vault dir, note path,
+ * picker dir) so the UI shows one consistent slash style regardless of
+ * whether the path came from a Win32 dialog (backslashes) or a typed
+ * field. Forward slashes work fine in every Windows API we call. */
+static void path_to_forward(char* s)
+{
+    if (!s) return;
+    for (; *s; ++s) if (*s == '\\') *s = '/';
 }
 
 #ifdef _WIN32
@@ -1507,6 +1521,7 @@ static void tinput_navigate(App* a, const char* leaf)
         tinput_path_join(a->tinput_dir, leaf, next, sizeof next);
     }
     snprintf(a->tinput_dir, sizeof a->tinput_dir, "%s", next);
+    path_to_forward(a->tinput_dir);
     a->tinput_files_scroll = 0;
     a->tinput_files_hover  = -1;
     a->tinput_path_err     = false;
@@ -1609,11 +1624,27 @@ static int input_word_right(const char* buf, int len, int cursor)
 
 /* Returns true if the keystroke was consumed. Handles selection-aware
  * editing, Ctrl+A/C/V/X, Shift+Arrow extension, Ctrl+Arrow word jump,
- * Ctrl+Backspace/Delete word delete, Home/End. */
-static bool input_handle_keydown(InputField* f, SDL_Keycode k, Uint16 mod)
+ * Ctrl+Backspace/Delete word delete, Home/End.
+ *
+ * Takes scancode in addition to keycode so clipboard shortcuts work on
+ * non-QWERTY layouts (Turkish-F, Dvorak, Colemak…) where the physical
+ * V key produces a different keysym than SDLK_v. We promote the
+ * physical scancode to the canonical Ctrl+letter keysym for the
+ * clipboard family before any keysym branch runs. */
+static bool input_handle_keydown(InputField* f, SDL_Keycode k, SDL_Scancode sc,
+                                 Uint16 mod)
 {
     bool ctrl  = (mod & KMOD_CTRL)  != 0;
     bool shift = (mod & KMOD_SHIFT) != 0;
+    if (ctrl) {
+        switch (sc) {
+            case SDL_SCANCODE_A: k = SDLK_a; break;
+            case SDL_SCANCODE_C: k = SDLK_c; break;
+            case SDL_SCANCODE_V: k = SDLK_v; break;
+            case SDL_SCANCODE_X: k = SDLK_x; break;
+            default: break;
+        }
+    }
 
     if (ctrl && k == SDLK_a) {
         *f->sel_anchor = 0;
@@ -2217,8 +2248,9 @@ static bool app_rename_popup(App* a, const char* oldname,
                     break;
                 }
                 case SDL_KEYDOWN: {
-                    SDL_Keycode k = e.key.keysym.sym;
-                    Uint16 mod   = e.key.keysym.mod;
+                    SDL_Keycode  k  = e.key.keysym.sym;
+                    SDL_Scancode sc = e.key.keysym.scancode;
+                    Uint16 mod      = e.key.keysym.mod;
                     if (k == SDLK_ESCAPE) {
                         a->tinput_renpop_choice = 1; break;
                     }
@@ -2230,7 +2262,7 @@ static bool app_rename_popup(App* a, const char* oldname,
                             .cursor = &a->tinput_renpop_cursor,
                             .sel_anchor = &a->tinput_renpop_sel_anchor,
                         };
-                        if (input_handle_keydown(&f, k, mod)) {
+                        if (input_handle_keydown(&f, k, sc, mod)) {
                             a->tinput_renpop_err = false;
                             break;
                         }
@@ -2297,7 +2329,8 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
     a->tinput_renpop_old[0]= 0;
     if (dir && *dir) {
         snprintf(a->tinput_dir, sizeof a->tinput_dir, "%s", dir);
-        tinput_files_scan(a, dir);
+        path_to_forward(a->tinput_dir);
+        tinput_files_scan(a, a->tinput_dir);
     } else {
         a->tinput_dir[0] = 0;
         tinput_files_clear(a);
@@ -2430,7 +2463,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                         a->tinput_path_err = true;
                                         snprintf(a->tinput_err_text,
                                                  sizeof a->tinput_err_text,
-                                                 "rename failed: %s",
+                                                 "rename failed: %.200s",
                                                  old_nm);
                                     }
                                 }
@@ -2465,7 +2498,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                         a->tinput_path_err = true;
                                         snprintf(a->tinput_err_text,
                                                  sizeof a->tinput_err_text,
-                                                 "delete failed: %s",
+                                                 "delete failed: %.200s",
                                                  victim);
                                     }
                                 }
@@ -2511,7 +2544,8 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                                a->tinput_files[sel]);
                                 snprintf(a->tinput_dir,
                                          sizeof a->tinput_dir,
-                                         "%s", chosen);
+                                         "%.500s", chosen);
+                                path_to_forward(a->tinput_dir);
                             }
                             if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0
                                 || !path_dir_exists(a->tinput_dir))
@@ -2519,7 +2553,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 a->tinput_path_err = true;
                                 snprintf(a->tinput_err_text,
                                          sizeof a->tinput_err_text,
-                                         "%s", a->tinput_dir);
+                                         "%.240s", a->tinput_dir);
                                 break;
                             }
                         }
@@ -2535,7 +2569,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 a->tinput_path_err = true;
                                 snprintf(a->tinput_err_text,
                                          sizeof a->tinput_err_text,
-                                         "%s", a->tinput_dir);
+                                         "%.240s", a->tinput_dir);
                                 break;
                             }
                             /* Use typed text only if it's a plain leaf
@@ -2588,7 +2622,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 a->tinput_path_err = true;
                                 snprintf(a->tinput_err_text,
                                          sizeof a->tinput_err_text,
-                                         "%s", npath);
+                                         "%.240s", npath);
                                 break;
                             }
                             /* Stay in the parent dir; refresh the listing
@@ -2619,7 +2653,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                     a->tinput_path_err = true;
                                     snprintf(a->tinput_err_text,
                                              sizeof a->tinput_err_text,
-                                             "rename failed: %s", unique);
+                                             "rename failed: %.200s", unique);
                                 }
                             }
                             break;
@@ -2673,8 +2707,9 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                     break;
                 }
                 case SDL_KEYDOWN: {
-                    SDL_Keycode k = e.key.keysym.sym;
-                    Uint16 mod   = e.key.keysym.mod;
+                    SDL_Keycode  k  = e.key.keysym.sym;
+                    SDL_Scancode sc = e.key.keysym.scancode;
+                    Uint16 mod      = e.key.keysym.mod;
                     if (k == SDLK_ESCAPE) { a->tinput_choice = 1; break; }
                     /* Hand cursor / selection / clipboard keys to the
                      * shared input handler before falling through to the
@@ -2687,7 +2722,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                             .cursor = &a->tinput_cursor,
                             .sel_anchor = &a->tinput_sel_anchor,
                         };
-                        if (input_handle_keydown(&f, k, mod)) {
+                        if (input_handle_keydown(&f, k, sc, mod)) {
                             a->tinput_path_err = false;
                             break;
                         }
@@ -2706,6 +2741,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                     snprintf(a->tinput_dir,
                                              sizeof a->tinput_dir,
                                              "%s", a->tinput_text);
+                                    path_to_forward(a->tinput_dir);
                                     a->tinput_files_scroll = 0;
                                     a->tinput_files_hover  = -1;
                                     a->tinput_path_err     = false;
@@ -4568,31 +4604,6 @@ static void draw_icon_find(SDL_Renderer* r, int x, int y, int sz, SDL_Color c)
 }
 #endif   /* superseded icons */
 
-/* Filled triangle by horizontal scanlines. p1/p2/p3 in any order. */
-static void fill_tri(SDL_Renderer* r, int x1, int y1, int x2, int y2,
-                     int x3, int y3)
-{
-    /* Sort by y so y1 <= y2 <= y3. */
-    if (y2 < y1) { int t; t = y1; y1 = y2; y2 = t; t = x1; x1 = x2; x2 = t; }
-    if (y3 < y1) { int t; t = y1; y1 = y3; y3 = t; t = x1; x1 = x3; x3 = t; }
-    if (y3 < y2) { int t; t = y2; y2 = y3; y3 = t; t = x2; x2 = x3; x3 = t; }
-    /* Long edge (y1 -> y3) and short edges (y1 -> y2, y2 -> y3). */
-    for (int y = y1; y <= y3; ++y) {
-        if (y3 == y1) break;
-        int xa = x1 + (x3 - x1) * (y - y1) / (y3 - y1);
-        int xb;
-        if (y < y2) {
-            if (y2 == y1) xb = x1;
-            else          xb = x1 + (x2 - x1) * (y - y1) / (y2 - y1);
-        } else {
-            if (y3 == y2) xb = x2;
-            else          xb = x2 + (x3 - x2) * (y - y2) / (y3 - y2);
-        }
-        if (xa > xb) { int t = xa; xa = xb; xb = t; }
-        SDL_RenderDrawLine(r, xa, y, xb, y);
-    }
-}
-
 /* draw_icon_chevron superseded by ICON_CHEVRON_LEFT / ICON_CHEVRON_RIGHT
  * in icons.c (SVG-rasterized, oversampled, AA). */
 
@@ -5618,6 +5629,16 @@ static void sb_inner_track_h(const SDL_Rect* track, SDL_Rect* inner)
     }
 }
 
+/* Pure clamp — call before reading scroll_x or computing thumb position. */
+static void clamp_scroll_x(App* a)
+{
+    int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
+    int over = a->doc_width_px - vw;
+    int max_sc = over > 0 ? over : 0;
+    if (a->scroll_x > max_sc) a->scroll_x = max_sc;
+    if (a->scroll_x < 0)      a->scroll_x = 0;
+}
+
 /* Returns 1 when the hscrollbar is needed (wrap off + content overflows). */
 static int doc_hscrollbar_geom(const App* a,
                                SDL_Rect* track_out, SDL_Rect* thumb_out)
@@ -5626,16 +5647,6 @@ static int doc_hscrollbar_geom(const App* a,
     int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
     int total = a->doc_width_px;
     if (total <= vw || vw <= 0) return 0;
-    /* Clamp scroll_x defensively (window resize / wrap toggle / file load
-     * can leave it out of range). Cast to non-const because every caller
-     * passes the live App and we want a single point of truth here. */
-    {
-        int max_sc = total - vw;
-        if (max_sc < 0) max_sc = 0;
-        App* aw = (App*)a;
-        if (aw->scroll_x > max_sc) aw->scroll_x = max_sc;
-        if (aw->scroll_x < 0)      aw->scroll_x = 0;
-    }
 
     int track_h = 10;
     /* Reserve space for the vertical scrollbar so the corners don't overlap. */
@@ -5692,6 +5703,7 @@ static void sb_draw_arrows_h(App* a, const SDL_Rect* track, int alpha)
 
 static void render_hscrollbar(App* a)
 {
+    clamp_scroll_x(a);
     SDL_Rect track, thumb;
     if (!doc_hscrollbar_geom(a, &track, &thumb)) return;
     SDL_SetRenderDrawColor(a->renderer,
@@ -6006,6 +6018,7 @@ static void app_notify(App* a, const char* msg)
 #define CTX_KIND_SIDEBAR 0
 #define CTX_KIND_EDITOR  1
 #define CTX_KIND_MENU    2     /* title-bar File/Edit/View/Help dropdowns */
+#define CTX_KIND_PREVIEW 3     /* right-click on selected text in preview */
 
 /* Title-bar menu definitions: a (label, shortcut, action) per menu item.
  * ctx_menu_target stores which menu is open (0=File, 1=Edit, 2=View,
@@ -6036,7 +6049,6 @@ static void action_plugins        (App* a);
 static void action_outline       (App* a);
 static void action_backlinks     (App* a);
 static void action_tags          (App* a);
-static void action_help          (App* a);
 static void action_keybindings   (App* a);
 static void action_colors        (App* a);
 
@@ -6075,8 +6087,7 @@ static const MenuItem MENU_VIEW[] = {
 };
 static void action_about         (App* a);
 static const MenuItem MENU_HELP[] = {
-    { "Help",         "F1",     action_help },
-    { "Keybindings\xe2\x80\xa6","Ctrl+K",action_keybindings },
+    { "Keybindings\xe2\x80\xa6","F1", action_keybindings },
     { "Color Picker\xe2\x80\xa6",NULL,action_colors },
     { "About Downsee\xe2\x80\xa6",NULL, action_about },
     { NULL, NULL, NULL }
@@ -6148,8 +6159,13 @@ static const char* CTX_LABELS[CTX_COUNT] = {
     "New folder here…",
 };
 
-/* Editor formatting menu actions, ordered as they appear in the popup. */
+/* Editor formatting menu actions, ordered as they appear in the popup.
+ * Cut/Copy/Paste sit at the top so the menu reads top-down as "do
+ * standard text-edit things" and then "wrap selection with markdown". */
 typedef enum {
+    ED_CUT,
+    ED_COPY,
+    ED_PASTE,
     ED_BOLD,
     ED_ITALIC,
     ED_CODE,
@@ -6164,6 +6180,9 @@ typedef enum {
 } EditorAction;
 
 static const char* ED_LABELS[ED_COUNT] = {
+    "Cut",
+    "Copy",
+    "Paste",
     "Bold",
     "Italic",
     "Inline code",
@@ -6178,6 +6197,9 @@ static const char* ED_LABELS[ED_COUNT] = {
 
 /* Right-side hint shown in the popup, mirroring common editor shortcuts. */
 static const char* ED_SHORTCUTS[ED_COUNT] = {
+    "Ctrl+X",
+    "Ctrl+C",
+    "Ctrl+V",
     "Ctrl+B",
     "Ctrl+I",
     "Ctrl+`",
@@ -6230,8 +6252,9 @@ static CtxAction ctx_action_at_row(const App* app, int row)
 /* Total row count for whichever kind is active. */
 static int ctx_visible_count(const App* a)
 {
-    if (a->ctx_menu_kind == CTX_KIND_EDITOR) return ED_COUNT;
-    if (a->ctx_menu_kind == CTX_KIND_MENU)   return menu_count(a->ctx_menu_target);
+    if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return ED_COUNT;
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 1;
+    if (a->ctx_menu_kind == CTX_KIND_MENU)    return menu_count(a->ctx_menu_target);
     return ctx_sidebar_visible_count(a);
 }
 
@@ -6240,6 +6263,9 @@ static const char* ctx_label_at(const App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_EDITOR) {
         if (row < 0 || row >= ED_COUNT) return "";
         return ED_LABELS[row];
+    }
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
+        return (row == 0) ? "Copy" : "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
@@ -6259,6 +6285,9 @@ static const char* ctx_shortcut_at(const App* a, int row)
         if (row < 0 || row >= ED_COUNT) return "";
         return ED_SHORTCUTS[row];
     }
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
+        return (row == 0) ? "Ctrl+C" : "";
+    }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
         if (row < 0 || row >= n) return "";
@@ -6275,7 +6304,8 @@ static const char* ctx_shortcut_at(const App* a, int row)
 static int ctx_menu_row_h(const App* a) { return font_line_height(a->font_body) + 8; }
 static int ctx_menu_w   (const App* a)
 {
-    if (a->ctx_menu_kind == CTX_KIND_EDITOR) return 240;
+    if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return 240;
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 180;
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         /* Auto-size: widest label + widest shortcut + a fixed gap so the
          * shortcut text never overlaps the label. */
@@ -6324,6 +6354,26 @@ static void ctx_menu_open_editor(App* a, int x, int y)
 {
     a->ctx_menu_active = true;
     a->ctx_menu_kind   = CTX_KIND_EDITOR;
+    a->ctx_menu_x      = x;
+    a->ctx_menu_y      = y;
+    a->ctx_menu_target = -1;
+    a->ctx_menu_hover  = 0;
+    a->ctx_menu_open_t = 0.0f;
+    for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
+    int rh = ctx_menu_row_h(a);
+    int h  = rh * ctx_visible_count(a) + 8;
+    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
+        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
+    if (a->ctx_menu_y + h > a->win_h - 4)
+        a->ctx_menu_y = a->win_h - 4 - h;
+    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
+    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+}
+
+static void ctx_menu_open_preview(App* a, int x, int y)
+{
+    a->ctx_menu_active = true;
+    a->ctx_menu_kind   = CTX_KIND_PREVIEW;
     a->ctx_menu_x      = x;
     a->ctx_menu_y      = y;
     a->ctx_menu_target = -1;
@@ -6445,7 +6495,7 @@ static void submenu_invoke_row(App* a, int row)
         recent_dirs_push(a, snap);
         settings_persist(a);
         char msg[300];
-        snprintf(msg, sizeof msg, "vault: %s (%d note%s)",
+        snprintf(msg, sizeof msg, "vault: %.250s (%d note%s)",
                  snap, nfound, nfound == 1 ? "" : "s");
         app_notify(a, msg);
     }
@@ -6888,6 +6938,9 @@ static void ed_menu_invoke(App* a, EditorAction act)
     ctx_menu_close(a);
     if (!a->edit_mode) return;
     switch (act) {
+        case ED_CUT:     action_cut(a);                                break;
+        case ED_COPY:    action_copy(a);                               break;
+        case ED_PASTE:   action_paste(a);                              break;
         case ED_BOLD:    editor_wrap_selection(a, "**", "**");        break;
         case ED_ITALIC:  editor_wrap_selection(a, "*",  "*");         break;
         case ED_CODE:    editor_wrap_selection(a, "`",  "`");         break;
@@ -6903,12 +6956,20 @@ static void ed_menu_invoke(App* a, EditorAction act)
     bump_blink(a);
 }
 
+/* Defined in the clipboard section much further down. */
+static void preview_copy(App* a);
+
 /* Single dispatch from a row click, switches on the active menu kind. */
 static void ctx_menu_invoke_row(App* a, int row)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR) {
         if (row >= 0 && row < ED_COUNT) ed_menu_invoke(a, (EditorAction)row);
         else                             ctx_menu_close(a);
+        return;
+    }
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
+        ctx_menu_close(a);
+        if (row == 0) preview_copy(a);
         return;
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
@@ -7069,166 +7130,9 @@ static void render_dnd_ghost(App* a)
                    a->fg);
 }
 
-/* ----------------------------- help overlay (F1) ------------------------ */
-
-/* Static reference of all keyboard shortcuts grouped by category. Rendered
- * in a centered modal. Add rows here as new actions are wired up. */
-static const struct { const char* key; const char* desc; } HELP_ROWS[] = {
-    {"# File", NULL},
-    {"Ctrl+N",        "New file"},
-    {"Ctrl+O",        "Open file…"},
-    {"Ctrl+S",        "Save"},
-    {"Ctrl+Shift+S",  "Save as…"},
-    {"F2",            "Rename"},
-    {"Ctrl+P",        "Quick switcher"},
-    {"# Edit", NULL},
-    {"Ctrl+Z",        "Undo"},
-    {"Ctrl+Shift+Z",  "Redo"},
-    {"Ctrl+A",        "Select all"},
-    {"Ctrl+C/X/V",    "Copy / Cut / Paste"},
-    {"# View", NULL},
-    {"Ctrl+E",        "Toggle Edit / Preview"},
-    {"Ctrl+B",        "Toggle sidebar"},
-    {"Ctrl+,",        "Settings (F10 fallback)"},
-    {"F1",            "This help overlay"},
-    {"# Find", NULL},
-    {"Ctrl+F",        "Find"},
-    {"Ctrl+H",        "Find & replace"},
-    {"Ctrl+Shift+F",  "Search vault (across all notes)"},
-    {"Enter",         "Next match  (Shift+Enter previous)"},
-    {"Ctrl+Enter",    "Replace one  (Ctrl+Shift+Enter all)"},
-    {"Alt+I",         "Toggle case-insensitive  (find)"},
-    {"Alt+W",         "Toggle whole-word        (find)"},
-    {"Alt+R",         "Toggle regex             (find)"},
-    {"# Notes", NULL},
-    {"Ctrl+Shift+O",  "Outline overlay (jump by heading)"},
-    {"Ctrl+Alt+O",    "Pin outline as right-side panel"},
-    {"Ctrl+Shift+B",  "Backlinks (files linking here)"},
-    {"Ctrl+Shift+G",  "Tag panel (vault-wide #tag list)"},
-    {"Ctrl+Shift+E",  "Export current note to HTML"},
-    {"Ctrl+Alt+T",    "Align markdown table at cursor"},
-    {"Ctrl+D",        "Today's daily note"},
-    {"Ctrl+N",        "New file (template picker if any)"},
-    {"# Keybindings", NULL},
-    {"Ctrl+K",        "Keybindings overlay (rebind any action)"},
-    {"Ctrl+,/F10",    "Settings (theme, fonts, sidebar width…)"},
-    {"Ctrl+Shift+T",  "Theme color picker"},
-    {"# Markdown", NULL},
-    {"[[",            "Wiki-link auto-complete (edit mode)"},
-    {"Ctrl+click",    "Follow wiki-link"},
-    {"F12 / Ctrl+Enter", "Follow wiki-link at cursor (edit)"},
-    {"Click ☐/☑",     "Toggle task (preview)"},
-    {"# Sidebar", NULL},
-    {"Right-click",   "File context menu (Open / Rename / Delete / New)"},
-    {"Drag",          "Drop a file on a folder to move it"},
-    {"# Misc", NULL},
-    {"Esc",           "Close overlay / exit edit mode"},
-    {NULL, NULL},
-};
-
-static void help_open (App* a) { a->help_active = true;  a->help_scroll = 0; }
-static void help_close(App* a) { a->help_active = false; }
-
-/* Forward decls for the action enumeration referenced in render_help. */
-static int         ACTIONS_count(void);
-static const char* ACTIONS_name(int i);
-static const char* ACTIONS_category(int i);
-static const char* current_keystr_for(const char* action);
-
-static void render_help(App* a)
-{
-    if (!a->help_active) return;
-
-    /* Backdrop. */
-    overlay_backdrop(a);
-
-    int rh = font_line_height(a->font_body) + 4;
-    int box_w = 580;
-    /* Count visible rows to size the box (HELP_ROWS reference + per-action
-     * current bindings appended below). */
-    int n_rows = 0;
-    for (int i = 0; HELP_ROWS[i].key; ++i) n_rows++;
-    int an = ACTIONS_count();
-    n_rows += an + 2;        /* +2 = "Current bindings" header + spacer */
-    int box_h = rh * (n_rows + 3) + 24;     /* +3: title, hint, padding */
-    if (box_h > a->win_h - 80) box_h = a->win_h - 80;
-    int box_x = (a->win_w - box_w) / 2;
-    int box_y = (a->win_h - box_h) / 2;
-
-    SDL_Rect box = { box_x, box_y, box_w, box_h };
-    overlay_card(a, box);
-
-    /* Clip rows to the box interior so a long list scrolls cleanly. */
-    SDL_Rect clip = { box_x + 4, box_y + rh + 8,
-                      box_w - 8, box_h - rh - 28 };
-    SDL_RenderSetClipRect(a->renderer, &clip);
-
-    /* Title */
-    {
-        const char* title = "Keyboard shortcuts";
-        font_draw_line(a->font_body, title, strlen(title),
-                       box_x + 16, box_y + 10 + font_ascent(a->font_body),
-                       a->fg_link);
-    }
-
-    int y = box_y + rh + 10 - a->help_scroll;
-    int key_x  = box_x + 24;
-    int desc_x = box_x + 230;
-    for (int i = 0; HELP_ROWS[i].key; ++i) {
-        const char* k = HELP_ROWS[i].key;
-        const char* d = HELP_ROWS[i].desc;
-        if (k[0] == '#') {
-            /* Category header. */
-            SDL_Color hc = a->fg_heading;
-            font_draw_line(a->font_body, k + 2, strlen(k + 2),
-                           box_x + 16, y + font_ascent(a->font_body) + 4, hc);
-            y += rh + 2;
-        } else {
-            font_draw_line(a->font_body, k, strlen(k),
-                           key_x, y + font_ascent(a->font_body), a->fg_link);
-            if (d) font_draw_line(a->font_body, d, strlen(d),
-                                  desc_x, y + font_ascent(a->font_body),
-                                  a->fg);
-            y += rh;
-        }
-    }
-
-    /* "Current bindings" section: walk ACTIONS, show the actual bound
-     * keystroke (user-rebound or default). Reflects rebinds the user
-     * may have made via the keybindings overlay. */
-    {
-        const char* hdr = "Current bindings (rebindable in Ctrl+K)";
-        font_draw_line(a->font_body, hdr, strlen(hdr),
-                       box_x + 16, y + font_ascent(a->font_body) + 6,
-                       a->fg_heading);
-        y += rh + 8;
-        int actions_n = ACTIONS_count();
-        for (int i = 0; i < actions_n; ++i) {
-            const char* name = ACTIONS_name(i);
-            const char* cat  = ACTIONS_category(i);
-            const char* key  = current_keystr_for(name);
-            if (!key || !*key) key = "(unbound)";
-            char desc[128];
-            if (cat && *cat)
-                snprintf(desc, sizeof desc, "%s \xc2\xb7 %s", cat, name);
-            else
-                snprintf(desc, sizeof desc, "%s", name);
-            font_draw_line(a->font_body, key, strlen(key),
-                           key_x, y + font_ascent(a->font_body), a->fg_link);
-            font_draw_line(a->font_body, desc, strlen(desc),
-                           desc_x, y + font_ascent(a->font_body), a->fg);
-            y += rh;
-        }
-    }
-
-    SDL_RenderSetClipRect(a->renderer, NULL);
-
-    /* Hint at the bottom. */
-    const char* hint = "Esc to close  ·  \xe2\x86\x91/\xe2\x86\x93 scroll";
-    font_draw_line(a->font_body, hint, strlen(hint),
-                   box_x + 16, box_y + box_h - 8 - rh + font_ascent(a->font_body),
-                   a->fg_muted);
-}
+/* The help overlay was merged into the keybindings overlay (F1 + Ctrl+K
+ * both open it). The static HELP_ROWS reference table lived here and is
+ * gone — every shortcut is now derivable from ACTIONS + current_keystr_for. */
 
 /* ----------------------------- user keybindings ------------------------- */
 
@@ -7534,11 +7438,15 @@ static void persist_vault_path(App* a) { settings_persist(a); }
 static void recent_dirs_push(App* a, const char* dir)
 {
     if (!dir || !*dir) return;
+    /* Normalize once up front so the dedup check below sees the same
+     * slash style as previously-stored entries. */
+    char nd[512];
+    snprintf(nd, sizeof nd, "%s", dir);
+    path_to_forward(nd);
     int max = (int)(sizeof a->recent_dirs / sizeof a->recent_dirs[0]);
-    /* Remove an existing entry so it floats to the top. */
     int found = -1;
     for (int i = 0; i < a->recent_dirs_count; ++i) {
-        if (strcmp(a->recent_dirs[i], dir) == 0) { found = i; break; }
+        if (strcmp(a->recent_dirs[i], nd) == 0) { found = i; break; }
     }
     if (found >= 0) {
         for (int i = found; i + 1 < a->recent_dirs_count; ++i)
@@ -7546,12 +7454,11 @@ static void recent_dirs_push(App* a, const char* dir)
                      "%s", a->recent_dirs[i + 1]);
         a->recent_dirs_count--;
     }
-    /* Shift everyone down by one and put new entry at index 0. */
     int n = a->recent_dirs_count < max - 1 ? a->recent_dirs_count : max - 1;
     for (int i = n; i > 0; --i)
         snprintf(a->recent_dirs[i], sizeof a->recent_dirs[i],
                  "%s", a->recent_dirs[i - 1]);
-    snprintf(a->recent_dirs[0], sizeof a->recent_dirs[0], "%s", dir);
+    snprintf(a->recent_dirs[0], sizeof a->recent_dirs[0], "%s", nd);
     if (a->recent_dirs_count < max) a->recent_dirs_count++;
 }
 
@@ -7569,7 +7476,17 @@ static void recent_dirs_load(App* a)
         if (strcmp(s, "::COMPUTER::") == 0) continue;
         snprintf(a->recent_dirs[a->recent_dirs_count],
                  sizeof a->recent_dirs[0], "%s", s);
-        a->recent_dirs_count++;
+        path_to_forward(a->recent_dirs[a->recent_dirs_count]);
+        /* De-dup against entries already loaded — if the stored list
+         * contained mixed-slash duplicates, normalization turns them into
+         * exact matches and we'd otherwise show the same path twice. */
+        bool dup = false;
+        for (int j = 0; j < a->recent_dirs_count; ++j)
+            if (strcmp(a->recent_dirs[j],
+                       a->recent_dirs[a->recent_dirs_count]) == 0) {
+                dup = true; break;
+            }
+        if (!dup) a->recent_dirs_count++;
     }
 }
 
@@ -9781,8 +9698,8 @@ static void render_keybind(App* a)
     /* Title */
     {
         const char* title = a->keybind_capturing
-            ? "Keybindings \xe2\x80\x94 press a key combo (Esc to cancel)"
-            : "Keybindings";
+            ? "Help & Keybindings \xe2\x80\x94 press a key combo (Esc to cancel)"
+            : "Help & Keybindings";
         font_draw_line(a->font_body, title, strlen(title),
                        box_x + 16, box_y + 10 + font_ascent(a->font_body),
                        a->fg_link);
@@ -10184,7 +10101,6 @@ static void render_wiki_complete (App* a);
 static void render_context_menu  (App* a);
 static void render_recent_submenu(App* a);
 static void render_settings      (App* a);
-static void render_help          (App* a);
 static void render_keybind       (App* a);
 static void render_picker        (App* a);
 static void render_vsearch       (App* a);
@@ -10325,7 +10241,6 @@ static void app_render(App* a)
     render_backlinks(a);
     render_tags(a);
     render_template_picker(a);
-    render_help(a);
     render_dnd_ghost(a);
     render_status(a);
     /* Resize badge / link tooltip / confirm + text-input modals render
@@ -10511,27 +10426,6 @@ static void ensure_cursor_visible(App* a)
         if (cur_x + slop > a->scroll_x + vw)    a->scroll_x = cur_x + slop - vw;
         if (a->scroll_x < 0)                    a->scroll_x = 0;
     }
-}
-
-static void open_file_picker(App* a)
-{
-    if (!confirm_discard(a)) return;
-    char* picked = vault_open_dialog(a->window);
-    if (!picked) return;
-    load_note(a, picked);
-    if (a->vault.selected < 0) {
-        char dir[1024];
-        snprintf(dir, sizeof dir, "%s", picked);
-        char* slash = strrchr(dir, '/');
-        char* bs    = strrchr(dir, '\\');
-        char* last  = slash > bs ? slash : bs;
-        if (last) *last = 0;
-        if (dir[0]) {
-            vault_scan(&a->vault, dir);
-            a->vault.selected = vault_index_of(&a->vault, picked);
-        }
-    }
-    free(picked);
 }
 
 /* Detect majority line ending in the buffer (LF count vs CRLF count).
@@ -12559,7 +12453,7 @@ static void action_open_dir      (App* a) {
     int n = vault_scan(&a->vault, dir);
     recent_dirs_push(a, dir);
     char msg[300];
-    snprintf(msg, sizeof msg, "vault: %s (%d note%s)",
+    snprintf(msg, sizeof msg, "vault: %.250s (%d note%s)",
              dir, n, n == 1 ? "" : "s");
     app_notify(a, msg);
     persist_vault_path(a);
@@ -12632,7 +12526,6 @@ static void action_follow_link(App* a) {
     follow_wiki_target(a, name);
 }
 static void action_settings  (App* a) { settings_open(a); }
-static void action_help      (App* a) { help_open(a); }
 static void action_keybindings(App* a) { keybind_open(a); }
 static void action_colors    (App* a) { picker_open(a);  }
 static void action_about     (App* a) {
@@ -13022,7 +12915,6 @@ static const ActionEntry ACTIONS[] = {
     { "settings",        "App",        action_settings        },
     { "keybindings",     "App",        action_keybindings     },
     { "colors",          "App",        action_colors          },
-    { "help",            "App",        action_help            },
     { NULL, NULL, NULL },
 };
 
@@ -13060,8 +12952,7 @@ static const struct { const char* keystr; const char* action; } DEFAULT_KEYS[] =
     { "ctrl+return",  "follow_link"    },
     { "ctrl+,",       "settings"       },
     { "f10",          "settings"       },
-    { "f1",           "help"           },
-    { "ctrl+k",       "keybindings"    },
+    { "f1",           "keybindings"    },
     { "ctrl+shift+t", "colors"         },
     { NULL, NULL },
 };
@@ -13702,7 +13593,6 @@ static void app_event(App* a, const SDL_Event* e)
                     if (a->picker_active)    picker_close(a);
                     if (a->keybind_active)   keybind_close(a);
                     if (a->settings_active)  settings_close(a);
-                    if (a->help_active)      help_close(a);
                     a->menu_open = mi;
                     SDL_Rect r = a->menu_rects[mi];
                     ctx_menu_open_menu(a, mi, r.x, r.y + r.h + 2);
@@ -13715,7 +13605,7 @@ static void app_event(App* a, const SDL_Event* e)
                 !a->backlinks_active && !a->tags_active && !a->tpl_active &&
                 !a->outline_active   && !a->vsearch_active &&
                 !a->picker_active    && !a->keybind_active &&
-                !a->settings_active  && !a->help_active   &&
+                !a->settings_active  &&
                 !a->ctx_menu_active)
             {
                 int btn = chrome_hit_test(a, e->button.x, e->button.y);
@@ -13998,16 +13888,6 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 break;
             }
-            /* Help overlay: click outside closes it. */
-            if (a->help_active && e->button.button == SDL_BUTTON_LEFT) {
-                int box_w = 580;
-                int box_x = (a->win_w - box_w) / 2;
-                if (e->button.x < box_x ||
-                    e->button.x >= box_x + box_w) {
-                    help_close(a);
-                    break;
-                }
-            }
             /* Right-click in the sidebar opens the sidebar context menu;
              * right-click in the editor (edit mode) opens the formatting
              * menu. Anywhere else closes any open menu. */
@@ -14019,6 +13899,13 @@ static void app_event(App* a, const SDL_Event* e)
                            e->button.x >= doc_x_left(a) &&
                            e->button.x <  doc_x_right(a)) {
                     ctx_menu_open_editor(a, e->button.x, e->button.y);
+                } else if (!a->edit_mode &&
+                           e->button.x >= doc_x_left(a) &&
+                           e->button.x <  doc_x_right(a) &&
+                           a->preview_sel_start >= 0 &&
+                           a->preview_sel_end != (size_t)a->preview_sel_start) {
+                    /* Preview-mode right-click on a selection → Copy menu. */
+                    ctx_menu_open_preview(a, e->button.x, e->button.y);
                 } else {
                     ctx_menu_close(a);
                 }
@@ -14268,12 +14155,6 @@ static void app_event(App* a, const SDL_Event* e)
             if (a->cmdp_active) {
                 a->cmdp_scroll -= e->wheel.y * cmdp_row_h(a) * 2;
                 cmdp_clamp_scroll(a);
-                break;
-            }
-            /* Help: wheel scrolls the list. */
-            if (a->help_active) {
-                a->help_scroll -= e->wheel.y * 40;
-                if (a->help_scroll < 0) a->help_scroll = 0;
                 break;
             }
             /* Keybindings: wheel scrolls the list. Clamp to content height
@@ -14802,20 +14683,6 @@ static void app_event(App* a, const SDL_Event* e)
                 }
             }
 
-            /* Help overlay swallows nav keys while open. */
-            if (a->help_active) {
-                if (k == SDLK_ESCAPE)   { help_close(a); break; }
-                if (k == SDLK_DOWN || k == SDLK_PAGEDOWN) {
-                    a->help_scroll += 40; break;
-                }
-                if (k == SDLK_UP || k == SDLK_PAGEUP) {
-                    a->help_scroll -= 40;
-                    if (a->help_scroll < 0) a->help_scroll = 0;
-                    break;
-                }
-                break;     /* swallow everything else */
-            }
-
             /* Color picker overlay swallows nav keys while open. */
             if (a->picker_active) {
                 if (k == SDLK_ESCAPE) { picker_close(a); break; }
@@ -14973,12 +14840,13 @@ static void app_event(App* a, const SDL_Event* e)
                 }
             }
 
-            /* Esc with active search → close search. Otherwise mode-dep. */
+            /* Esc dismisses any open overlay/menu, exits edit mode, or
+             * is a no-op in preview. Quitting the app is Ctrl+Q only —
+             * Esc never closes the window. */
             if (k == SDLK_ESCAPE) {
-                if (a->ctx_menu_active) { ctx_menu_close(a); break; }
-                if (a->search_mode != 0) { search_close(a); break; }
-                if (a->edit_mode) enter_preview_mode(a);
-                else if (confirm_discard(a)) a->running = false;
+                if (a->ctx_menu_active)  { ctx_menu_close(a); break; }
+                if (a->search_mode != 0) { search_close(a);   break; }
+                if (a->edit_mode)        { enter_preview_mode(a); }
                 break;
             }
 

@@ -13,3 +13,7 @@ compile_commands.json
 /*.png
 /*.log
 /bash.exe.stackdump
+
+# Per-vault runtime state (sidebar width, scroll position, etc.).
+.downsee.state
+**/.downsee.state

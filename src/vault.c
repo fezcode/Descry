@@ -131,6 +131,9 @@ int vault_scan(Vault* v, const char* dir)
     v->selected = -1;
     free(v->dir);
     v->dir = strdup(dir);
+    /* Normalize backslashes to forward slashes so display + comparisons
+     * are consistent regardless of where the path came from. */
+    if (v->dir) for (char* p = v->dir; *p; ++p) if (*p == '\\') *p = '/';
 
     scan_recursive(v, dir, 0);
     qsort(v->items, v->count, sizeof(VaultItem), item_cmp_path);

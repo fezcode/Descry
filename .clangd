@@ -1,0 +1,22 @@
+# clangd config for Downsee.
+#
+# We compile with MSYS2 mingw64 gcc; clangd's default config on Windows can't
+# see MinGW's POSIX headers (<strings.h>, <dirent.h>, strncasecmp, S_ISDIR).
+# Adding the mingw64/include directory as an -isystem path resolves them.
+#
+# Important: do NOT add gcc's *internal* include dirs
+# (lib/gcc/x86_64-w64-mingw32/15.2.0/include and include-fixed). Those carry
+# gcc's compiler-builtin intrinsic headers (x86intrin.h etc.) which collide
+# with clangd's bundled clang builtins (e.g. __rdtsc redefinition).
+#
+# If you move MSYS2, edit the path below.
+
+CompileFlags:
+  CompilationDatabase: build
+  Add: [-isystem, D:/Apps/msys64/mingw64/include, -D__MINGW32__, -D__MINGW64__]
+
+Diagnostics:
+  Suppress:
+    # MSVC-only deprecation noise around POSIX names. Standard under MinGW.
+    - deprecated-declarations
+    - unused-includes
