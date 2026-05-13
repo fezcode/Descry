@@ -9982,6 +9982,10 @@ static int save_note_with_eol(App* a, const char* path)
     fclose(f);
     a->buf.saved_head = a->buf.op_head;
     a->buf.dirty = false;
+    /* Match buffer_save: break coalescing so the next keystroke pushes
+     * a fresh op instead of extending the pre-save one. Without this
+     * op_head never moves past saved_head and dirty stays false. */
+    a->buf.coalesce = OP_NONE;
     return 0;
 }
 
