@@ -153,6 +153,12 @@ typedef struct {
     int      cmdp_entry_count;
     int      cmdp_entry_cap;
 
+    /* Recent vault directories — most-recent first, capped at 5. Loaded
+     * from settings.lua at boot, written back on every vault change.
+     * Surfaced in the File menu and quickly switchable. */
+    char     recent_dirs[5][512];
+    int      recent_dirs_count;
+
     /* Plugins overlay — flat list, one row per loaded plugin, expandable
      * to show its registered actions. */
     bool     plugins_active;
@@ -248,6 +254,33 @@ typedef struct {
      * Synchronous like confirm_discard: app_text_modal pumps events until
      * the user hits OK or Cancel. tinput_text holds the live input. */
     bool     tinput_active;
+    /* When true the modal acts as an in-app folder picker. The input
+     * field becomes a path bar (Enter navigates), the OK button reads
+     * "Use this folder", and the caller gets back tinput_dir. The
+     * `tinput_path_err` flag toggles a red border + error label when
+     * the typed path doesn't resolve. `tinput_err_text` holds the
+     * specific path that failed so the error label can quote it. */
+    bool     tinput_pick_dir;
+    bool     tinput_path_err;
+    char     tinput_err_text[260];
+    /* Inline right-click context menu inside the modal. Holds the row
+     * the menu was opened on plus its screen position. Click target
+     * becomes the rename target. */
+    bool     tinput_ctx_active;
+    int      tinput_ctx_row;
+    int      tinput_ctx_x, tinput_ctx_y;
+    /* Rename popup: a small modal overlay on top of the picker with its
+     * own input field and OK/Cancel buttons. Independent state so the
+     * picker's path bar isn't touched while the popup is open. */
+    bool     tinput_renpop_active;
+    char     tinput_renpop_old[260];   /* original basename               */
+    char     tinput_renpop_text[260];  /* live edit buffer                */
+    int      tinput_renpop_len;
+    int      tinput_renpop_cursor;
+    int      tinput_renpop_choice;     /* -1 pending, 0 = OK, 1 = Cancel  */
+    int      tinput_renpop_hover;      /* 0 = OK, 1 = Cancel, -1 = none   */
+    bool     tinput_renpop_err;
+    char     tinput_renpop_err_text[260];
     int      tinput_choice;          /* -1 pending, 0 = OK, 1 = Cancel  */
     int      tinput_hover;           /* 0 = OK, 1 = Cancel, -1 = none   */
     char     tinput_title[64];
@@ -264,6 +297,11 @@ typedef struct {
     int      tinput_files_cap;
     int      tinput_files_hover;     /* row index, -1 = none */
     int      tinput_files_scroll;    /* px scroll offset */
+    /* "Selected" row (single-click = select, double-click = navigate).
+     * The selection drives both the visible highlight and the OK button:
+     * "Use this folder" with a folder selected commits that folder,
+     * otherwise it commits the current dir. -1 = no selection. */
+    int      tinput_files_selected;
 
     /* Outline panel resize handle drag state. */
     bool     resizing_outline;
@@ -272,7 +310,7 @@ typedef struct {
      * and the y-offset within the thumb when the drag started. */
     enum { SB_NONE = 0, SB_DOC, SB_KEYBIND, SB_OUTLINE_PANEL,
            SB_VSEARCH, SB_OUTLINE_LIST, SB_BACKLINKS, SB_TAGS, SB_PICKER,
-           SB_CMDP }
+           SB_CMDP, SB_TINPUT }
                                                               sb_drag;
     int      sb_drag_offset;
 
@@ -346,6 +384,16 @@ typedef struct {
     float    ctx_menu_row_t[16];
     /* Which kind of context menu is open: 0 = sidebar item, 1 = editor. */
     int      ctx_menu_kind;
+
+    /* Recent-vaults submenu — opens to the right of the File menu when
+     * the user hovers/clicks the "Recent vaults" row. Always lists the
+     * entries from app->recent_dirs; doesn't need its own kind enum. */
+    bool     ctx_submenu_active;
+    int      ctx_submenu_x;
+    int      ctx_submenu_y;
+    int      ctx_submenu_hover;        /* hovered submenu row, -1 if none  */
+    float    ctx_submenu_open_t;
+    float    ctx_submenu_row_t[16];
 
     /* Frontmatter (YAML-ish `---` block at top of buffer). Populated by
      * reparse_preview; consumed by render_preview (properties pill at top),

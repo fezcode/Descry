@@ -9,6 +9,7 @@
 #ifdef _WIN32
   #include <windows.h>
   #include <commdlg.h>
+  #include <shlobj.h>
   #include <SDL_syswm.h>
 #endif
 
@@ -200,6 +201,46 @@ char* vault_open_dialog(SDL_Window* parent)
     return p;
 #else
     (void)parent;
+    return NULL;
+#endif
+}
+
+char* vault_pick_dir(SDL_Window* parent, const char* title)
+{
+#if defined(_WIN32)
+    BROWSEINFOA bi = { 0 };
+    bi.hwndOwner   = wm_hwnd(parent);
+    bi.lpszTitle   = title ? title : "Choose folder";
+    bi.ulFlags     = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+                   | BIF_EDITBOX;
+    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    if (!pidl) return NULL;
+    char path[MAX_PATH] = {0};
+    BOOL ok = SHGetPathFromIDListA(pidl, path);
+    CoTaskMemFree(pidl);
+    if (!ok) return NULL;
+    /* Forward-slash form is what the rest of the app uses internally. */
+    for (char* p = path; *p; ++p) if (*p == '\\') *p = '/';
+    return strdup(path);
+#elif defined(__APPLE__)
+    (void)parent;
+    char cmd[512];
+    snprintf(cmd, sizeof cmd,
+        "osascript -e 'POSIX path of (choose folder with prompt \"%s\")' 2>/dev/null",
+        title ? title : "Choose folder");
+    return run_popen_line(cmd);
+#elif defined(__linux__) || defined(__unix__)
+    (void)parent;
+    char cmd[512];
+    snprintf(cmd, sizeof cmd,
+        "zenity --file-selection --directory --title=\"%s\" 2>/dev/null",
+        title ? title : "Choose folder");
+    char* p = run_popen_line(cmd);
+    if (!p) p = run_popen_line(
+        "kdialog --getexistingdirectory '' 2>/dev/null");
+    return p;
+#else
+    (void)parent; (void)title;
     return NULL;
 #endif
 }

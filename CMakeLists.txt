@@ -54,9 +54,23 @@ target_link_libraries(downsee PRIVATE
 )
 if(WIN32)
   target_link_libraries(downsee PRIVATE comdlg32)
-endif()
+  # Embed the multi-size .ico into the exe so Explorer + taskbar pick it
+  # up automatically. CMake's RC language drives windres on MinGW; the
+  # .rc references downsee.ico relative to its own directory.
+  enable_language(RC)
+  target_sources(downsee PRIVATE resources/downsee.rc)
 
-# Stage data/ next to the executable so the binary can find init.lua
-add_custom_command(TARGET downsee POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:downsee>/data)
+  # Bundle the MinGW64 runtime DLLs (SDL2, freetype, harfbuzz, etc. and
+  # all their transitive deps) next to the exe so the build dir is
+  # self-contained — no PATH dependency on D:/Apps/msys64/mingw64/bin.
+  # See cmake/CopyRuntimeDeps.cmake for the actual copy.
+  get_filename_component(MINGW_BIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+  add_custom_command(TARGET downsee POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+      "-DEXE=$<TARGET_FILE:downsee>"
+      "-DOUT_DIR=$<TARGET_FILE_DIR:downsee>"
+      "-DMINGW_BIN=${MINGW_BIN_DIR}"
+      -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDeps.cmake"
+    COMMENT "Bundling MinGW runtime DLLs"
+    VERBATIM)
+endif()

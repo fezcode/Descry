@@ -35,6 +35,10 @@ int    vault_index_of(const Vault* v, const char* path);
  * Caller must free(). Currently Windows-only via comdlg32. */
 char*  vault_open_dialog(SDL_Window* parent);
 
+/* Open a native folder picker. Returns malloc'd absolute path on success,
+ * NULL on cancel. Used to switch the vault root at runtime. */
+char*  vault_pick_dir(SDL_Window* parent, const char* title);
+
 /* Native Save-As dialog. Pre-fills filename with `default_name` (just the
  * basename, not a full path). Returns malloc'd path on success, else NULL. */
 char*  vault_save_dialog(SDL_Window* parent, const char* default_name);

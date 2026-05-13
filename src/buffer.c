@@ -147,6 +147,10 @@ int buffer_save(Buffer* b, const char* path)
     if (w != b->len) return -1;
     b->saved_head = b->op_head;
     b->dirty = false;
+    /* Break coalescing so the next keystroke pushes a fresh op instead
+     * of extending the pre-save op in place. Without this, op_head
+     * never moves past saved_head and dirty stays false forever. */
+    b->coalesce = OP_NONE;
     return 0;
 }
 

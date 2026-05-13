@@ -15,10 +15,16 @@
 #include <dirent.h>
 #include <math.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+
+/* Pseudo-dir surfaced by the in-app folder picker for "Computer" / drive
+ * enumeration. Defined up here so tinput_hit_test (which lives ahead of
+ * the modal helpers) can reference it without a forward decl. */
+#define COMPUTER_SENTINEL "::COMPUTER::"
 
 #ifdef _WIN32
   #include <windows.h>
@@ -27,7 +33,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.1.0"
+#define DOWNSEE_VERSION "0.67.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -914,6 +920,28 @@ static int load_note(App* a, const char* path)
 /* Forward decl: confirm_discard's event pump calls app_render. */
 static void app_render(App* a);
 static int SDLCALL resize_event_watch(void* userdata, SDL_Event* e);
+static int  settings_persist(App* a);
+static int  overlay_list_scrollbar_geom(int box_x, int box_w,
+                                        int rows_top, int rows_bot,
+                                        int content_h, int scroll,
+                                        SDL_Rect* track_out, SDL_Rect* thumb_out);
+static void overlay_scrollbar_draw(App* a, const SDL_Rect* track,
+                                   const SDL_Rect* thumb, bool dragging);
+static bool overlay_scrollbar_handle_click(App* a,
+                                           int btn_x, int btn_y,
+                                           const SDL_Rect* track,
+                                           const SDL_Rect* thumb,
+                                           int sb_kind,
+                                           int* scroll, int content_h,
+                                           int step_px);
+static void sb_inner_track(const SDL_Rect* track, SDL_Rect* inner);
+static int  scroll_from_thumb_drag(int mouse_y, int inner_y, int inner_h,
+                                   int thumb_h, int drag_offset, int max_sc);
+static void recent_dirs_push(App* a, const char* dir);
+static void recent_dirs_load(App* a);
+static int  filesystem_delete(const char* path, int is_dir);
+static bool confirm_action(App* a, const char* title, const char* msg,
+                           const char* lab0, const char* lab1);
 
 /* Count '\n'-separated message lines (treats empty msg as 1). */
 static int confirm_msg_line_count(const App* a)
@@ -948,20 +976,34 @@ static int confirm_btn_y(const App* a)
     return box.y + box.h - btn_h - 20;
 }
 
+/* Width of a confirm-modal button: text + horizontal pad, with a sane
+ * minimum so single-letter labels still look like a button. Lab0/lab1
+ * size independently so "Choose folder..." doesn't collide with "Skip
+ * for now". */
+static int confirm_btn_w(const App* a, const char* label)
+{
+    int pad = 28;
+    int min_w = 100;
+    int w = font_measure(a->font_body, label, strlen(label)) + pad;
+    return w < min_w ? min_w : w;
+}
+
 static int confirm_hit_test(const App* a, int mx, int my)
 {
     if (!a->confirm_active) return -1;
     SDL_Rect box = confirm_box_rect(a);
     int sz_y  = font_line_height(a->font_body);
     int btn_h = sz_y + 16;
-    int btn_w = 120;
+    const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
+    const char* lab1 = a->confirm_btn1_label[0] ? a->confirm_btn1_label : "Cancel";
+    int w1 = confirm_btn_w(a, lab1);
+    int w0 = lab0 ? confirm_btn_w(a, lab0) : 0;
     int btn_y = confirm_btn_y(a);
-    int b1_x  = box.x + box.w - btn_w - 16;       /* right button */
-    int b0_x  = b1_x - btn_w - 12;                /* left  button */
+    int b1_x  = box.x + box.w - w1 - 16;
+    int b0_x  = b1_x - w0 - 12;
     if (my < btn_y || my >= btn_y + btn_h) return -1;
-    if (a->confirm_btn0_label[0] &&
-        mx >= b0_x && mx < b0_x + btn_w) return 0;
-    if (mx >= b1_x && mx < b1_x + btn_w) return 1;
+    if (lab0 && mx >= b0_x && mx < b0_x + w0) return 0;
+    if (mx >= b1_x && mx < b1_x + w1) return 1;
     return -1;
 }
 
@@ -975,18 +1017,24 @@ static void render_confirm_modal(App* a)
 
     int sz_y = font_line_height(a->font_body);
     int btn_h = sz_y + 16;
-    int btn_w = 120;
 
     /* Row anchors (top of each line). Must match the spacing assumed by
      * confirm_box_rect: pad / title / gap14 / msg / gap24 / hint / gap12
      * / btn / pad. font_draw_line wants a baseline, so we add font_ascent
-     * per row. */
+     * per row. Buttons size to their labels so "Choose folder..." style
+     * prompts don't clip. */
     int title_top = box.y + 20;
     int msg_top   = title_top + sz_y + 14;
     int btn_y     = confirm_btn_y(a);
     int hint_top  = btn_y - 12 - sz_y;
-    int b1_x  = box.x + box.w - btn_w - 16;
-    int b0_x  = b1_x - btn_w - 12;
+    const char* _lab0_for_w = a->confirm_btn0_label[0]
+                              ? a->confirm_btn0_label : NULL;
+    const char* _lab1_for_w = a->confirm_btn1_label[0]
+                              ? a->confirm_btn1_label : "Cancel";
+    int w1 = confirm_btn_w(a, _lab1_for_w);
+    int w0 = _lab0_for_w ? confirm_btn_w(a, _lab0_for_w) : 0;
+    int b1_x  = box.x + box.w - w1 - 16;
+    int b0_x  = b1_x - w0 - 12;
 
     /* Title */
     font_draw_line(a->font_body, a->confirm_title, strlen(a->confirm_title),
@@ -1018,21 +1066,21 @@ static void render_confirm_modal(App* a)
     /* Btn0 — neutral fill, hover brightens. Pill-shaped. */
     if (lab0) {
         bool hover = (a->confirm_hover == 0);
-        SDL_Rect r = { b0_x, btn_y, btn_w, btn_h };
+        SDL_Rect r = { b0_x, btn_y, w0, btn_h };
         SDL_SetRenderDrawColor(a->renderer,
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
         int lw = font_measure(a->font_body, lab0, strlen(lab0));
         font_draw_line(a->font_body, lab0, strlen(lab0),
-                       b0_x + (btn_w - lw) / 2,
+                       b0_x + (w0 - lw) / 2,
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
                        a->fg);
     }
     /* Btn1 — default action, accent fill. */
     {
         bool hover = (a->confirm_hover == 1);
-        SDL_Rect r = { b1_x, btn_y, btn_w, btn_h };
+        SDL_Rect r = { b1_x, btn_y, w1, btn_h };
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
         fill_rrect(a->renderer, r, btn_h / 2);
@@ -1041,7 +1089,7 @@ static void render_confirm_modal(App* a)
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
         font_draw_line(a->font_body, lab1, strlen(lab1),
-                       b1_x + (btn_w - lw) / 2,
+                       b1_x + (w1 - lw) / 2,
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
                        tc);
     }
@@ -1139,8 +1187,19 @@ static int tinput_list_top  (App* a)
     SDL_Rect box = tinput_box_rect(a);
     int sz_y = font_line_height(a->font_body);
     int input_h = sz_y + 16;
-    int dir_y = box.y + 20 + sz_y + 8 + input_h + 10;
+    int in_y    = box.y + 20 + sz_y + 8;
+    int dir_y   = in_y + input_h + 8;
     return dir_y + sz_y + 8;
+}
+
+static int tinput_list_bot  (App* a)
+{
+    SDL_Rect box = tinput_box_rect(a);
+    int sz_y  = font_line_height(a->font_body);
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 16;
+    int hint_h = sz_y + 6;
+    return btn_y - hint_h - 8;
 }
 
 static int tinput_hit_test(App* a, int mx, int my)
@@ -1148,13 +1207,27 @@ static int tinput_hit_test(App* a, int mx, int my)
     if (!a->tinput_active) return -1;
     SDL_Rect box = tinput_box_rect(a);
     int btn_h = font_line_height(a->font_body) + 16;
-    int btn_w = 120;
     int btn_y = box.y + box.h - btn_h - 16;
-    int b1_x  = box.x + box.w - btn_w - 16;
-    int b0_x  = b1_x - btn_w - 12;
+    /* Match render's label-sized buttons. */
+    const char* lab_ok = a->tinput_pick_dir ? "Use this folder" : "Save";
+    const char* lab_cn = "Cancel";
+    const char* lab_nf = "New Folder";
+    int btn_pad = 28, min_w = 120;
+    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_nf = font_measure(a->font_body, lab_nf, strlen(lab_nf)) + btn_pad;
+    if (w_ok < min_w) w_ok = min_w;
+    if (w_cn < min_w) w_cn = min_w;
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_cn - 12;
+    int b_nf_x = box.x + 16;     /* leftmost; only present in pick_dir mode */
     if (my >= btn_y && my < btn_y + btn_h) {
-        if (mx >= b0_x && mx < b0_x + btn_w) return 1;     /* Cancel */
-        if (mx >= b1_x && mx < b1_x + btn_w) return 0;     /* OK     */
+        bool nf_visible = a->tinput_pick_dir &&
+            strcmp(a->tinput_dir, COMPUTER_SENTINEL) != 0 &&
+            a->tinput_dir[0];
+        if (nf_visible && mx >= b_nf_x && mx < b_nf_x + w_nf) return 2;
+        if (mx >= b0_x && mx < b0_x + w_cn) return 1;
+        if (mx >= b1_x && mx < b1_x + w_ok) return 0;
     }
     return -1;
 }
@@ -1164,10 +1237,8 @@ static int tinput_files_row_at(App* a, int mx, int my)
 {
     if (!a->tinput_active || a->tinput_files_count == 0) return -1;
     SDL_Rect box = tinput_box_rect(a);
-    int btn_h = font_line_height(a->font_body) + 16;
-    int btn_y = box.y + box.h - btn_h - 16;
     int top = tinput_list_top(a);
-    int bot = btn_y - 12;
+    int bot = tinput_list_bot(a);
     if (mx < box.x + 16 || mx >= box.x + box.w - 16) return -1;
     if (my < top || my >= bot) return -1;
     int rh = tinput_list_row_h(a);
@@ -1181,6 +1252,37 @@ static void tinput_files_clear(App* a)
 {
     for (int i = 0; i < a->tinput_files_count; ++i) free(a->tinput_files[i]);
     a->tinput_files_count = 0;
+}
+
+/* Find the row index whose basename matches `name`, or -1 if absent.
+ * Used to highlight the freshly-created / renamed folder. */
+static int tinput_files_find(App* a, const char* name)
+{
+    if (!name) return -1;
+    for (int i = 0; i < a->tinput_files_count; ++i) {
+        if (a->tinput_files[i] && strcmp(a->tinput_files[i], name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/* Scroll the file list so `row` is in view (clamps to valid range). */
+static void tinput_files_ensure_visible(App* a, int row)
+{
+    if (row < 0) return;
+    int rh = tinput_list_row_h(a);
+    int top = tinput_list_top(a);
+    int bot = tinput_list_bot(a);
+    int row_y = row * rh;
+    int max_sc = a->tinput_files_count * rh - (bot - top);
+    if (max_sc < 0) max_sc = 0;
+    if (row_y < a->tinput_files_scroll) a->tinput_files_scroll = row_y;
+    int row_bot = row_y + rh;
+    int view_h  = bot - top;
+    if (row_bot > a->tinput_files_scroll + view_h)
+        a->tinput_files_scroll = row_bot - view_h;
+    if (a->tinput_files_scroll > max_sc) a->tinput_files_scroll = max_sc;
+    if (a->tinput_files_scroll < 0) a->tinput_files_scroll = 0;
 }
 
 /* Reserve room for one more entry in tinput_files / tinput_files_isdir. */
@@ -1209,13 +1311,78 @@ static bool tinput_is_root(const char* dir)
     return false;
 }
 
+/* "::COMPUTER::" sentinel — when tinput_dir holds this, the file list
+ * shows available drives (Windows) or filesystem roots (POSIX) instead
+ * of a regular directory listing. Picked when navigating up from the
+ * root of a drive, or when the user clears the path bar. */
+/* Join `base` + "/" + `leaf`, stripping trailing separators from `base`
+ * and leading ones from `leaf` so we never produce paths like "D://X"
+ * (the double slash makes opendir / rmdir / rename fail on Windows). */
+static void path_join_safe(char* out, size_t cap,
+                           const char* base, const char* leaf)
+{
+    if (!base) base = "";
+    if (!leaf) leaf = "";
+    size_t bn = strlen(base);
+    while (bn > 0 && (base[bn - 1] == '/' || base[bn - 1] == '\\')) bn--;
+    while (*leaf == '/' || *leaf == '\\') leaf++;
+    if (bn == 0) snprintf(out, cap, "/%s", leaf);
+    else         snprintf(out, cap, "%.*s/%s", (int)bn, base, leaf);
+}
+
+static bool path_dir_exists(const char* p)
+{
+    if (!p || !*p) return false;
+    struct stat st;
+    if (stat(p, &st) != 0) return false;
+    return (st.st_mode & S_IFMT) == S_IFDIR;
+}
+
+#ifdef _WIN32
+static void tinput_emit_drives(App* a)
+{
+    DWORD mask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(mask & (1u << i))) continue;
+        char drv[8];
+        snprintf(drv, sizeof drv, "%c:/", 'A' + i);
+        tinput_files_reserve(a);
+        a->tinput_files[a->tinput_files_count]       = strdup(drv);
+        a->tinput_files_isdir[a->tinput_files_count] = true;
+        a->tinput_files_count++;
+    }
+}
+#else
+static void tinput_emit_drives(App* a)
+{
+    /* POSIX: surface common roots so the user can navigate from `/`,
+     * `/home`, `/media`, `/mnt`, `/Volumes` (macOS). */
+    static const char* candidates[] = {
+        "/", "/home", "/media", "/mnt", "/Volumes",
+    };
+    for (size_t i = 0; i < sizeof candidates / sizeof candidates[0]; ++i) {
+        if (!path_dir_exists(candidates[i])) continue;
+        tinput_files_reserve(a);
+        a->tinput_files[a->tinput_files_count]       = strdup(candidates[i]);
+        a->tinput_files_isdir[a->tinput_files_count] = true;
+        a->tinput_files_count++;
+    }
+}
+#endif
+
 /* Scan a directory; collect basenames into tinput_files[] with a parallel
  * is-dir flag. Directories sort first (A-Z), then files (A-Z). A `..`
- * synthetic entry is prepended unless the dir is a filesystem root. */
+ * synthetic entry is prepended unless the dir is a filesystem root.
+ * Special: the COMPUTER_SENTINEL pseudo-dir lists drives (Windows) or
+ * common roots (POSIX). */
 static void tinput_files_scan(App* a, const char* dir)
 {
     tinput_files_clear(a);
     if (!dir || !*dir) return;
+    if (strcmp(dir, COMPUTER_SENTINEL) == 0) {
+        tinput_emit_drives(a);
+        return;
+    }
     DIR* d = opendir(dir);
     if (!d) return;
     struct dirent* ent;
@@ -1257,9 +1424,12 @@ static void tinput_files_scan(App* a, const char* dir)
         a->tinput_files[j + 1]       = k_name;
         a->tinput_files_isdir[j + 1] = k_dir;
     }
-    /* Prepend a synthetic ".." entry so the user can navigate up, unless
-     * we're already at a filesystem root. */
-    if (!tinput_is_root(dir)) {
+    /* Prepend a synthetic ".." entry so the user can always navigate up.
+     * The COMPUTER view skips this since there's nowhere above it; from
+     * any other folder (including a drive root like "C:\") clicking ".."
+     * routes through tinput_navigate, which sends drive roots to the
+     * COMPUTER view so the user can switch drives. */
+    if (strcmp(dir, COMPUTER_SENTINEL) != 0) {
         tinput_files_reserve(a);
         for (int i = a->tinput_files_count; i > 0; --i) {
             a->tinput_files[i]       = a->tinput_files[i - 1];
@@ -1302,15 +1472,59 @@ static void tinput_path_join(const char* base, const char* leaf,
 }
 
 /* Navigate the file picker to `newdir` (or up via leaf=".."). Updates
- * tinput_dir, resets scroll/hover, re-scans. */
+ * tinput_dir, resets scroll/hover, re-scans. Goes to the COMPUTER view
+ * when navigating up from a drive root, so the user always has a way
+ * to switch drives without typing. */
 static void tinput_navigate(App* a, const char* leaf)
 {
+    /* Going up from a drive root or from COMPUTER itself is a no-op for
+     * the joiner, so detect that and switch to drive enumeration. */
+    if (strcmp(leaf, "..") == 0 &&
+        (tinput_is_root(a->tinput_dir) ||
+         strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0))
+    {
+        snprintf(a->tinput_dir, sizeof a->tinput_dir, COMPUTER_SENTINEL);
+        a->tinput_files_scroll = 0;
+        a->tinput_files_hover  = -1;
+        a->tinput_path_err     = false;
+        tinput_files_scan(a, a->tinput_dir);
+        if (a->tinput_pick_dir) {
+            snprintf(a->tinput_text, sizeof a->tinput_text, "%s",
+                     a->tinput_dir);
+            a->tinput_len    = (int)strlen(a->tinput_text);
+            a->tinput_cursor = a->tinput_len;
+        }
+        return;
+    }
     char next[512];
-    tinput_path_join(a->tinput_dir, leaf, next, sizeof next);
+    /* If we're in COMPUTER view, leaf is a full drive path like "C:/" —
+     * use it directly instead of joining onto the sentinel. */
+    if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0) {
+        snprintf(next, sizeof next, "%s", leaf);
+    } else {
+        tinput_path_join(a->tinput_dir, leaf, next, sizeof next);
+    }
     snprintf(a->tinput_dir, sizeof a->tinput_dir, "%s", next);
     a->tinput_files_scroll = 0;
     a->tinput_files_hover  = -1;
+    a->tinput_path_err     = false;
     tinput_files_scan(a, a->tinput_dir);
+    if (a->tinput_pick_dir) {
+        snprintf(a->tinput_text, sizeof a->tinput_text, "%s", a->tinput_dir);
+        a->tinput_len    = (int)strlen(a->tinput_text);
+        a->tinput_cursor = a->tinput_len;
+    }
+}
+
+static int tinput_list_scrollbar_geom(const App* a, const SDL_Rect* list_r,
+                                      SDL_Rect* track, SDL_Rect* thumb)
+{
+    int rh = tinput_list_row_h(a);
+    int content_h = a->tinput_files_count * rh;
+    return overlay_list_scrollbar_geom(list_r->x, list_r->w,
+                                       list_r->y, list_r->y + list_r->h,
+                                       content_h, a->tinput_files_scroll,
+                                       track, thumb);
 }
 
 static void render_tinput_modal(App* a)
@@ -1324,30 +1538,39 @@ static void render_tinput_modal(App* a)
     int sz_y = font_line_height(a->font_body);
     int btn_h = sz_y + 16;
     int btn_w = 120;
+    bool pick = a->tinput_pick_dir;
 
-    /* Title */
     font_draw_line(a->font_body, a->tinput_title, strlen(a->tinput_title),
                    box.x + 20, box.y + 20 + font_ascent(a->font_body),
                    a->fg_link);
 
-    /* Input field */
+    /* Input field. In save/rename mode this is the filename. In dir-pick
+     * mode it doubles as a path bar — typing + Enter navigates; the
+     * border turns red when the entered path doesn't exist. */
     int in_y = box.y + 20 + sz_y + 8;
     int in_h = sz_y + 16;
     SDL_Rect in_r = { box.x + 20, in_y, box.w - 40, in_h };
     SDL_SetRenderDrawColor(a->renderer,
         a->bg.r, a->bg.g, a->bg.b, 255);
     fill_rrect(a->renderer, in_r, 6);
+    SDL_Color border_c = a->tinput_path_err
+        ? (SDL_Color){230, 110, 110, 220}
+        : (SDL_Color){a->fg_link.r, a->fg_link.g, a->fg_link.b, 200};
     SDL_SetRenderDrawColor(a->renderer,
-        a->fg_link.r, a->fg_link.g, a->fg_link.b, 200);
+        border_c.r, border_c.g, border_c.b, border_c.a);
     draw_rrect(a->renderer, in_r, 6);
 
-    /* Text inside the field — clip to field width. */
     int tx = in_r.x + 10;
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
-    font_draw_line(a->font_body, a->tinput_text, a->tinput_len, tx, ty, a->fg);
-    /* Caret */
+    if (a->tinput_len > 0) {
+        font_draw_line(a->font_body, a->tinput_text, a->tinput_len,
+                       tx, ty, a->fg);
+    } else if (pick) {
+        const char* ph = "Type a folder path  -  Enter to go";
+        font_draw_line(a->font_body, ph, strlen(ph), tx, ty, a->fg_muted);
+    }
     int cw = font_measure(a->font_body, a->tinput_text, a->tinput_cursor);
     SDL_Rect caret = { tx + cw, in_r.y + 4, 2, in_h - 8 };
     SDL_SetRenderDrawColor(a->renderer,
@@ -1355,19 +1578,37 @@ static void render_tinput_modal(App* a)
     SDL_RenderFillRect(a->renderer, &caret);
     SDL_RenderSetClipRect(a->renderer, NULL);
 
-    /* Directory label + scrollable file list. Files are scanned once when
-     * the modal opens; click-to-fill puts the basename in the input. */
+    /* Reserve room for the hint text above the buttons so the file list
+     * stops short of it instead of overlapping. */
     int btn_y_pre = box.y + box.h - btn_h - 16;
-    int dir_y = in_r.y + in_r.h + 10;
-    if (a->tinput_dir[0]) {
-        char dir_lab[600];
+    int hint_h    = sz_y + 6;
+
+    /* Currently-shown path label below the input ("in /some/path" or
+     * "Computer" when on the drive view). Red when path errored —
+     * quotes the path the user actually tried, not the one we fell
+     * back to. */
+    int dir_y = in_r.y + in_r.h + 8;
+    char dir_lab[600];
+    if (a->tinput_path_err) {
+        snprintf(dir_lab, sizeof dir_lab, "no such folder: %s",
+                 a->tinput_err_text[0] ? a->tinput_err_text : a->tinput_dir);
+    } else if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0) {
+        snprintf(dir_lab, sizeof dir_lab, "in %s",
+                 "Computer  (drives)");
+    } else if (a->tinput_dir[0]) {
         snprintf(dir_lab, sizeof dir_lab, "in %s", a->tinput_dir);
-        font_draw_line(a->font_body, dir_lab, strlen(dir_lab),
-                       box.x + 20, dir_y + font_ascent(a->font_body),
-                       a->fg_muted);
+    } else {
+        dir_lab[0] = 0;
     }
-    int list_top = tinput_list_top(a);
-    int list_bot = btn_y_pre - 12;
+    if (dir_lab[0]) {
+        SDL_Color lc = a->tinput_path_err
+            ? (SDL_Color){230, 110, 110, 220} : a->fg_muted;
+        font_draw_line(a->font_body, dir_lab, strlen(dir_lab),
+                       box.x + 20, dir_y + font_ascent(a->font_body), lc);
+    }
+
+    int list_top = dir_y + sz_y + 8;
+    int list_bot = btn_y_pre - hint_h - 8;
     int rh = tinput_list_row_h(a);
     SDL_Rect list_r = { box.x + 16, list_top - 2,
                         box.w - 32, list_bot - list_top + 4 };
@@ -1376,21 +1617,35 @@ static void render_tinput_modal(App* a)
     fill_rrect(a->renderer, list_r, 6);
     SDL_RenderSetClipRect(a->renderer, &list_r);
     int y = list_top - a->tinput_files_scroll;
-    int ic_sz = font_ascent(a->font_body);
+    /* Bigger icons — the previous font_ascent value rendered the SVG so
+     * small that the folder/file shapes looked like dashes. */
+    int ic_sz = sz_y - 2;
     for (int i = 0; i < a->tinput_files_count; ++i, y += rh) {
         if (y + rh < list_top || y > list_bot) continue;
         bool is_dir = a->tinput_files_isdir[i];
         bool hov = (i == a->tinput_files_hover);
+        bool sel = (i == a->tinput_files_selected);
         bool match = (a->tinput_len > 0 && !is_dir &&
                       strcmp(a->tinput_files[i], a->tinput_text) == 0);
-        if (hov || match) {
+        if (sel) {
+            SDL_Rect hr = { list_r.x + 2, y, list_r.w - 4, rh };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->bg_sidebar_active.r, a->bg_sidebar_active.g,
+                a->bg_sidebar_active.b, 255);
+            fill_rrect(a->renderer, hr, 4);
+            /* Accent left bar so the selection reads even on dim themes. */
+            SDL_Rect bar = { list_r.x + 2, y, 3, rh };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
+            SDL_RenderFillRect(a->renderer, &bar);
+        } else if (hov || match) {
             SDL_Rect hr = { list_r.x + 2, y, list_r.w - 4, rh };
             SDL_SetRenderDrawColor(a->renderer,
                 a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
                 a->bg_sidebar_hover.b, hov ? 200 : 130);
             fill_rrect(a->renderer, hr, 4);
         }
-        SDL_Color tc = (hov || match) ? a->fg_link : a->fg;
+        SDL_Color tc = (sel || hov || match) ? a->fg_link : a->fg;
         SDL_Color ic_c = is_dir ? a->fg_link : a->fg_muted;
         IconId ic = is_dir ? ICON_FOLDER : ICON_FILE;
         int ic_y = y + (rh - ic_sz) / 2;
@@ -1409,46 +1664,406 @@ static void render_tinput_modal(App* a)
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
 
-    int btn_y = btn_y_pre;
-    int b1_x  = box.x + box.w - btn_w - 16;
-    int b0_x  = b1_x - btn_w - 12;
+    /* Scrollbar with arrows on the right edge of the file list. */
+    SDL_Rect sb_track, sb_thumb;
+    if (tinput_list_scrollbar_geom(a, &list_r, &sb_track, &sb_thumb)) {
+        overlay_scrollbar_draw(a, &sb_track, &sb_thumb,
+                               a->sb_drag == SB_TINPUT);
+    }
 
-    /* Cancel button (neutral) */
-    {
-        bool hover = (a->tinput_hover == 1);
-        SDL_Rect r = { b0_x, btn_y, btn_w, btn_h };
+    /* Inline right-click context menu — Rename + Delete. Rendered last
+     * inside the modal so it floats above the file list. */
+    if (a->tinput_ctx_active) {
+        int rh_ctx = sz_y + 8;
+        int mw_ctx = 140;
+        int mh_ctx = rh_ctx * 2;
+        int mx0 = a->tinput_ctx_x;
+        int my0 = a->tinput_ctx_y;
+        if (mx0 + mw_ctx > box.x + box.w - 4)
+            mx0 = box.x + box.w - 4 - mw_ctx;
+        if (my0 + mh_ctx > box.y + box.h - 4)
+            my0 = box.y + box.h - 4 - mh_ctx;
+        SDL_Rect mr = { mx0, my0, mw_ctx, mh_ctx };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_active.r, a->bg_sidebar_active.g,
+            a->bg_sidebar_active.b, 240);
+        fill_rrect(a->renderer, mr, 6);
+        SDL_SetRenderDrawColor(a->renderer,
+            a->fg_link.r, a->fg_link.g, a->fg_link.b, 180);
+        draw_rrect(a->renderer, mr, 6);
+        const char* labels[2] = { "Rename...", "Delete" };
+        SDL_Color  colors[2]  = {
+            a->fg, (SDL_Color){230, 110, 110, 255}
+        };
+        for (int i = 0; i < 2; ++i) {
+            font_draw_line(a->font_body, labels[i], strlen(labels[i]),
+                           mr.x + 12,
+                           row_text_baseline(a->font_body,
+                                             mr.y + i * rh_ctx, rh_ctx),
+                           colors[i]);
+        }
+    }
+
+    int btn_y = btn_y_pre;
+    /* Buttons size to label so "Use this folder" doesn't overrun. */
+    const char* lab_ok = pick ? "Use this folder" : "Save";
+    const char* lab_cn = "Cancel";
+    const char* lab_nf = "New Folder";
+    int btn_pad = 28;
+    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_nf = font_measure(a->font_body, lab_nf, strlen(lab_nf)) + btn_pad;
+    if (w_ok < btn_w) w_ok = btn_w;
+    if (w_cn < btn_w) w_cn = btn_w;
+    int b1_x  = box.x + box.w - w_ok - 16;
+    int b0_x  = b1_x - w_cn - 12;
+    int b_nf_x = box.x + 16;
+    /* "New Folder" lives on the left, only in dir-pick mode, and only
+     * when we're inside a real folder — the COMPUTER pseudo-dir has no
+     * place to put a new folder. */
+    bool show_new_folder = pick &&
+        strcmp(a->tinput_dir, COMPUTER_SENTINEL) != 0 &&
+        a->tinput_dir[0];
+    if (show_new_folder) {
+        bool hover = (a->tinput_hover == 2);
+        SDL_Rect r = { b_nf_x, btn_y, w_nf, btn_h };
         SDL_SetRenderDrawColor(a->renderer,
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
-        const char* lab = "Cancel";
-        int lw = font_measure(a->font_body, lab, strlen(lab));
-        font_draw_line(a->font_body, lab, strlen(lab),
-                       b0_x + (btn_w - lw) / 2,
+        int lw = font_measure(a->font_body, lab_nf, strlen(lab_nf));
+        font_draw_line(a->font_body, lab_nf, strlen(lab_nf),
+                       b_nf_x + (w_nf - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       a->fg);
+    }
+
+    /* Cancel button (neutral) */
+    {
+        bool hover = (a->tinput_hover == 1);
+        SDL_Rect r = { b0_x, btn_y, w_cn, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+            a->bg_sidebar_hover.b, hover ? 255 : 180);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_body, lab_cn, strlen(lab_cn));
+        font_draw_line(a->font_body, lab_cn, strlen(lab_cn),
+                       b0_x + (w_cn - lw) / 2,
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
                        a->fg);
     }
     /* OK button (accent) */
     {
         bool hover = (a->tinput_hover == 0);
-        SDL_Rect r = { b1_x, btn_y, btn_w, btn_h };
+        SDL_Rect r = { b1_x, btn_y, w_ok, btn_h };
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
         fill_rrect(a->renderer, r, btn_h / 2);
-        const char* lab = "Save";
-        int lw = font_measure(a->font_body, lab, strlen(lab));
+        int lw = font_measure(a->font_body, lab_ok, strlen(lab_ok));
         int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
-        font_draw_line(a->font_body, lab, strlen(lab),
-                       b1_x + (btn_w - lw) / 2,
+        font_draw_line(a->font_body, lab_ok, strlen(lab_ok),
+                       b1_x + (w_ok - lw) / 2,
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
                        tc);
     }
     /* Hint */
-    const char* hint = "Enter save  -  Esc cancel";
+    const char* hint = pick
+        ? "Click a folder to enter  -  ..  to go up  -  Esc cancel"
+        : "Enter save  -  Esc cancel";
     font_draw_line(a->font_body, hint, strlen(hint),
                    box.x + 20, btn_y - 8, a->fg_muted);
+}
+
+/* ----------------------------- rename popup ---------------------------- */
+
+/* Small overlay dialog shown on top of the file picker. Has its own input
+ * field + OK/Cancel buttons so the picker's path bar isn't disturbed
+ * while a rename is in flight. Pumps its own SDL events synchronously
+ * (see app_rename_popup) — the picker's loop resumes on OK/Cancel. */
+
+static SDL_Rect renpop_box_rect(const App* a)
+{
+    int w = 440;
+    int h = 200;
+    return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
+}
+
+/* 0 = OK (Rename), 1 = Cancel, -1 = outside any button. */
+static int renpop_hit_test(const App* a, int mx, int my)
+{
+    SDL_Rect box = renpop_box_rect(a);
+    int sz_y  = font_line_height(a->font_body);
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 16;
+    const char* lab_ok = "Rename";
+    const char* lab_cn = "Cancel";
+    int btn_pad = 28;
+    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    if (w_ok < 100) w_ok = 100;
+    if (w_cn < 100) w_cn = 100;
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_cn - 12;
+    if (mx >= b1_x && mx < b1_x + w_ok &&
+        my >= btn_y && my < btn_y + btn_h) return 0;
+    if (mx >= b0_x && mx < b0_x + w_cn &&
+        my >= btn_y && my < btn_y + btn_h) return 1;
+    return -1;
+}
+
+static void render_rename_popup(App* a)
+{
+    if (!a->tinput_renpop_active) return;
+
+    overlay_backdrop(a);
+    SDL_Rect box = renpop_box_rect(a);
+    overlay_card(a, box);
+
+    int sz_y = font_line_height(a->font_body);
+
+    /* Title */
+    const char* title = "Rename";
+    font_draw_line(a->font_body, title, strlen(title),
+                   box.x + 20, box.y + 20 + font_ascent(a->font_body),
+                   a->fg_link);
+
+    /* Subtitle quoting the original name so the user knows exactly
+     * what's being renamed. */
+    char sub[320];
+    snprintf(sub, sizeof sub, "'%s' to:", a->tinput_renpop_old);
+    font_draw_line(a->font_body, sub, strlen(sub),
+                   box.x + 20,
+                   box.y + 20 + sz_y + 6 + font_ascent(a->font_body),
+                   a->fg_muted);
+
+    /* Input field */
+    int in_y = box.y + 20 + sz_y * 2 + 16;
+    int in_h = sz_y + 16;
+    SDL_Rect in_r = { box.x + 20, in_y, box.w - 40, in_h };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->bg.r, a->bg.g, a->bg.b, 255);
+    fill_rrect(a->renderer, in_r, 6);
+    SDL_Color border_c = a->tinput_renpop_err
+        ? (SDL_Color){230, 110, 110, 220}
+        : (SDL_Color){a->fg_link.r, a->fg_link.g, a->fg_link.b, 200};
+    SDL_SetRenderDrawColor(a->renderer,
+        border_c.r, border_c.g, border_c.b, border_c.a);
+    draw_rrect(a->renderer, in_r, 6);
+
+    int tx = in_r.x + 10;
+    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
+    SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
+    SDL_RenderSetClipRect(a->renderer, &clip);
+    if (a->tinput_renpop_len > 0) {
+        font_draw_line(a->font_body,
+                       a->tinput_renpop_text, a->tinput_renpop_len,
+                       tx, ty, a->fg);
+    }
+    int cw = font_measure(a->font_body,
+                          a->tinput_renpop_text, a->tinput_renpop_cursor);
+    SDL_Rect caret = { tx + cw, in_r.y + 4, 2, in_h - 8 };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
+    SDL_RenderFillRect(a->renderer, &caret);
+    SDL_RenderSetClipRect(a->renderer, NULL);
+
+    /* Error label below the input, if any. */
+    if (a->tinput_renpop_err && a->tinput_renpop_err_text[0]) {
+        font_draw_line(a->font_body,
+                       a->tinput_renpop_err_text,
+                       strlen(a->tinput_renpop_err_text),
+                       box.x + 20,
+                       in_r.y + in_r.h + 6 + font_ascent(a->font_body),
+                       (SDL_Color){230, 110, 110, 255});
+    }
+
+    /* Buttons */
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 16;
+    const char* lab_ok = "Rename";
+    const char* lab_cn = "Cancel";
+    int btn_pad = 28;
+    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    if (w_ok < 100) w_ok = 100;
+    if (w_cn < 100) w_cn = 100;
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_cn - 12;
+
+    /* Cancel (neutral) */
+    {
+        bool hover = (a->tinput_renpop_hover == 1);
+        SDL_Rect r = { b0_x, btn_y, w_cn, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+            a->bg_sidebar_hover.b, hover ? 255 : 180);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_body, lab_cn, strlen(lab_cn));
+        font_draw_line(a->font_body, lab_cn, strlen(lab_cn),
+                       b0_x + (w_cn - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       a->fg);
+    }
+    /* Rename (accent) */
+    {
+        bool hover = (a->tinput_renpop_hover == 0);
+        SDL_Rect r = { b1_x, btn_y, w_ok, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_body, lab_ok, strlen(lab_ok));
+        int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
+        SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
+                                     : (SDL_Color){240, 240, 250, 255};
+        font_draw_line(a->font_body, lab_ok, strlen(lab_ok),
+                       b1_x + (w_ok - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       tc);
+    }
+}
+
+/* Modal rename popup. Pre-fills the input with `oldname`. Pumps SDL
+ * events until OK or Cancel. On OK, copies the new name into `out` and
+ * returns true. Validation (non-empty, no path separators) is enforced
+ * here — invalid commits flash the red border and stay open. */
+static bool app_rename_popup(App* a, const char* oldname,
+                             char* out, size_t out_cap)
+{
+    snprintf(a->tinput_renpop_old, sizeof a->tinput_renpop_old,
+             "%s", oldname ? oldname : "");
+    snprintf(a->tinput_renpop_text, sizeof a->tinput_renpop_text,
+             "%s", oldname ? oldname : "");
+    a->tinput_renpop_len    = (int)strlen(a->tinput_renpop_text);
+    a->tinput_renpop_cursor = a->tinput_renpop_len;
+    a->tinput_renpop_active = true;
+    a->tinput_renpop_choice = -1;
+    a->tinput_renpop_hover  = 0;
+    a->tinput_renpop_err    = false;
+    a->tinput_renpop_err_text[0] = 0;
+
+    SDL_StartTextInput();
+
+    while (a->tinput_renpop_choice < 0 && a->running) {
+        SDL_Event e;
+        if (SDL_WaitEvent(&e)) {
+            switch (e.type) {
+                case SDL_QUIT:
+                    a->tinput_renpop_choice = 1;
+                    break;
+                case SDL_MOUSEMOTION:
+                    a->tinput_renpop_hover =
+                        renpop_hit_test(a, e.motion.x, e.motion.y);
+                    break;
+                case SDL_MOUSEBUTTONDOWN:
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        int btn = renpop_hit_test(a, e.button.x, e.button.y);
+                        if (btn == 1) {
+                            a->tinput_renpop_choice = 1;
+                        } else if (btn == 0) {
+                            /* Same validation as Enter: non-empty + no
+                             * path separators. */
+                            const char* nm = a->tinput_renpop_text;
+                            bool bad = (a->tinput_renpop_len == 0);
+                            for (int i = 0; i < a->tinput_renpop_len && !bad;
+                                 ++i)
+                                if (nm[i] == '/' || nm[i] == '\\') bad = true;
+                            if (bad) {
+                                a->tinput_renpop_err = true;
+                                snprintf(a->tinput_renpop_err_text,
+                                         sizeof a->tinput_renpop_err_text,
+                                         "name can't be empty or contain '/' or '\\'");
+                            } else {
+                                a->tinput_renpop_choice = 0;
+                            }
+                        }
+                    }
+                    break;
+                case SDL_TEXTINPUT: {
+                    int ti = (int)strlen(e.text.text);
+                    if (a->tinput_renpop_len + ti <
+                        (int)sizeof a->tinput_renpop_text - 1)
+                    {
+                        memmove(
+                            a->tinput_renpop_text +
+                                a->tinput_renpop_cursor + ti,
+                            a->tinput_renpop_text + a->tinput_renpop_cursor,
+                            (size_t)(a->tinput_renpop_len -
+                                     a->tinput_renpop_cursor + 1));
+                        memcpy(
+                            a->tinput_renpop_text + a->tinput_renpop_cursor,
+                            e.text.text, (size_t)ti);
+                        a->tinput_renpop_cursor += ti;
+                        a->tinput_renpop_len    += ti;
+                    }
+                    a->tinput_renpop_err = false;
+                    break;
+                }
+                case SDL_KEYDOWN: {
+                    SDL_Keycode k = e.key.keysym.sym;
+                    if (k == SDLK_ESCAPE) {
+                        a->tinput_renpop_choice = 1; break;
+                    }
+                    if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                        const char* nm = a->tinput_renpop_text;
+                        bool bad = (a->tinput_renpop_len == 0);
+                        for (int i = 0; i < a->tinput_renpop_len && !bad; ++i)
+                            if (nm[i] == '/' || nm[i] == '\\') bad = true;
+                        if (bad) {
+                            a->tinput_renpop_err = true;
+                            snprintf(a->tinput_renpop_err_text,
+                                     sizeof a->tinput_renpop_err_text,
+                                     "name can't be empty or contain '/' or '\\'");
+                        } else {
+                            a->tinput_renpop_choice = 0;
+                        }
+                        break;
+                    }
+                    if (k == SDLK_BACKSPACE && a->tinput_renpop_cursor > 0) {
+                        memmove(
+                            a->tinput_renpop_text +
+                                a->tinput_renpop_cursor - 1,
+                            a->tinput_renpop_text + a->tinput_renpop_cursor,
+                            (size_t)(a->tinput_renpop_len -
+                                     a->tinput_renpop_cursor + 1));
+                        a->tinput_renpop_cursor--;
+                        a->tinput_renpop_len--;
+                        a->tinput_renpop_err = false;
+                    }
+                    if (k == SDLK_DELETE &&
+                        a->tinput_renpop_cursor < a->tinput_renpop_len)
+                    {
+                        memmove(
+                            a->tinput_renpop_text + a->tinput_renpop_cursor,
+                            a->tinput_renpop_text +
+                                a->tinput_renpop_cursor + 1,
+                            (size_t)(a->tinput_renpop_len -
+                                     a->tinput_renpop_cursor));
+                        a->tinput_renpop_len--;
+                        a->tinput_renpop_err = false;
+                    }
+                    if (k == SDLK_LEFT && a->tinput_renpop_cursor > 0)
+                        a->tinput_renpop_cursor--;
+                    if (k == SDLK_RIGHT &&
+                        a->tinput_renpop_cursor < a->tinput_renpop_len)
+                        a->tinput_renpop_cursor++;
+                    if (k == SDLK_HOME) a->tinput_renpop_cursor = 0;
+                    if (k == SDLK_END)
+                        a->tinput_renpop_cursor = a->tinput_renpop_len;
+                    break;
+                }
+            }
+        }
+        app_render(a);
+    }
+
+    a->tinput_renpop_active = false;
+    if (a->tinput_renpop_choice == 0 && out && out_cap > 0) {
+        snprintf(out, out_cap, "%s", a->tinput_renpop_text);
+        return true;
+    }
+    return false;
 }
 
 /* Synchronous text-input modal with optional directory listing. If `dir`
@@ -1472,6 +2087,12 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
     a->tinput_hover  = 0;     /* OK by default */
     a->tinput_files_hover  = -1;
     a->tinput_files_scroll = 0;
+    a->tinput_files_selected = -1;
+    a->tinput_path_err     = false;
+    a->tinput_err_text[0]  = 0;
+    a->tinput_ctx_active   = false;
+    a->tinput_renpop_active= false;
+    a->tinput_renpop_old[0]= 0;
     if (dir && *dir) {
         snprintf(a->tinput_dir, sizeof a->tinput_dir, "%s", dir);
         tinput_files_scan(a, dir);
@@ -1493,27 +2114,337 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                     a->tinput_hover = tinput_hit_test(a, e.motion.x, e.motion.y);
                     int frow = tinput_files_row_at(a, e.motion.x, e.motion.y);
                     a->tinput_files_hover = frow;
+                    /* Drag the scrollbar thumb if the user grabbed it. */
+                    if (a->sb_drag == SB_TINPUT) {
+                        SDL_Rect list_r = {
+                            tinput_box_rect(a).x + 16,
+                            tinput_list_top(a) - 2,
+                            tinput_box_rect(a).w - 32,
+                            tinput_list_bot(a) - tinput_list_top(a) + 4
+                        };
+                        SDL_Rect track, thumb;
+                        if (tinput_list_scrollbar_geom(a, &list_r,
+                                                       &track, &thumb))
+                        {
+                            SDL_Rect inner;
+                            sb_inner_track(&track, &inner);
+                            int rh = tinput_list_row_h(a);
+                            int content_h = a->tinput_files_count * rh;
+                            int max_sc = content_h - list_r.h;
+                            if (max_sc < 0) max_sc = 0;
+                            a->tinput_files_scroll = scroll_from_thumb_drag(
+                                e.motion.y, inner.y, inner.h, thumb.h,
+                                a->sb_drag_offset, max_sc);
+                        }
+                    }
                     break;
                 }
+                case SDL_MOUSEBUTTONUP:
+                    if (a->sb_drag == SB_TINPUT) a->sb_drag = SB_NONE;
+                    break;
+                /* Right-click on a row opens an inline context menu (one
+                 * option for now: Rename). Anywhere else dismisses an
+                 * already-open menu. Handled before the LEFT case so a
+                 * left-click on the menu can pick the option. */
+                case SDL_USEREVENT:    /* unused — placeholder slot */
+                    break;
                 case SDL_MOUSEWHEEL: {
                     int rh = tinput_list_row_h(a);
                     a->tinput_files_scroll -= e.wheel.y * rh * 2;
                     if (a->tinput_files_scroll < 0) a->tinput_files_scroll = 0;
-                    int max_sc = a->tinput_files_count * rh
-                                 - (tinput_box_rect(a).h - 200);
+                    int content_h = a->tinput_files_count * rh;
+                    int visible_h = tinput_list_bot(a) - tinput_list_top(a);
+                    int max_sc = content_h - visible_h;
                     if (max_sc < 0) max_sc = 0;
                     if (a->tinput_files_scroll > max_sc)
                         a->tinput_files_scroll = max_sc;
                     break;
                 }
                 case SDL_MOUSEBUTTONDOWN:
+                    /* Right-click on a file row opens an inline ctx menu
+                     * with a single Rename option. ".." is excluded. */
+                    if (e.button.button == SDL_BUTTON_RIGHT) {
+                        int frow = tinput_files_row_at(a, e.button.x, e.button.y);
+                        if (frow >= 0 && a->tinput_files[frow] &&
+                            strcmp(a->tinput_files[frow], "..") != 0)
+                        {
+                            a->tinput_ctx_active = true;
+                            a->tinput_ctx_row    = frow;
+                            a->tinput_ctx_x      = e.button.x;
+                            a->tinput_ctx_y      = e.button.y;
+                        } else {
+                            a->tinput_ctx_active = false;
+                        }
+                        break;
+                    }
                     if (e.button.button == SDL_BUTTON_LEFT) {
+                        /* Click on the inline ctx menu? Two rows:
+                         *   row 0 = Rename, row 1 = Delete.
+                         * Anything else dismisses the menu and falls
+                         * through to normal handling. */
+                        if (a->tinput_ctx_active) {
+                            int rh_ctx = font_line_height(a->font_body) + 8;
+                            int mw_ctx = 140;
+                            int mh_ctx = rh_ctx * 2;
+                            int mx0 = a->tinput_ctx_x;
+                            int my0 = a->tinput_ctx_y;
+                            bool on_menu =
+                                e.button.x >= mx0 && e.button.x < mx0 + mw_ctx &&
+                                e.button.y >= my0 && e.button.y < my0 + mh_ctx;
+                            int item = on_menu
+                                ? (e.button.y - my0) / rh_ctx : -1;
+                            int rrow = a->tinput_ctx_row;
+                            if (item == 0 && rrow >= 0 &&
+                                rrow < a->tinput_files_count)
+                            {
+                                /* Rename via popup. Closes ctx menu first
+                                 * so the popup doesn't render with a stale
+                                 * menu still drawn underneath. The popup
+                                 * pumps its own events; on OK it returns
+                                 * the new name and we perform the rename
+                                 * + refresh the listing here. */
+                                char old_nm[260];
+                                snprintf(old_nm, sizeof old_nm, "%s",
+                                         a->tinput_files[rrow]);
+                                a->tinput_ctx_active = false;
+                                char new_nm[260];
+                                if (app_rename_popup(a, old_nm,
+                                                     new_nm, sizeof new_nm))
+                                {
+                                    char src[1024], dst[1024];
+                                    path_join_safe(src, sizeof src,
+                                                   a->tinput_dir, old_nm);
+                                    path_join_safe(dst, sizeof dst,
+                                                   a->tinput_dir, new_nm);
+                                    if (rename(src, dst) == 0) {
+                                        tinput_files_scan(a, a->tinput_dir);
+                                        int rrow2 = tinput_files_find(
+                                            a, new_nm);
+                                        a->tinput_files_selected = rrow2;
+                                        tinput_files_ensure_visible(a, rrow2);
+                                        a->tinput_path_err = false;
+                                        a->tinput_err_text[0] = 0;
+                                    } else {
+                                        a->tinput_path_err = true;
+                                        snprintf(a->tinput_err_text,
+                                                 sizeof a->tinput_err_text,
+                                                 "rename failed: %s",
+                                                 old_nm);
+                                    }
+                                }
+                                break;
+                            } else if (item == 1 && rrow >= 0 &&
+                                       rrow < a->tinput_files_count)
+                            {
+                                /* Delete with a confirm prompt. Re-enters
+                                 * confirm_action's pump nested inside the
+                                 * picker — both modals draw, the inner
+                                 * grabs events, original picker resumes
+                                 * after the choice. */
+                                char victim[1024];
+                                path_join_safe(victim, sizeof victim,
+                                               a->tinput_dir,
+                                               a->tinput_files[rrow]);
+                                bool is_dir =
+                                    a->tinput_files_isdir[rrow];
+                                char prompt[1200];
+                                snprintf(prompt, sizeof prompt,
+                                    "Delete \"%s\"%s?\nThis cannot be undone.",
+                                    a->tinput_files[rrow],
+                                    is_dir ? " (folder must be empty)" : "");
+                                a->tinput_ctx_active = false;
+                                if (confirm_action(a, "Delete", prompt,
+                                                   "Delete", "Cancel"))
+                                {
+                                    if (filesystem_delete(victim, is_dir) == 0) {
+                                        tinput_files_scan(a, a->tinput_dir);
+                                        a->tinput_files_selected = -1;
+                                    } else {
+                                        a->tinput_path_err = true;
+                                        snprintf(a->tinput_err_text,
+                                                 sizeof a->tinput_err_text,
+                                                 "delete failed: %s",
+                                                 victim);
+                                    }
+                                }
+                                break;
+                            }
+                            a->tinput_ctx_active = false;
+                            if (on_menu) break;
+                        }
+                        /* Scrollbar takes priority over file rows. */
+                        SDL_Rect list_r = {
+                            tinput_box_rect(a).x + 16,
+                            tinput_list_top(a) - 2,
+                            tinput_box_rect(a).w - 32,
+                            tinput_list_bot(a) - tinput_list_top(a) + 4
+                        };
+                        SDL_Rect track, thumb;
+                        if (tinput_list_scrollbar_geom(a, &list_r,
+                                                       &track, &thumb)
+                            && overlay_scrollbar_handle_click(
+                                a, e.button.x, e.button.y,
+                                &track, &thumb, SB_TINPUT,
+                                &a->tinput_files_scroll,
+                                a->tinput_files_count * tinput_list_row_h(a),
+                                tinput_list_row_h(a)))
+                        {
+                            break;
+                        }
+                        int btn_pre = tinput_hit_test(a, e.button.x, e.button.y);
+                        /* OK button while in dir-pick mode: if a folder
+                         * row is highlighted, that's what the user wants
+                         * to commit (Windows Explorer "Open" semantics).
+                         * Otherwise commit the current dir, refusing the
+                         * COMPUTER sentinel and any non-existent path. */
+                        if (btn_pre == 0 && a->tinput_pick_dir) {
+                            int sel = a->tinput_files_selected;
+                            if (sel >= 0 && sel < a->tinput_files_count &&
+                                a->tinput_files_isdir[sel] &&
+                                strcmp(a->tinput_files[sel], "..") != 0)
+                            {
+                                char chosen[1024];
+                                path_join_safe(chosen, sizeof chosen,
+                                               a->tinput_dir,
+                                               a->tinput_files[sel]);
+                                snprintf(a->tinput_dir,
+                                         sizeof a->tinput_dir,
+                                         "%s", chosen);
+                            }
+                            if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0
+                                || !path_dir_exists(a->tinput_dir))
+                            {
+                                a->tinput_path_err = true;
+                                snprintf(a->tinput_err_text,
+                                         sizeof a->tinput_err_text,
+                                         "%s", a->tinput_dir);
+                                break;
+                            }
+                        }
+                        /* "New Folder" button — creates "Downsee Vault" by
+                         * default (or the typed name if the path bar holds
+                         * a leaf name). On success, navigates into the new
+                         * folder AND drops into rename mode so the user
+                         * can immediately type a better name. */
+                        if (btn_pre == 2 && a->tinput_pick_dir) {
+                            if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0
+                                || !a->tinput_dir[0])
+                            {
+                                a->tinput_path_err = true;
+                                snprintf(a->tinput_err_text,
+                                         sizeof a->tinput_err_text,
+                                         "%s", a->tinput_dir);
+                                break;
+                            }
+                            /* Use typed text only if it's a plain leaf
+                             * name (no slashes) AND not the same as the
+                             * current path. Otherwise default. */
+                            const char* nm = "Downsee Vault";
+                            bool typed_ok = (a->tinput_len > 0);
+                            for (int i = 0; i < a->tinput_len && typed_ok; ++i) {
+                                if (a->tinput_text[i] == '/' ||
+                                    a->tinput_text[i] == '\\') typed_ok = false;
+                            }
+                            if (typed_ok &&
+                                strcmp(a->tinput_text, a->tinput_dir) != 0)
+                                nm = a->tinput_text;
+                            /* If the chosen name already exists, suffix
+                             * with (2), (3), ... up to (99). The picked
+                             * name (whatever number it ends up being) is
+                             * what gets selected and renamed afterwards.
+                             * Strip the parent's trailing slash (e.g.
+                             * "D:/") before joining or we end up with
+                             * "D://name" which downstream openers
+                             * mishandle. */
+                            char unique[300];
+                            char npath[1024];
+                            int suffix = 1;
+                            bool created = false;
+                            while (suffix < 100) {
+                                if (suffix == 1)
+                                    snprintf(unique, sizeof unique, "%s", nm);
+                                else
+                                    snprintf(unique, sizeof unique,
+                                             "%s (%d)", nm, suffix);
+                                path_join_safe(npath, sizeof npath,
+                                               a->tinput_dir, unique);
+#ifdef _WIN32
+                                if (CreateDirectoryA(npath, NULL)) {
+                                    created = true; break;
+                                }
+                                if (GetLastError() != ERROR_ALREADY_EXISTS)
+                                    break;
+#else
+                                if (mkdir(npath, 0755) == 0) {
+                                    created = true; break;
+                                }
+                                if (errno != EEXIST) break;
+#endif
+                                suffix++;
+                            }
+                            if (!created) {
+                                a->tinput_path_err = true;
+                                snprintf(a->tinput_err_text,
+                                         sizeof a->tinput_err_text,
+                                         "%s", npath);
+                                break;
+                            }
+                            /* Stay in the parent dir; refresh the listing
+                             * so the new folder appears, then select +
+                             * scroll to it. Pop the rename dialog so the
+                             * user can immediately type a better name. */
+                            tinput_files_scan(a, a->tinput_dir);
+                            a->tinput_files_hover  = -1;
+                            a->tinput_path_err     = false;
+                            int row = tinput_files_find(a, unique);
+                            a->tinput_files_selected = row;
+                            tinput_files_ensure_visible(a, row);
+                            char new_nm[260];
+                            if (app_rename_popup(a, unique,
+                                                 new_nm, sizeof new_nm))
+                            {
+                                char src[1024], dst[1024];
+                                path_join_safe(src, sizeof src,
+                                               a->tinput_dir, unique);
+                                path_join_safe(dst, sizeof dst,
+                                               a->tinput_dir, new_nm);
+                                if (rename(src, dst) == 0) {
+                                    tinput_files_scan(a, a->tinput_dir);
+                                    int rrow2 = tinput_files_find(a, new_nm);
+                                    a->tinput_files_selected = rrow2;
+                                    tinput_files_ensure_visible(a, rrow2);
+                                } else {
+                                    a->tinput_path_err = true;
+                                    snprintf(a->tinput_err_text,
+                                             sizeof a->tinput_err_text,
+                                             "rename failed: %s", unique);
+                                }
+                            }
+                            break;
+                        }
                         int frow = tinput_files_row_at(a, e.button.x, e.button.y);
                         if (frow >= 0) {
                             const char* nm = a->tinput_files[frow];
-                            if (a->tinput_files_isdir[frow]) {
+                            bool dbl = (e.button.clicks >= 2);
+                            /* `..` is special — single click navigates up
+                             * since there's nothing to "select". Other
+                             * folders: single click highlights, double
+                             * click enters. */
+                            if (strcmp(nm, "..") == 0) {
                                 tinput_navigate(a, nm);
+                            } else if (a->tinput_files_isdir[frow]) {
+                                if (dbl) {
+                                    tinput_navigate(a, nm);
+                                } else {
+                                    a->tinput_files_selected = frow;
+                                }
+                            } else if (a->tinput_pick_dir) {
+                                /* Files in dir-pick mode are
+                                 * informational; just allow selection. */
+                                a->tinput_files_selected = frow;
                             } else {
+                                /* Save/rename mode: select + fill input. */
+                                a->tinput_files_selected = frow;
                                 snprintf(a->tinput_text, sizeof a->tinput_text,
                                          "%s", nm);
                                 a->tinput_len = (int)strlen(a->tinput_text);
@@ -1536,12 +2467,48 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                         a->tinput_cursor += ti;
                         a->tinput_len    += ti;
                     }
+                    /* Reset error state on any keystroke so the red border
+                     * disappears the moment the user starts fixing the path. */
+                    a->tinput_path_err = false;
                     break;
                 }
                 case SDL_KEYDOWN: {
                     SDL_Keycode k = e.key.keysym.sym;
                     if (k == SDLK_ESCAPE) { a->tinput_choice = 1; break; }
                     if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                        if (a->tinput_pick_dir) {
+                            /* If the typed path differs from the current
+                             * dir, treat Enter as a navigate. Existing
+                             * folder → switch view; missing → red error.
+                             * If they match, treat as commit but refuse
+                             * the COMPUTER sentinel / non-existent paths. */
+                            if (a->tinput_len > 0 &&
+                                strcmp(a->tinput_text, a->tinput_dir) != 0)
+                            {
+                                if (path_dir_exists(a->tinput_text)) {
+                                    snprintf(a->tinput_dir,
+                                             sizeof a->tinput_dir,
+                                             "%s", a->tinput_text);
+                                    a->tinput_files_scroll = 0;
+                                    a->tinput_files_hover  = -1;
+                                    a->tinput_path_err     = false;
+                                    a->tinput_err_text[0]  = 0;
+                                    tinput_files_scan(a, a->tinput_dir);
+                                } else {
+                                    a->tinput_path_err = true;
+                                    snprintf(a->tinput_err_text,
+                                             sizeof a->tinput_err_text,
+                                             "%s", a->tinput_text);
+                                }
+                                break;
+                            }
+                            if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0
+                                || !path_dir_exists(a->tinput_dir))
+                            {
+                                a->tinput_path_err = true;
+                                break;
+                            }
+                        }
                         a->tinput_choice = 0; break;
                     }
                     if (k == SDLK_BACKSPACE && a->tinput_cursor > 0) {
@@ -1570,8 +2537,36 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
     }
     SDL_StopTextInput();
     a->tinput_active = false;
+    a->tinput_pick_dir = false;
     tinput_files_clear(a);
     return a->tinput_choice == 0;
+}
+
+/* In-app folder picker. Reuses the text-modal infrastructure but in
+ * pick-dir mode (no input field, "Use this folder" button). On OK,
+ * writes the chosen path into `out` and returns true. */
+static bool app_dir_modal(App* a, const char* title, const char* start_dir,
+                          char* out, size_t out_cap)
+{
+    a->tinput_pick_dir = true;
+    /* When start_dir is empty/NULL, pick a sensible home directory so
+     * the user isn't dropped into the exe folder. */
+    char fallback[512];
+    if (!start_dir || !*start_dir) {
+#ifdef _WIN32
+        const char* up = getenv("USERPROFILE");
+        snprintf(fallback, sizeof fallback, "%s", up ? up : "C:/");
+#else
+        const char* up = getenv("HOME");
+        snprintf(fallback, sizeof fallback, "%s", up ? up : "/");
+#endif
+        for (char* p = fallback; *p; ++p) if (*p == '\\') *p = '/';
+        start_dir = fallback;
+    }
+    bool ok = app_text_modal(a, title, NULL, start_dir);
+    if (ok && out && out_cap > 0)
+        snprintf(out, out_cap, "%s", a->tinput_dir);
+    return ok;
 }
 
 static int app_init(App* a, const char* note_path_arg)
@@ -1588,11 +2583,12 @@ static int app_init(App* a, const char* note_path_arg)
     SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "0");
 
     /* Pin cwd to the executable's directory so every relative path
-     * (data/init.lua, data/init-overrides.lua, data/plugins/, vault path,
-     * etc.) resolves consistently no matter how the binary was launched
-     * (Explorer shortcut, file association, terminal from somewhere
-     * else). Without this, settings_persist writes to the wrong place
-     * and the saved theme silently disappears at next launch. */
+     * (settings.lua next to the exe, plugins/ next to the exe,
+     * relative vault_path) resolves consistently no matter how the
+     * binary was launched (Explorer shortcut, file association,
+     * terminal from elsewhere). Without this, settings_persist writes
+     * to the launcher's cwd and the saved theme silently disappears
+     * at next launch. */
     {
         char* base = SDL_GetBasePath();
         if (base) {
@@ -1610,17 +2606,47 @@ static int app_init(App* a, const char* note_path_arg)
     lua_host_setup_api(a->lua);
     lua_host_on_notify(on_lua_notify, a);
     lua_host_on_dialog(on_lua_dialog, a);
-    if (lua_host_load_config(a->lua, "data/init.lua") != 0)
-        fprintf(stderr, "warn: data/init.lua failed; using defaults\n");
-    /* Settings page persists deltas here; absent file is a quiet no-op. */
-    lua_host_overlay_config(a->lua, "data/init-overrides.lua");
-    /* Mirror the merged cfg's keybindings table into our in-memory
-     * UserKeybind store so the settings overlay can edit them. */
+
+    /* Settings live in ONE file next to the exe: settings.lua. On first
+     * run (file missing) we write a defaults stub WITHOUT vault_path —
+     * the user picks the vault below and we save it back. Plugins live
+     * in a `plugins/` folder next to the exe by default; the user can
+     * point elsewhere via plugin_path. */
+    bool first_run = (lua_host_load_config(a->lua, "settings.lua") != 0);
+    if (first_run) {
+        FILE* f = fopen("settings.lua", "wb");
+        if (f) {
+            fprintf(f,
+                "-- Downsee settings (auto-generated on first run).\n"
+                "-- Edit by hand or via Settings (Ctrl+,) — values written\n"
+                "-- by the settings page will overwrite this file.\n"
+                "return {\n"
+                "    -- vault_path is filled in after you pick a folder.\n"
+                "    -- vault_path = \"C:/Users/me/Notes\",\n"
+                "\n"
+                "    -- Plugins folder, defaults to 'plugins' next to exe.\n"
+                "    plugin_path  = \"plugins\",\n"
+                "\n"
+                "    window_w     = 1100,\n"
+                "    window_h     = 720,\n"
+                "    sidebar_open = true,\n"
+                "    sidebar_width= 240,\n"
+                "\n"
+                "    font_path    = \"C:/Windows/Fonts/consola.ttf\",\n"
+                "    font_size    = 16,\n"
+                "    theme        = \"Editorial Dark\",\n"
+                "}\n");
+            fclose(f);
+            fprintf(stderr, "downsee: first run -- wrote settings.lua\n");
+            (void)lua_host_load_config(a->lua, "settings.lua");
+        }
+    }
     user_kbinds_load_from_cfg(a->lua);
+    recent_dirs_load(a);
 
     {
         const char* pdir = lua_host_cfg_string(a->lua, "plugin_path",
-                                               "data/plugins");
+                                               "plugins");
         int n = lua_host_load_plugins(a->lua, pdir);
         if (n > 0) fprintf(stderr, "downsee: loaded %d plugin(s) from %s\n",
                            n, pdir);
@@ -1653,7 +2679,15 @@ static int app_init(App* a, const char* note_path_arg)
     font_choices_init();
     a->settings_font_idx = font_choice_find(a->cfg_font_path);
     if (a->settings_font_idx < 0) a->settings_font_idx = 0;
-    const char* vault_path = lua_host_cfg_string(a->lua, "vault_path", "data");
+    /* Empty default — first-run check below uses NULL/empty to know
+     * we need to prompt the user for a vault folder. We also scrub
+     * any sentinel / non-directory value that may have been written
+     * to settings.lua by an older buggy build so we don't try to
+     * scan "::COMPUTER::" or a deleted folder forever. */
+    const char* vault_path = lua_host_cfg_string(a->lua, "vault_path", "");
+    if (vault_path && (strcmp(vault_path, "::COMPUTER::") == 0)) {
+        vault_path = "";
+    }
 
     a->sidebar_open  = lua_host_cfg_number(a->lua, "sidebar_open",  1) != 0;
     a->sidebar_w     = (int)lua_host_cfg_number(a->lua, "sidebar_width", 240);
@@ -1762,23 +2796,106 @@ static int app_init(App* a, const char* note_path_arg)
     a->imgcache = image_cache_create(a->renderer);
 
     vault_init(&a->vault);
-    /* Resolve vault_path: try cwd-relative first; if that turns up no .md
-     * files, retry against the executable's directory. Launching the exe
-     * by full path from a different cwd (Explorer shortcut, file-association
-     * open) is the common case where cwd lookup fails. */
-    int n = vault_scan(&a->vault, vault_path);
-    fprintf(stderr, "downsee: vault '%s' cwd-relative (%d items)\n",
-            vault_path, n);
-    if (n == 0) {
-        char* base = SDL_GetBasePath();
-        if (base) {
-            char resolved[1024];
-            snprintf(resolved, sizeof resolved, "%s%s", base, vault_path);
-            int n2 = vault_scan(&a->vault, resolved);
-            fprintf(stderr, "downsee: vault '%s' (%d items)\n", resolved, n2);
-            n = n2;
-            SDL_free(base);
+    int n = 0;
+    bool vault_missing = false;
+    if (vault_path && vault_path[0]) {
+        /* If the saved vault doesn't exist (deleted, drive unplugged,
+         * settings.lua got corrupted), don't silently scan an empty
+         * vault — flag it so we re-prompt the user below. */
+        bool is_abs = (vault_path[0] == '/' || vault_path[0] == '\\' ||
+                       (strlen(vault_path) >= 2 && vault_path[1] == ':'));
+        if (!path_dir_exists(vault_path)) {
+            if (is_abs) {
+                fprintf(stderr,
+                    "downsee: saved vault '%s' is gone\n", vault_path);
+                vault_missing = true;
+            } else {
+                /* Relative path — try resolving against the exe's base
+                 * dir before giving up. Launching by full path from a
+                 * different cwd is the common cause of a relative miss. */
+                char* base = SDL_GetBasePath();
+                bool resolved_ok = false;
+                if (base) {
+                    char resolved[1024];
+                    snprintf(resolved, sizeof resolved, "%s%s",
+                             base, vault_path);
+                    if (path_dir_exists(resolved)) {
+                        n = vault_scan(&a->vault, resolved);
+                        fprintf(stderr,
+                            "downsee: vault '%s' (%d items, base-relative)\n",
+                            resolved, n);
+                        resolved_ok = true;
+                    }
+                    SDL_free(base);
+                }
+                if (!resolved_ok) {
+                    fprintf(stderr,
+                        "downsee: relative vault '%s' not found\n", vault_path);
+                    vault_missing = true;
+                }
+            }
+        } else {
+            n = vault_scan(&a->vault, vault_path);
+            fprintf(stderr, "downsee: vault '%s' (%d items)\n", vault_path, n);
         }
+    }
+
+    /* First-run / missing-vault flow. settings.lua had no vault_path,
+     * OR the saved one no longer exists on disk (deleted, drive
+     * unplugged, etc.) — either way we re-prompt and persist. */
+    if (!vault_path || !vault_path[0] || vault_missing) {
+        /* Immediately wipe the bad vault_path from settings.lua so the
+         * corruption can't reappear on next launch. vault.dir is still
+         * NULL/empty here (vault_init sets it that way and we never
+         * scanned), so settings_persist will write the file WITHOUT a
+         * vault_path line — the rest of the user's config (theme,
+         * fonts, recents) is preserved. */
+        if (vault_missing) settings_persist(a);
+        a->running = true;     /* confirm_action's pump checks this */
+        const char* title = vault_missing
+            ? "Vault folder not found" : "Welcome to Downsee";
+        char msg[400];
+        if (vault_missing) {
+            /* Truncate from the LEFT with "..." so absurdly mangled
+             * paths (a previous build double-prefixed; you're seeing
+             * that legacy here) don't overflow the dialog. */
+            const char* p = vault_path ? vault_path : "";
+            char shown[110];
+            size_t pn = strlen(p);
+            if (pn > sizeof shown - 1) {
+                snprintf(shown, sizeof shown, "...%s",
+                         p + (pn - (sizeof shown - 5)));
+            } else {
+                snprintf(shown, sizeof shown, "%s", p);
+            }
+            snprintf(msg, sizeof msg,
+                "The saved vault folder no longer exists:\n%s\n"
+                "Pick a new one to continue.",
+                shown);
+        } else {
+            snprintf(msg, sizeof msg,
+                "Pick a folder where your markdown notes live.\n"
+                "You can change this later from File > Open Dir...");
+        }
+        bool pick = confirm_action(a, title, msg,
+            "Choose folder...", "Skip for now");
+        if (pick) {
+            char dir[1024];
+            if (app_dir_modal(a, "Choose vault folder", NULL,
+                              dir, sizeof dir))
+            {
+                n = vault_scan(&a->vault, dir);
+                fprintf(stderr, "downsee: vault chosen '%s' (%d items)\n",
+                        dir, n);
+                recent_dirs_push(a, dir);
+                settings_persist(a);
+            }
+        }
+    } else if (vault_path && vault_path[0]) {
+        /* Successful boot with a saved vault path — record it as recent
+         * even on first encounter so the user can quickly switch back
+         * after sampling other folders. */
+        recent_dirs_push(a, a->vault.dir ? a->vault.dir : vault_path);
     }
 
     /* Restore the recent files list before any load_note call so we can show
@@ -1882,8 +2999,9 @@ static void save_collapse_state(App* a)
     fclose(fp);
 }
 
-/* Forward decl — settings_persist lives way down with the settings page. */
-static int settings_persist(App* a);
+/* Forward decl — persist_vault_path is a tiny wrapper around the
+ * full settings_persist defined later in the file. */
+static void persist_vault_path(App* a);
 
 static void app_shutdown(App* a)
 {
@@ -4374,6 +5492,7 @@ static void action_save          (App* a);
 static void action_save_as       (App* a);
 static void action_new_file      (App* a);
 static void action_open_file     (App* a);
+static void action_open_dir      (App* a);
 static void action_quit          (App* a);
 static void action_undo          (App* a);
 static void action_redo          (App* a);
@@ -4393,12 +5512,13 @@ static void action_keybindings   (App* a);
 static void action_colors        (App* a);
 
 static const MenuItem MENU_FILE[] = {
-    { "New",          "Ctrl+N",       action_new_file },
-    { "Open\xe2\x80\xa6","Ctrl+O",    action_open_file },
-    { "Quick switch", "Ctrl+P",       action_quick_switch },
-    { "Save",         "Ctrl+S",       action_save },
+    { "New",                "Ctrl+N",       action_new_file },
+    { "Open\xe2\x80\xa6",   "Ctrl+O",       action_open_file },
+    { "Open Dir\xe2\x80\xa6",NULL,          action_open_dir },
+    { "Quick switch",       "Ctrl+P",       action_quick_switch },
+    { "Save",               "Ctrl+S",       action_save },
     { "Save As\xe2\x80\xa6","Ctrl+Shift+S", action_save_as },
-    { "Quit",         "Ctrl+Q",       action_quit },
+    { "Quit",               "Ctrl+Q",       action_quit },
     { NULL, NULL, NULL }
 };
 static const MenuItem MENU_EDIT[] = {
@@ -4434,10 +5554,50 @@ static const MenuItem MENU_HELP[] = {
 static const MenuItem* MENU_TABLES[4] = {
     MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_HELP
 };
-static int menu_count(int idx) {
+/* Static accessors used by the menu rendering — the static menu tables
+ * don't carry an App pointer, so dynamic content (recent vaults) is
+ * fetched off the singleton wndproc App pointer. */
+static int app_recent_dirs_count(void)
+{
+    return g_app_for_wndproc ? g_app_for_wndproc->recent_dirs_count : 0;
+}
+static const char* app_recent_dir_at(int i)
+{
+    if (!g_app_for_wndproc) return "";
+    if (i < 0 || i >= g_app_for_wndproc->recent_dirs_count) return "";
+    return g_app_for_wndproc->recent_dirs[i];
+}
+
+static int menu_count_static(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     const MenuItem* m = MENU_TABLES[idx];
     int n = 0; while (m[n].label) n++; return n;
+}
+
+/* Forward decl so menu_count can know how many recent dirs to surface
+ * under the File menu without referring to the App struct directly. */
+static int  app_recent_dirs_count(void);
+static const char* app_recent_dir_at(int i);
+
+static int menu_count(int idx) {
+    int n = menu_count_static(idx);
+    if (idx == 0 && app_recent_dirs_count() > 0) {
+        /* +1 for the "Recent vaults" submenu row. The recent entries
+         * themselves live in a child popup, not in this list. */
+        n += 1;
+    }
+    return n;
+}
+
+/* True if the row at `row` of the currently-open menu is the
+ * "Recent vaults" entry that opens the inner submenu. */
+static bool ctx_is_recent_submenu_row(const App* a, int row)
+{
+    if (a->ctx_menu_kind != CTX_KIND_MENU) return false;
+    if (a->ctx_menu_target != 0)           return false;
+    if (app_recent_dirs_count() <= 0)      return false;
+    int sn = menu_count_static(0);
+    return row == sn;
 }
 
 /* Sidebar menu actions. */
@@ -4446,6 +5606,7 @@ typedef enum {
     CTX_RENAME,
     CTX_DELETE,
     CTX_NEW_FILE,
+    CTX_NEW_DIR,
     CTX_COUNT,
 } CtxAction;
 
@@ -4454,6 +5615,7 @@ static const char* CTX_LABELS[CTX_COUNT] = {
     "Rename…",
     "Delete",
     "New file here…",
+    "New folder here…",
 };
 
 /* Editor formatting menu actions, ordered as they appear in the popup. */
@@ -4503,15 +5665,16 @@ static int ctx_action_applies(const App* app, CtxAction a)
 {
     int idx = app->ctx_menu_target;
     if (idx < 0) {                                 /* empty-area menu */
-        return a == CTX_NEW_FILE;
+        return a == CTX_NEW_FILE || a == CTX_NEW_DIR;
     }
     const VaultItem* it = &app->vault.items[idx];
     if (it->is_dir) {
-        return a == CTX_NEW_FILE || a == CTX_RENAME || a == CTX_DELETE;
+        return a == CTX_NEW_FILE || a == CTX_NEW_DIR
+            || a == CTX_RENAME || a == CTX_DELETE;
     }
     /* file */
     return a == CTX_OPEN || a == CTX_RENAME || a == CTX_DELETE
-        || a == CTX_NEW_FILE;
+        || a == CTX_NEW_FILE || a == CTX_NEW_DIR;
 }
 
 static int ctx_sidebar_visible_count(const App* app)
@@ -4551,7 +5714,10 @@ static const char* ctx_label_at(const App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
         if (row < 0 || row >= n) return "";
-        return MENU_TABLES[a->ctx_menu_target][row].label;
+        int sn = menu_count_static(a->ctx_menu_target);
+        if (row < sn) return MENU_TABLES[a->ctx_menu_target][row].label;
+        if (a->ctx_menu_target == 0 && row == sn) return "Recent vaults";
+        return "";
     }
     CtxAction act = ctx_action_at_row(a, row);
     return (act < CTX_COUNT) ? CTX_LABELS[act] : "";
@@ -4566,8 +5732,12 @@ static const char* ctx_shortcut_at(const App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
         if (row < 0 || row >= n) return "";
-        const char* s = MENU_TABLES[a->ctx_menu_target][row].shortcut;
-        return s ? s : "";
+        int sn = menu_count_static(a->ctx_menu_target);
+        if (row < sn) {
+            const char* s = MENU_TABLES[a->ctx_menu_target][row].shortcut;
+            return s ? s : "";
+        }
+        return "";
     }
     return "";
 }
@@ -4661,7 +5831,95 @@ static void ctx_menu_open_menu(App* a, int menu_idx, int x, int y)
     if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
 }
 
-static void ctx_menu_close(App* a) { a->ctx_menu_active = false; a->menu_open = -1; }
+static void ctx_menu_close(App* a) {
+    a->ctx_menu_active = false;
+    a->ctx_submenu_active = false;
+    a->ctx_submenu_hover = -1;
+    a->menu_open = -1;
+}
+
+/* ----------------------------- recent-vaults submenu ------------------- */
+
+static int submenu_row_h(const App* a)
+{
+    return font_line_height(a->font_body) + 8;
+}
+
+static int submenu_w(const App* a)
+{
+    int n = app_recent_dirs_count();
+    if (n <= 0) return 220;
+    int max_label = 0;
+    for (int i = 0; i < n; ++i) {
+        const char* L = app_recent_dir_at(i);
+        int lw = font_measure(a->font_body, L, strlen(L));
+        if (lw > max_label) max_label = lw;
+    }
+    int w = max_label + 26;          /* 14 left pad + 12 right pad */
+    if (w < 220) w = 220;
+    if (w > 480) w = 480;            /* clamp so very long paths don't overflow */
+    return w;
+}
+
+static int submenu_h(const App* a)
+{
+    int n = app_recent_dirs_count();
+    if (n > 16) n = 16;               /* hard cap to keep row_t array sized */
+    return submenu_row_h(a) * n + 8;
+}
+
+static SDL_Rect submenu_box_rect(const App* a)
+{
+    int sn = menu_count_static(0);
+    int parent_rh = ctx_menu_row_h(a);
+    int parent_w  = ctx_menu_w(a);
+    /* Anchored to the right edge of the parent menu, vertically aligned
+     * with the recent-vaults row. */
+    int x = a->ctx_menu_x + parent_w - 2;
+    int y = a->ctx_menu_y + 4 + sn * parent_rh - 4;
+    int w = submenu_w(a);
+    int h = submenu_h(a);
+    /* Flip to the left if the submenu would overflow the right edge. */
+    if (x + w > a->win_w - 4) x = a->ctx_menu_x - w + 2;
+    if (x < 4) x = 4;
+    if (y + h > a->win_h - 4) y = a->win_h - 4 - h;
+    if (y < 4) y = 4;
+    return (SDL_Rect){ x, y, w, h };
+}
+
+static int submenu_row_at(const App* a, int mx, int my)
+{
+    if (!a->ctx_submenu_active) return -1;
+    SDL_Rect b = submenu_box_rect(a);
+    if (mx < b.x || mx >= b.x + b.w) return -1;
+    if (my < b.y || my >= b.y + b.h) return -1;
+    int rh = submenu_row_h(a);
+    int row = (my - b.y - 4) / rh;
+    int n = app_recent_dirs_count();
+    if (n > 16) n = 16;
+    if (row < 0 || row >= n) return -1;
+    return row;
+}
+
+/* Open the recent vault at submenu row `row` and close everything. */
+static void submenu_invoke_row(App* a, int row)
+{
+    int n = app_recent_dirs_count();
+    if (row < 0 || row >= n) { ctx_menu_close(a); return; }
+    const char* path = app_recent_dir_at(row);
+    ctx_menu_close(a);
+    if (path && *path) {
+        char snap[1024];
+        snprintf(snap, sizeof snap, "%s", path);
+        int nfound = vault_scan(&a->vault, snap);
+        recent_dirs_push(a, snap);
+        settings_persist(a);
+        char msg[300];
+        snprintf(msg, sizeof msg, "vault: %s (%d note%s)",
+                 snap, nfound, nfound == 1 ? "" : "s");
+        app_notify(a, msg);
+    }
+}
 
 /* Translate a screen y to the row index inside the menu, or -1 if outside. */
 static int ctx_menu_row_at(const App* a, int mx, int my)
@@ -4732,7 +5990,70 @@ static void render_context_menu(App* a)
             font_draw_line(a->font_body, shortc, strlen(shortc),
                            box.x + w - sw - 12,
                            y + font_ascent(a->font_body) + 3, sc);
+        } else if (ctx_is_recent_submenu_row(a, r)) {
+            /* Submenu chevron on the right edge — same color cross-fade
+             * as the label so it tints with hover. */
+            const char* chev = ">";
+            int cw_ = font_measure(a->font_body, chev, strlen(chev));
+            font_draw_line(a->font_body, chev, strlen(chev),
+                           box.x + w - cw_ - 12,
+                           y + font_ascent(a->font_body) + 3, c);
         }
+        y += rh;
+    }
+}
+
+/* Recent-vaults submenu card. Renders only while open (or fading). Same
+ * card/shadow/row treatment as the parent context menu so it visually
+ * reads as a child of it. */
+static void render_recent_submenu(App* a)
+{
+    if (!a->ctx_submenu_active && a->ctx_submenu_open_t < 0.01f) return;
+    if (a->ctx_menu_kind != CTX_KIND_MENU || a->ctx_menu_target != 0) return;
+    int n = app_recent_dirs_count();
+    if (n <= 0) return;
+    if (n > 16) n = 16;
+
+    SDL_Rect box = submenu_box_rect(a);
+    int rh = submenu_row_h(a);
+    float et = ease_out_cubic(a->ctx_submenu_open_t);
+    int rise = (int)((1.0f - et) * 6.0f);
+    int alpha = (int)(255.0f * et);
+    box.y += rise;
+
+    SDL_Rect shadow = { box.x - 1, box.y + 4, box.w + 2, box.h + 4 };
+    SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, (Uint8)(80 * et));
+    fill_rrect(a->renderer, shadow, 8);
+    overlay_card(a, box);
+
+    int y = box.y + 4;
+    for (int r = 0; r < n; ++r) {
+        float rt = ease_out_cubic(a->ctx_submenu_row_t[r]);
+        if (rt > 0.01f) {
+            SDL_Rect hr = { box.x + 2, y, box.w - 4, rh };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+                a->bg_sidebar_hover.b, (Uint8)(220 * rt * et));
+            fill_rrect(a->renderer, hr, 4);
+            SDL_Rect bar = { box.x + 2, y + 2, 2, rh - 4 };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_link.r, a->fg_link.g, a->fg_link.b,
+                (Uint8)(220 * rt * et));
+            fill_rrect(a->renderer, bar, 1);
+        }
+        const char* label = app_recent_dir_at(r);
+        int lr = (int)(a->fg.r + (a->fg_link.r - a->fg.r) * rt);
+        int lg = (int)(a->fg.g + (a->fg_link.g - a->fg.g) * rt);
+        int lb = (int)(a->fg.b + (a->fg_link.b - a->fg.b) * rt);
+        SDL_Color c = { (Uint8)lr, (Uint8)lg, (Uint8)lb, (Uint8)alpha };
+        /* Clip the path text to the row width so over-long paths don't
+         * spill out of the card. */
+        SDL_Rect clip = { box.x + 4, y, box.w - 8, rh };
+        SDL_RenderSetClipRect(a->renderer, &clip);
+        font_draw_line(a->font_body, label, strlen(label),
+                       box.x + 14,
+                       y + font_ascent(a->font_body) + 3, c);
+        SDL_RenderSetClipRect(a->renderer, NULL);
         y += rh;
     }
 }
@@ -4836,8 +6157,8 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             bool is_abs = (a->tinput_text[0] == '/' || a->tinput_text[0] == '\\' ||
                            (a->tinput_len >= 2 && a->tinput_text[1] == ':'));
             if (is_abs) snprintf(picked, sizeof picked, "%s", a->tinput_text);
-            else if (a->tinput_dir[0]) snprintf(picked, sizeof picked, "%s/%s",
-                                                a->tinput_dir, a->tinput_text);
+            else if (a->tinput_dir[0]) path_join_safe(picked, sizeof picked,
+                                                      a->tinput_dir, a->tinput_text);
             else snprintf(picked, sizeof picked, "%s", a->tinput_text);
             if (strcmp(picked, it->path) != 0) {
                 char old_base[256], new_base[256];
@@ -4918,8 +6239,8 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             bool is_abs = (a->tinput_text[0] == '/' || a->tinput_text[0] == '\\' ||
                            (a->tinput_len >= 2 && a->tinput_text[1] == ':'));
             if (is_abs) snprintf(picked, sizeof picked, "%s", a->tinput_text);
-            else if (a->tinput_dir[0]) snprintf(picked, sizeof picked, "%s/%s",
-                                                a->tinput_dir, a->tinput_text);
+            else if (a->tinput_dir[0]) path_join_safe(picked, sizeof picked,
+                                                      a->tinput_dir, a->tinput_text);
             else snprintf(picked, sizeof picked, "%s", a->tinput_text);
             FILE* f = fopen(picked, "wb");
             if (f) {
@@ -4930,6 +6251,43 @@ static void ctx_menu_invoke(App* a, CtxAction act)
                 a->vault.selected = vault_index_of(&a->vault, picked);
             } else {
                 fprintf(stderr, "create failed: %s\n", picked);
+            }
+            break;
+        }
+        case CTX_NEW_DIR: {
+            /* Same target-dir resolution as CTX_NEW_FILE — folder of
+             * the right-clicked entry, or vault root for empty area. */
+            char dir[1024] = {0};
+            if (it) {
+                if (it->is_dir)
+                    snprintf(dir, sizeof dir, "%s", it->path);
+                else
+                    dirname_of(it->path, dir, sizeof dir);
+            } else if (a->vault.dir) {
+                snprintf(dir, sizeof dir, "%s", a->vault.dir);
+            }
+            if (!app_text_modal(a, "New folder name", "untitled", dir))
+                return;
+            if (a->tinput_len == 0) return;
+            char picked[1024];
+            bool is_abs = (a->tinput_text[0] == '/' || a->tinput_text[0] == '\\' ||
+                           (a->tinput_len >= 2 && a->tinput_text[1] == ':'));
+            if (is_abs) snprintf(picked, sizeof picked, "%s", a->tinput_text);
+            else if (a->tinput_dir[0]) path_join_safe(picked, sizeof picked,
+                                                      a->tinput_dir, a->tinput_text);
+            else snprintf(picked, sizeof picked, "%s", a->tinput_text);
+#ifdef _WIN32
+            BOOL ok_mk = CreateDirectoryA(picked, NULL);
+            int  err   = ok_mk ? 0
+                : (GetLastError() == ERROR_ALREADY_EXISTS ? 0 : -1);
+#else
+            int err = (mkdir(picked, 0755) == 0 || errno == EEXIST) ? 0 : -1;
+#endif
+            if (err == 0) {
+                if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
+                a->vault.selected = vault_index_of(&a->vault, picked);
+            } else {
+                fprintf(stderr, "mkdir failed: %s\n", picked);
             }
             break;
         }
@@ -5025,14 +6383,23 @@ static void ctx_menu_invoke_row(App* a, int row)
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int idx = a->ctx_menu_target;
+        int sn  = menu_count_static(idx);
         int n   = menu_count(idx);
-        if (row >= 0 && row < n) {
+        if (row < 0 || row >= n) { ctx_menu_close(a); return; }
+        if (row < sn) {
             void (*fn)(App*) = MENU_TABLES[idx][row].fn;
             ctx_menu_close(a);
             if (fn) fn(a);
-        } else {
-            ctx_menu_close(a);
+            return;
         }
+        /* "Recent vaults" submenu row — clicking it just toggles the
+         * inner popup; it doesn't close the parent menu. The submenu
+         * also opens automatically on hover (see MOUSEMOTION). */
+        if (idx == 0 && row == sn && app_recent_dirs_count() > 0) {
+            a->ctx_submenu_active = !a->ctx_submenu_active;
+            return;
+        }
+        ctx_menu_close(a);
         return;
     }
     ctx_menu_invoke(a, ctx_action_at_row(a, row));
@@ -5605,7 +6972,7 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             int idx = font_choice_find(a->cfg_font_path);
             if (idx >= 0) a->settings_font_idx = idx;
             need_reload_fonts = true;
-            remove("data/init-overrides.lua");
+            remove("settings.lua");
             app_notify(a, "settings reset to defaults");
             break;
         }
@@ -5627,15 +6994,66 @@ static void fputs_lua_string(FILE* f, const char* s)
 
 /* Persist the current live settings to data/init-overrides.lua. Loaded after
  * init.lua at next startup, with overlay semantics (overlay keys win). */
+/* Trigger settings_persist after the vault is changed at runtime. Defined
+ * here so it sits next to the persistence routine; just forwards. */
+static int settings_persist(App* a);
+static void persist_vault_path(App* a) { settings_persist(a); }
+
+/* Push `dir` onto recent_dirs (most-recent first), removing any prior copy
+ * and capping the list at 5 entries. Quiet no-op for empty paths. */
+static void recent_dirs_push(App* a, const char* dir)
+{
+    if (!dir || !*dir) return;
+    int max = (int)(sizeof a->recent_dirs / sizeof a->recent_dirs[0]);
+    /* Remove an existing entry so it floats to the top. */
+    int found = -1;
+    for (int i = 0; i < a->recent_dirs_count; ++i) {
+        if (strcmp(a->recent_dirs[i], dir) == 0) { found = i; break; }
+    }
+    if (found >= 0) {
+        for (int i = found; i + 1 < a->recent_dirs_count; ++i)
+            snprintf(a->recent_dirs[i], sizeof a->recent_dirs[i],
+                     "%s", a->recent_dirs[i + 1]);
+        a->recent_dirs_count--;
+    }
+    /* Shift everyone down by one and put new entry at index 0. */
+    int n = a->recent_dirs_count < max - 1 ? a->recent_dirs_count : max - 1;
+    for (int i = n; i > 0; --i)
+        snprintf(a->recent_dirs[i], sizeof a->recent_dirs[i],
+                 "%s", a->recent_dirs[i - 1]);
+    snprintf(a->recent_dirs[0], sizeof a->recent_dirs[0], "%s", dir);
+    if (a->recent_dirs_count < max) a->recent_dirs_count++;
+}
+
+static void recent_dirs_load(App* a)
+{
+    a->recent_dirs_count = 0;
+    int n = lua_host_cfg_array_length(a->lua, "recent_dirs");
+    int max = (int)(sizeof a->recent_dirs / sizeof a->recent_dirs[0]);
+    if (n > max) n = max;
+    for (int i = 0; i < n; ++i) {
+        const char* s = lua_host_cfg_array_string(a->lua, "recent_dirs", i + 1);
+        /* Skip empty strings and the COMPUTER sentinel — neither is a real
+         * directory and we never want to surface either to the user. */
+        if (!s || !*s) continue;
+        if (strcmp(s, "::COMPUTER::") == 0) continue;
+        snprintf(a->recent_dirs[a->recent_dirs_count],
+                 sizeof a->recent_dirs[0], "%s", s);
+        a->recent_dirs_count++;
+    }
+}
+
 static int settings_persist(App* a)
 {
-    const char* path = "data/init-overrides.lua";
+    const char* path = "settings.lua";
     FILE* f = fopen(path, "wb");
     if (!f) return -1;
     fprintf(f,
-        "-- Auto-generated by Downsee settings page (Ctrl+,).\n"
-        "-- This file overrides init.lua. Edit init.lua for the baseline\n"
-        "-- and use the settings page for per-machine adjustments.\n"
+        "-- Downsee settings -- auto-generated.\n"
+        "-- Edit values to override defaults. Re-saving from the\n"
+        "-- settings page (Ctrl+,) overwrites this file with the\n"
+        "-- known keys; manual additions outside that set survive\n"
+        "-- only until the next save.\n"
         "return {\n");
     fprintf(f, "    font_path      = "); fputs_lua_string(f, a->cfg_font_path);      fprintf(f, ",\n");
     fprintf(f, "    font_path_mono = "); fputs_lua_string(f, a->cfg_font_path_mono); fprintf(f, ",\n");
@@ -5650,6 +7068,21 @@ static int settings_persist(App* a)
     fprintf(f, "    outline_pinned = %s,\n",
             a->outline_pinned ? "true" : "false");
     fprintf(f, "    outline_panel_width = %d,\n", a->outline_panel_w);
+    if (a->vault.dir && a->vault.dir[0]) {
+        fprintf(f, "    vault_path     = ");
+        fputs_lua_string(f, a->vault.dir);
+        fprintf(f, ",\n");
+    }
+    /* Recent vault directories — most-recent first, capped at 5. */
+    if (a->recent_dirs_count > 0) {
+        fprintf(f, "    recent_dirs    = {\n");
+        for (int i = 0; i < a->recent_dirs_count; ++i) {
+            fprintf(f, "        ");
+            fputs_lua_string(f, a->recent_dirs[i]);
+            fprintf(f, ",\n");
+        }
+        fprintf(f, "    },\n");
+    }
     if (a->settings_theme_idx >= 0 && a->settings_theme_idx < G_THEME_COUNT) {
         /* A named theme is selected. Write only the theme name; let it
          * define the 14 colors at next launch. Writing color_* here would
@@ -8217,6 +9650,7 @@ static void render_resize_badge  (App* a);
 static void render_link_tooltip  (App* a);
 static void render_wiki_complete (App* a);
 static void render_context_menu  (App* a);
+static void render_recent_submenu(App* a);
 static void render_settings      (App* a);
 static void render_help          (App* a);
 static void render_keybind       (App* a);
@@ -8306,6 +9740,20 @@ static void app_animate(App* a)
             if (fabsf(a->ctx_menu_row_t[r] - t) > 0.005f) moving = true;
         }
     }
+    /* Recent-vaults submenu animation — same shape as the parent. */
+    {
+        float target = a->ctx_submenu_active ? 1.0f : 0.0f;
+        a->ctx_submenu_open_t =
+            anim_step(a->ctx_submenu_open_t, target, dt, 22.0f);
+        if (fabsf(a->ctx_submenu_open_t - target) > 0.005f) moving = true;
+        for (int r = 0; r < 16; ++r) {
+            float t = (a->ctx_submenu_active && r == a->ctx_submenu_hover)
+                ? 1.0f : 0.0f;
+            a->ctx_submenu_row_t[r] =
+                anim_step(a->ctx_submenu_row_t[r], t, dt, 18.0f);
+            if (fabsf(a->ctx_submenu_row_t[r] - t) > 0.005f) moving = true;
+        }
+    }
 
     a->wants_anim_frame = moving;
 }
@@ -8335,6 +9783,7 @@ static void app_render(App* a)
     render_plugins(a);
     render_wiki_complete(a);
     render_context_menu(a);
+    render_recent_submenu(a);
     render_settings(a);
     render_keybind(a);
     render_picker(a);
@@ -8351,8 +9800,13 @@ static void app_render(App* a)
      * that may still be visible. */
     render_resize_badge(a);
     render_link_tooltip(a);
-    render_confirm_modal(a);
+    /* tinput modal first, then rename popup, confirm modal LAST. Order
+     * matters when one is nested inside the other (e.g. Delete-confirm
+     * or Rename popup fired from inside the folder picker) — whichever
+     * renders later wins the click. */
     render_tinput_modal(a);
+    render_rename_popup(a);
+    render_confirm_modal(a);
 
     SDL_RenderPresent(a->renderer);
 }
@@ -10442,12 +11896,34 @@ static void action_rename        (App* a) {
     }
 }
 static void action_open_file     (App* a) {
-    /* Route to the in-app quick switcher rather than the native Win32
-     * picker — same surface area, fuzzy-search across the vault, and
-     * styled like everything else. */
-    switcher_open(a);
+    /* Native file picker so the user can open ANY .md on disk, not just
+     * notes inside the current vault. Quick switch covers in-vault
+     * fuzzy navigation; this complements it. */
+    if (!confirm_discard(a)) return;
+    char* p = vault_open_dialog(a->window);
+    if (!p) return;
+    load_note(a, p);
+    free(p);
 }
 static void action_quick_switch  (App* a) { switcher_open(a); }
+static void persist_vault_path   (App* a);
+static void action_open_dir      (App* a) {
+    /* Pick a new vault root via the in-app folder picker. Re-scans the
+     * sidebar and persists the choice into settings.lua so the next
+     * launch picks it up. */
+    char dir[1024];
+    const char* start = (a->vault.dir && a->vault.dir[0])
+                        ? a->vault.dir : NULL;
+    if (!app_dir_modal(a, "Choose vault folder", start, dir, sizeof dir))
+        return;
+    int n = vault_scan(&a->vault, dir);
+    recent_dirs_push(a, dir);
+    char msg[300];
+    snprintf(msg, sizeof msg, "vault: %s (%d note%s)",
+             dir, n, n == 1 ? "" : "s");
+    app_notify(a, msg);
+    persist_vault_path(a);
+}
 static void action_command_palette(App* a) { cmdp_open(a); }
 static void action_plugins        (App* a) { plugins_open(a); }
 static void action_find          (App* a) {
@@ -10865,6 +12341,7 @@ static void action_daily(App* a)
 static const ActionEntry ACTIONS[] = {
     { "new_file",        "File",       action_new_file        },
     { "open_file",       "File",       action_open_file       },
+    { "open_dir",        "File",       action_open_dir        },
     { "quick_switch",    "File",       action_quick_switch    },
     { "command_palette", "App",        action_command_palette },
     { "plugins",         "App",        action_plugins         },
@@ -11144,9 +12621,36 @@ static void app_event(App* a, const SDL_Event* e)
                 my >= cv->y && my < cv->y + cv->h)        a->crumb_hover = 0;
             else if (ct->w > 0 && mx >= ct->x && mx < ct->x + ct->w &&
                      my >= ct->y && my < ct->y + ct->h)   a->crumb_hover = 1;
-            if (a->ctx_menu_active)
-                a->ctx_menu_hover =
-                    ctx_menu_row_at(a, e->motion.x, e->motion.y);
+            if (a->ctx_menu_active) {
+                int parent_row = ctx_menu_row_at(a, e->motion.x, e->motion.y);
+                int sub_row    = a->ctx_submenu_active
+                    ? submenu_row_at(a, e->motion.x, e->motion.y)
+                    : -1;
+                /* Don't change parent hover when the cursor is inside the
+                 * submenu — keeps the recent-vaults row highlighted while
+                 * the user picks an entry. */
+                if (sub_row < 0) a->ctx_menu_hover = parent_row;
+                a->ctx_submenu_hover = sub_row;
+                /* Open the submenu the moment the cursor lands on the
+                 * recent-vaults row. Close it when the cursor moves to a
+                 * different parent row that isn't the submenu itself. */
+                if (parent_row >= 0 &&
+                    ctx_is_recent_submenu_row(a, parent_row))
+                {
+                    if (!a->ctx_submenu_active) {
+                        a->ctx_submenu_active = true;
+                        a->ctx_submenu_hover  = -1;
+                        a->ctx_submenu_open_t = 0.0f;
+                        for (int r = 0; r < 16; ++r)
+                            a->ctx_submenu_row_t[r] = 0.0f;
+                    }
+                } else if (parent_row >= 0 && sub_row < 0 &&
+                           a->ctx_submenu_active)
+                {
+                    a->ctx_submenu_active = false;
+                    a->ctx_submenu_hover  = -1;
+                }
+            }
             if (a->settings_active)
                 a->settings_hover =
                     settings_hit_test(a, e->motion.x, e->motion.y, NULL, NULL);
@@ -11861,8 +13365,14 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 break;
             }
-            /* Left-click on the open context menu chooses or dismisses. */
+            /* Left-click on the open context menu chooses or dismisses.
+             * Submenu rows are checked first so a click on a recent-vault
+             * entry doesn't fall through to the parent dismiss path. */
             if (a->ctx_menu_active && e->button.button == SDL_BUTTON_LEFT) {
+                if (a->ctx_submenu_active) {
+                    int srow = submenu_row_at(a, e->button.x, e->button.y);
+                    if (srow >= 0) { submenu_invoke_row(a, srow); break; }
+                }
                 int row = ctx_menu_row_at(a, e->button.x, e->button.y);
                 if (row >= 0) {
                     ctx_menu_invoke_row(a, row);
