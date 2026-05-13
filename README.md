@@ -156,7 +156,10 @@ invoked by name or bound to a key.
 ## Keyboard
 
 A non-exhaustive list. Every binding is editable from `Settings >
-Keybindings` and persists to `data/init-overrides.lua`.
+Keybindings` and persists to `settings.lua` next to the exe. Edit-mode
+soft wrap is on by default; toggle with **Alt+Z** (or *View > Toggle Word
+Wrap*). When off, long lines extend past the viewport and a horizontal
+scrollbar appears at the bottom (Shift+wheel pans).
 
 | Action                | Shortcut          |
 |-----------------------|-------------------|

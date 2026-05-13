@@ -50,7 +50,10 @@ typedef struct {
                             * preview renders the image; edit/save blocked */
 
     int      scroll_y;
+    int      scroll_x;          /* horizontal pan offset, only used when
+                                 * edit mode wrap is off (cfg_edit_wrap) */
     int      doc_height_px;
+    int      doc_width_px;      /* widest visible line in px, for hscroll */
 
     /* Vault sidebar */
     Vault    vault;
@@ -237,6 +240,12 @@ typedef struct {
      *   2 = always CRLF                                            */
     int      cfg_line_endings;
 
+    /* Edit-mode soft wrap. true = long lines wrap visually at the
+     * viewport width (file content unchanged). false = lines extend
+     * past the viewport and a horizontal scrollbar appears. Toggleable
+     * via View > Toggle Word Wrap. */
+    bool     cfg_edit_wrap;
+
     /* Custom in-app confirmation modal (replaces SDL_ShowMessageBox).
      * Synchronous: confirm_discard pumps SDL events itself until the
      * user hits a button. */
@@ -277,6 +286,7 @@ typedef struct {
     char     tinput_renpop_text[260];  /* live edit buffer                */
     int      tinput_renpop_len;
     int      tinput_renpop_cursor;
+    int      tinput_renpop_sel_anchor; /* -1 = no selection               */
     int      tinput_renpop_choice;     /* -1 pending, 0 = OK, 1 = Cancel  */
     int      tinput_renpop_hover;      /* 0 = OK, 1 = Cancel, -1 = none   */
     bool     tinput_renpop_err;
@@ -287,6 +297,7 @@ typedef struct {
     char     tinput_text[260];
     int      tinput_len;
     int      tinput_cursor;          /* caret position within tinput_text */
+    int      tinput_sel_anchor;      /* -1 = no selection                */
     /* Dir-listing for the modal so Save/Rename/New show actual files
      * in the target directory. tinput_files entries are heap-allocated
      * basenames; freed when the modal closes. */
@@ -310,7 +321,7 @@ typedef struct {
      * and the y-offset within the thumb when the drag started. */
     enum { SB_NONE = 0, SB_DOC, SB_KEYBIND, SB_OUTLINE_PANEL,
            SB_VSEARCH, SB_OUTLINE_LIST, SB_BACKLINKS, SB_TAGS, SB_PICKER,
-           SB_CMDP, SB_TINPUT }
+           SB_CMDP, SB_TINPUT, SB_DOC_H }
                                                               sb_drag;
     int      sb_drag_offset;
 

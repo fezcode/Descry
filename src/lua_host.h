@@ -12,7 +12,7 @@ int lua_host_load_config(LuaHost* h, const char* path);
 
 /* Run a Lua file and merge its returned table over the existing config —
  * keys present in the overlay overwrite the base; absent keys keep the
- * base value. Used for `init-overrides.lua` / settings persistence. */
+ * base value. Used for `settings.lua` overlay persistence. */
 int lua_host_overlay_config(LuaHost* h, const char* path);
 
 /* Read a string from the loaded config table (top-level key). Returned string

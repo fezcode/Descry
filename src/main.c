@@ -180,7 +180,7 @@ static void overlay_card(App* a, SDL_Rect box)
 /* ----------------------------- theme presets ---------------------------- */
 /* Each theme is a complete set of UI colors. The settings page cycles through
  * these and applies all 14 colors to the App on selection. The theme name
- * is what's persisted to init-overrides.lua. */
+ * is what's persisted to settings.lua. */
 typedef struct {
     char name[32];
     SDL_Color bg, fg, fg_heading, fg_quote, fg_link;
@@ -906,7 +906,9 @@ static int load_note(App* a, const char* path)
     free(a->note_path);
     a->note_path      = strdup(path);
     a->scroll_y       = 0;
+    a->scroll_x       = 0;
     a->doc_height_px  = 0;
+    a->doc_width_px   = 0;
     a->vault.selected = vault_index_of(&a->vault, path);
 
     recent_push(a, path);
@@ -1527,6 +1529,207 @@ static int tinput_list_scrollbar_geom(const App* a, const SDL_Rect* list_r,
                                        track, thumb);
 }
 
+/* ----------------------------- input field helper ---------------------- */
+
+/* A view onto a fixed-cap text buffer that wraps the bookkeeping needed
+ * for a single-line input with selection: cursor + selection anchor +
+ * length pointers. Lets the modal text-input modals share selection,
+ * clipboard, and word-jump logic without duplicating it per modal. */
+typedef struct {
+    char* buf;       /* points to the modal's text buffer        */
+    int   cap;       /* sizeof(buf), incl. terminator slot       */
+    int*  len;       /* current byte length                      */
+    int*  cursor;    /* caret byte offset                        */
+    int*  sel_anchor;/* -1 if no selection, else byte offset     */
+} InputField;
+
+static bool input_has_sel(const InputField* f)
+{
+    return *f->sel_anchor >= 0 && *f->sel_anchor != *f->cursor;
+}
+
+static void input_get_sel(const InputField* f, int* lo, int* hi)
+{
+    int aa = *f->sel_anchor, c = *f->cursor;
+    if (aa < c) { *lo = aa; *hi = c; } else { *lo = c; *hi = aa; }
+}
+
+static void input_clear_sel(InputField* f) { *f->sel_anchor = -1; }
+
+static void input_delete_sel(InputField* f)
+{
+    if (!input_has_sel(f)) return;
+    int lo, hi; input_get_sel(f, &lo, &hi);
+    memmove(f->buf + lo, f->buf + hi, (size_t)(*f->len - hi + 1));
+    *f->len    -= (hi - lo);
+    *f->cursor  = lo;
+    *f->sel_anchor = -1;
+}
+
+/* Insert n bytes at the caret; replaces selection if active. Truncates
+ * silently if the buffer is full. */
+static void input_insert(InputField* f, const char* s, int n)
+{
+    if (n <= 0) return;
+    input_delete_sel(f);
+    if (*f->len + n >= f->cap - 1) n = f->cap - 1 - *f->len;
+    if (n <= 0) return;
+    memmove(f->buf + *f->cursor + n,
+            f->buf + *f->cursor,
+            (size_t)(*f->len - *f->cursor + 1));
+    memcpy(f->buf + *f->cursor, s, (size_t)n);
+    *f->cursor += n;
+    *f->len    += n;
+}
+
+/* Path-and-word-aware word boundaries: stops at spaces, tabs, slashes,
+ * dots, and underscores so Ctrl+Arrow / Ctrl+Backspace feel natural for
+ * filenames like `foo_bar.baz/qux`. */
+static bool input_is_wordboundary(char c)
+{
+    return c == ' ' || c == '\t' || c == '/' || c == '\\' ||
+           c == '.' || c == '_'  || c == '-';
+}
+
+static int input_word_left(const char* buf, int cursor)
+{
+    int i = cursor;
+    while (i > 0 &&  input_is_wordboundary(buf[i - 1])) i--;
+    while (i > 0 && !input_is_wordboundary(buf[i - 1])) i--;
+    return i;
+}
+
+static int input_word_right(const char* buf, int len, int cursor)
+{
+    int i = cursor;
+    while (i < len &&  input_is_wordboundary(buf[i])) i++;
+    while (i < len && !input_is_wordboundary(buf[i])) i++;
+    return i;
+}
+
+/* Returns true if the keystroke was consumed. Handles selection-aware
+ * editing, Ctrl+A/C/V/X, Shift+Arrow extension, Ctrl+Arrow word jump,
+ * Ctrl+Backspace/Delete word delete, Home/End. */
+static bool input_handle_keydown(InputField* f, SDL_Keycode k, Uint16 mod)
+{
+    bool ctrl  = (mod & KMOD_CTRL)  != 0;
+    bool shift = (mod & KMOD_SHIFT) != 0;
+
+    if (ctrl && k == SDLK_a) {
+        *f->sel_anchor = 0;
+        *f->cursor     = *f->len;
+        return true;
+    }
+    if (ctrl && (k == SDLK_c || k == SDLK_x)) {
+        if (input_has_sel(f)) {
+            int lo, hi; input_get_sel(f, &lo, &hi);
+            int n = hi - lo;
+            char tmp[1024];
+            if (n >= (int)sizeof tmp) n = (int)sizeof tmp - 1;
+            memcpy(tmp, f->buf + lo, (size_t)n);
+            tmp[n] = 0;
+            SDL_SetClipboardText(tmp);
+            if (k == SDLK_x) input_delete_sel(f);
+        }
+        return true;
+    }
+    if (ctrl && k == SDLK_v) {
+        char* clip = SDL_GetClipboardText();
+        if (clip) {
+            /* Single-line field — strip CR/LF on paste. */
+            char filt[1024];
+            int nf = 0;
+            for (int i = 0; clip[i] && nf < (int)sizeof filt - 1; ++i) {
+                if (clip[i] != '\n' && clip[i] != '\r') filt[nf++] = clip[i];
+            }
+            filt[nf] = 0;
+            input_insert(f, filt, nf);
+            SDL_free(clip);
+        }
+        return true;
+    }
+
+    /* Cursor / selection movement */
+    if (k == SDLK_LEFT || k == SDLK_RIGHT ||
+        k == SDLK_HOME || k == SDLK_END)
+    {
+        if (shift) {
+            if (*f->sel_anchor < 0) *f->sel_anchor = *f->cursor;
+        } else {
+            /* Plain Left/Right when a selection exists collapses the
+             * caret to the corresponding edge — standard text-field UX. */
+            if (input_has_sel(f) && !ctrl &&
+                (k == SDLK_LEFT || k == SDLK_RIGHT))
+            {
+                int lo, hi; input_get_sel(f, &lo, &hi);
+                *f->cursor = (k == SDLK_LEFT) ? lo : hi;
+                input_clear_sel(f);
+                return true;
+            }
+            input_clear_sel(f);
+        }
+        if (k == SDLK_LEFT) {
+            *f->cursor = ctrl
+                ? input_word_left(f->buf, *f->cursor)
+                : (*f->cursor > 0 ? *f->cursor - 1 : 0);
+        } else if (k == SDLK_RIGHT) {
+            *f->cursor = ctrl
+                ? input_word_right(f->buf, *f->len, *f->cursor)
+                : (*f->cursor < *f->len ? *f->cursor + 1 : *f->len);
+        } else if (k == SDLK_HOME) {
+            *f->cursor = 0;
+        } else if (k == SDLK_END) {
+            *f->cursor = *f->len;
+        }
+        return true;
+    }
+
+    if (k == SDLK_BACKSPACE) {
+        if (input_has_sel(f)) {
+            input_delete_sel(f);
+        } else if (*f->cursor > 0) {
+            int from = ctrl ? input_word_left(f->buf, *f->cursor)
+                            : *f->cursor - 1;
+            memmove(f->buf + from, f->buf + *f->cursor,
+                    (size_t)(*f->len - *f->cursor + 1));
+            *f->len    -= (*f->cursor - from);
+            *f->cursor  = from;
+        }
+        return true;
+    }
+    if (k == SDLK_DELETE) {
+        if (input_has_sel(f)) {
+            input_delete_sel(f);
+        } else if (*f->cursor < *f->len) {
+            int to = ctrl ? input_word_right(f->buf, *f->len, *f->cursor)
+                          : *f->cursor + 1;
+            memmove(f->buf + *f->cursor, f->buf + to,
+                    (size_t)(*f->len - to + 1));
+            *f->len -= (to - *f->cursor);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+/* Draws a selection highlight under the input text. Caller passes the
+ * pixel rect of the input's text area + the field state. Caret rendering
+ * stays the caller's responsibility (it usually has theme-specific
+ * styling). */
+static void input_render_selection(App* a, const InputField* f,
+                                   int tx, int ty_top, int line_h)
+{
+    if (!input_has_sel(f)) return;
+    int lo, hi; input_get_sel(f, &lo, &hi);
+    int x0 = tx + font_measure(a->font_body, f->buf, lo);
+    int x1 = tx + font_measure(a->font_body, f->buf, hi);
+    SDL_Rect r = { x0, ty_top, x1 - x0, line_h };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_link.r, a->fg_link.g, a->fg_link.b, 90);
+    SDL_RenderFillRect(a->renderer, &r);
+}
+
 static void render_tinput_modal(App* a)
 {
     if (!a->tinput_active) return;
@@ -1564,6 +1767,15 @@ static void render_tinput_modal(App* a)
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
+    /* Selection highlight under the text. */
+    {
+        InputField f = {
+            .buf = a->tinput_text, .cap = (int)sizeof a->tinput_text,
+            .len = &a->tinput_len, .cursor = &a->tinput_cursor,
+            .sel_anchor = &a->tinput_sel_anchor,
+        };
+        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
+    }
     if (a->tinput_len > 0) {
         font_draw_line(a->font_body, a->tinput_text, a->tinput_len,
                        tx, ty, a->fg);
@@ -1856,6 +2068,16 @@ static void render_rename_popup(App* a)
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
+    {
+        InputField f = {
+            .buf = a->tinput_renpop_text,
+            .cap = (int)sizeof a->tinput_renpop_text,
+            .len = &a->tinput_renpop_len,
+            .cursor = &a->tinput_renpop_cursor,
+            .sel_anchor = &a->tinput_renpop_sel_anchor,
+        };
+        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
+    }
     if (a->tinput_renpop_len > 0) {
         font_draw_line(a->font_body,
                        a->tinput_renpop_text, a->tinput_renpop_len,
@@ -1937,6 +2159,8 @@ static bool app_rename_popup(App* a, const char* oldname,
              "%s", oldname ? oldname : "");
     a->tinput_renpop_len    = (int)strlen(a->tinput_renpop_text);
     a->tinput_renpop_cursor = a->tinput_renpop_len;
+    /* Pre-select the whole name so the user can type to replace it. */
+    a->tinput_renpop_sel_anchor = (a->tinput_renpop_len > 0) ? 0 : -1;
     a->tinput_renpop_active = true;
     a->tinput_renpop_choice = -1;
     a->tinput_renpop_hover  = 0;
@@ -1981,29 +2205,35 @@ static bool app_rename_popup(App* a, const char* oldname,
                     }
                     break;
                 case SDL_TEXTINPUT: {
-                    int ti = (int)strlen(e.text.text);
-                    if (a->tinput_renpop_len + ti <
-                        (int)sizeof a->tinput_renpop_text - 1)
-                    {
-                        memmove(
-                            a->tinput_renpop_text +
-                                a->tinput_renpop_cursor + ti,
-                            a->tinput_renpop_text + a->tinput_renpop_cursor,
-                            (size_t)(a->tinput_renpop_len -
-                                     a->tinput_renpop_cursor + 1));
-                        memcpy(
-                            a->tinput_renpop_text + a->tinput_renpop_cursor,
-                            e.text.text, (size_t)ti);
-                        a->tinput_renpop_cursor += ti;
-                        a->tinput_renpop_len    += ti;
-                    }
+                    InputField f = {
+                        .buf = a->tinput_renpop_text,
+                        .cap = (int)sizeof a->tinput_renpop_text,
+                        .len = &a->tinput_renpop_len,
+                        .cursor = &a->tinput_renpop_cursor,
+                        .sel_anchor = &a->tinput_renpop_sel_anchor,
+                    };
+                    input_insert(&f, e.text.text, (int)strlen(e.text.text));
                     a->tinput_renpop_err = false;
                     break;
                 }
                 case SDL_KEYDOWN: {
                     SDL_Keycode k = e.key.keysym.sym;
+                    Uint16 mod   = e.key.keysym.mod;
                     if (k == SDLK_ESCAPE) {
                         a->tinput_renpop_choice = 1; break;
+                    }
+                    {
+                        InputField f = {
+                            .buf = a->tinput_renpop_text,
+                            .cap = (int)sizeof a->tinput_renpop_text,
+                            .len = &a->tinput_renpop_len,
+                            .cursor = &a->tinput_renpop_cursor,
+                            .sel_anchor = &a->tinput_renpop_sel_anchor,
+                        };
+                        if (input_handle_keydown(&f, k, mod)) {
+                            a->tinput_renpop_err = false;
+                            break;
+                        }
                     }
                     if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
                         const char* nm = a->tinput_renpop_text;
@@ -2020,37 +2250,6 @@ static bool app_rename_popup(App* a, const char* oldname,
                         }
                         break;
                     }
-                    if (k == SDLK_BACKSPACE && a->tinput_renpop_cursor > 0) {
-                        memmove(
-                            a->tinput_renpop_text +
-                                a->tinput_renpop_cursor - 1,
-                            a->tinput_renpop_text + a->tinput_renpop_cursor,
-                            (size_t)(a->tinput_renpop_len -
-                                     a->tinput_renpop_cursor + 1));
-                        a->tinput_renpop_cursor--;
-                        a->tinput_renpop_len--;
-                        a->tinput_renpop_err = false;
-                    }
-                    if (k == SDLK_DELETE &&
-                        a->tinput_renpop_cursor < a->tinput_renpop_len)
-                    {
-                        memmove(
-                            a->tinput_renpop_text + a->tinput_renpop_cursor,
-                            a->tinput_renpop_text +
-                                a->tinput_renpop_cursor + 1,
-                            (size_t)(a->tinput_renpop_len -
-                                     a->tinput_renpop_cursor));
-                        a->tinput_renpop_len--;
-                        a->tinput_renpop_err = false;
-                    }
-                    if (k == SDLK_LEFT && a->tinput_renpop_cursor > 0)
-                        a->tinput_renpop_cursor--;
-                    if (k == SDLK_RIGHT &&
-                        a->tinput_renpop_cursor < a->tinput_renpop_len)
-                        a->tinput_renpop_cursor++;
-                    if (k == SDLK_HOME) a->tinput_renpop_cursor = 0;
-                    if (k == SDLK_END)
-                        a->tinput_renpop_cursor = a->tinput_renpop_len;
                     break;
                 }
             }
@@ -2082,6 +2281,9 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
     }
     a->tinput_len    = (int)strlen(a->tinput_text);
     a->tinput_cursor = a->tinput_len;
+    /* Default-select-all on open so the user can immediately type to
+     * replace the prefilled name (standard Save-As / rename UX). */
+    a->tinput_sel_anchor = (a->tinput_len > 0 && default_text) ? 0 : -1;
     a->tinput_active = true;
     a->tinput_choice = -1;
     a->tinput_hover  = 0;     /* OK by default */
@@ -2457,16 +2659,14 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                     }
                     break;
                 case SDL_TEXTINPUT: {
-                    int ti = (int)strlen(e.text.text);
-                    if (a->tinput_len + ti < (int)sizeof(a->tinput_text) - 1) {
-                        memmove(a->tinput_text + a->tinput_cursor + ti,
-                                a->tinput_text + a->tinput_cursor,
-                                (size_t)(a->tinput_len - a->tinput_cursor + 1));
-                        memcpy(a->tinput_text + a->tinput_cursor, e.text.text,
-                               (size_t)ti);
-                        a->tinput_cursor += ti;
-                        a->tinput_len    += ti;
-                    }
+                    InputField f = {
+                        .buf = a->tinput_text,
+                        .cap = (int)sizeof a->tinput_text,
+                        .len = &a->tinput_len,
+                        .cursor = &a->tinput_cursor,
+                        .sel_anchor = &a->tinput_sel_anchor,
+                    };
+                    input_insert(&f, e.text.text, (int)strlen(e.text.text));
                     /* Reset error state on any keystroke so the red border
                      * disappears the moment the user starts fixing the path. */
                     a->tinput_path_err = false;
@@ -2474,7 +2674,24 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                 }
                 case SDL_KEYDOWN: {
                     SDL_Keycode k = e.key.keysym.sym;
+                    Uint16 mod   = e.key.keysym.mod;
                     if (k == SDLK_ESCAPE) { a->tinput_choice = 1; break; }
+                    /* Hand cursor / selection / clipboard keys to the
+                     * shared input handler before falling through to the
+                     * modal-specific Enter and friends. */
+                    {
+                        InputField f = {
+                            .buf = a->tinput_text,
+                            .cap = (int)sizeof a->tinput_text,
+                            .len = &a->tinput_len,
+                            .cursor = &a->tinput_cursor,
+                            .sel_anchor = &a->tinput_sel_anchor,
+                        };
+                        if (input_handle_keydown(&f, k, mod)) {
+                            a->tinput_path_err = false;
+                            break;
+                        }
+                    }
                     if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
                         if (a->tinput_pick_dir) {
                             /* If the typed path differs from the current
@@ -2511,24 +2728,9 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                         }
                         a->tinput_choice = 0; break;
                     }
-                    if (k == SDLK_BACKSPACE && a->tinput_cursor > 0) {
-                        memmove(a->tinput_text + a->tinput_cursor - 1,
-                                a->tinput_text + a->tinput_cursor,
-                                (size_t)(a->tinput_len - a->tinput_cursor + 1));
-                        a->tinput_cursor--;
-                        a->tinput_len--;
-                    }
-                    if (k == SDLK_DELETE && a->tinput_cursor < a->tinput_len) {
-                        memmove(a->tinput_text + a->tinput_cursor,
-                                a->tinput_text + a->tinput_cursor + 1,
-                                (size_t)(a->tinput_len - a->tinput_cursor));
-                        a->tinput_len--;
-                    }
-                    if (k == SDLK_LEFT  && a->tinput_cursor > 0) a->tinput_cursor--;
-                    if (k == SDLK_RIGHT && a->tinput_cursor < a->tinput_len)
-                        a->tinput_cursor++;
-                    if (k == SDLK_HOME) a->tinput_cursor = 0;
-                    if (k == SDLK_END)  a->tinput_cursor = a->tinput_len;
+                    /* All cursor / edit / clipboard keys are handled by
+                     * input_handle_keydown above; falling through here
+                     * means the key wasn't relevant to this modal. */
                     break;
                 }
             }
@@ -2676,6 +2878,8 @@ static int app_init(App* a, const char* note_path_arg)
     a->cfg_line_endings = (int)lua_host_cfg_number(a->lua, "line_endings", 0);
     if (a->cfg_line_endings < 0 || a->cfg_line_endings > 2)
         a->cfg_line_endings = 0;
+    /* Default to wrap=true; matches Obsidian/VS Code default for prose. */
+    a->cfg_edit_wrap = lua_host_cfg_number(a->lua, "edit_wrap", 1) != 0;
     font_choices_init();
     a->settings_font_idx = font_choice_find(a->cfg_font_path);
     if (a->settings_font_idx < 0) a->settings_font_idx = 0;
@@ -4004,11 +4208,127 @@ static int edit_line_draw(const App* a, const char* data, size_t len,
     return x - x_start;
 }
 
+/* Available text width inside the editor viewport, in pixels. */
+static int edit_wrap_width(const App* a)
+{
+    int w = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
+    return w > 0 ? w : 0;
+}
+
+/* Backs off `i` to the nearest UTF-8 codepoint boundary at or before `i`
+ * within `data[0..len)`. Prevents wrap breaks splitting a multibyte char. */
+static size_t edit_align_codepoint(const char* data, size_t len, size_t i)
+{
+    if (i > len) i = len;
+    while (i > 0 && ((unsigned char)data[i] & 0xC0) == 0x80) i--;
+    return i;
+}
+
+/* Reusable scratch for per-line wrap break offsets (each entry is a byte
+ * offset into the line where a new visual row begins). */
+static int*  g_wrap_buf  = NULL;
+static int   g_wrap_cap  = 0;
+static int*  wrap_buf_for(int n)
+{
+    if (n > g_wrap_cap) {
+        g_wrap_cap = n + 64;
+        g_wrap_buf = realloc(g_wrap_buf, (size_t)g_wrap_cap * sizeof(int));
+    }
+    return g_wrap_buf;
+}
+
+/* Compute soft-wrap break offsets for one logical edit line. Each entry is
+ * a byte offset into the line where a new visual row begins; visual row r
+ * spans bytes [breaks[r-1] .. breaks[r]) with implicit endpoints 0 and len.
+ * Returns the number of breaks (0 = single visual row, no wrap).
+ *
+ * Greedy at word boundaries; falls back to a binary-search byte break for
+ * single words wider than wrap_w. UTF-8 safe via edit_align_codepoint. */
+static int edit_wrap_breaks(const App* a, const char* data, size_t len,
+                            Font* base, bool in_fence, int wrap_w,
+                            int* out, int max_out)
+{
+    if (wrap_w <= 0 || max_out <= 0 || len == 0) return 0;
+    /* Quick out: whole line fits — no wrap needed. */
+    if (edit_line_x_at(a, data, len, len, base, in_fence) <= wrap_w) return 0;
+
+    int    n = 0;
+    size_t row_start = 0;
+    while (row_start < len) {
+        size_t i = row_start;
+        size_t last_word_fit = 0;
+        bool   has_word_fit = false;
+
+        while (i < len) {
+            /* Walk to end of next word + trailing whitespace. */
+            size_t j = i;
+            while (j < len && data[j] != ' ' && data[j] != '\t') j++;
+            while (j < len && (data[j] == ' ' || data[j] == '\t')) j++;
+
+            int x = edit_line_x_at(a, data + row_start, len - row_start,
+                                   j - row_start, base, in_fence);
+            if (x <= wrap_w) {
+                last_word_fit = j;
+                has_word_fit  = true;
+                if (j >= len) return n;       /* rest fits — done */
+                i = j;
+                continue;
+            }
+
+            /* Overflow. Break before this word, or inside it if no prior fit. */
+            size_t brk;
+            if (has_word_fit) {
+                brk = last_word_fit;
+            } else {
+                /* Binary-search for largest prefix that fits, codepoint-aligned. */
+                size_t lo = row_start + 1, hi = j;
+                while (lo < hi) {
+                    size_t mid = (lo + hi + 1) / 2;
+                    mid = edit_align_codepoint(data, len, mid);
+                    if (mid <= row_start) { lo = row_start + 1; break; }
+                    int xx = edit_line_x_at(a, data + row_start, len - row_start,
+                                            mid - row_start, base, in_fence);
+                    if (xx <= wrap_w) lo = mid; else hi = mid - 1;
+                }
+                brk = lo;
+                if (brk <= row_start) brk = row_start + 1;   /* anti-loop */
+                brk = edit_align_codepoint(data, len, brk);
+                if (brk <= row_start) brk = row_start + 1;
+            }
+            if (n >= max_out) return n;
+            out[n++] = (int)brk;
+            row_start = brk;
+            goto next_row;
+        }
+        /* Reached end-of-line with everything fitting (shouldn't happen
+         * given the quick-out above, but defensive). */
+        return n;
+next_row:;
+    }
+    return n;
+}
+
+/* Visual-row count for a logical line (1 + break count). */
+static int edit_visual_rows(const App* a, const char* data, size_t len,
+                            Font* base, bool in_fence)
+{
+    if (!a->cfg_edit_wrap) return 1;
+    int wrap_w = edit_wrap_width(a);
+    int* brk = wrap_buf_for(64);
+    int  nb  = edit_wrap_breaks(a, data, len, base, in_fence, wrap_w,
+                                brk, g_wrap_cap);
+    return nb + 1;
+}
+
 static int render_editor(App* a)
 {
     int xL = doc_x_left(a);
     int y  = doc_y_top(a) - a->scroll_y;
     Buffer* b = &a->buf;
+    int  wrap_on = a->cfg_edit_wrap ? 1 : 0;
+    int  wrap_w  = edit_wrap_width(a);
+    int  max_w   = 0;     /* widest visual row this pass — drives hscroll */
+    int  scroll_x = wrap_on ? 0 : a->scroll_x;
 
     SDL_Rect clip = { xL, chrome_bar_h(a), doc_x_right(a) - xL,
                       a->win_h - status_bar_h(a) - chrome_bar_h(a) };
@@ -4029,56 +4349,92 @@ static int render_editor(App* a)
 
         Font* lf = edit_line_font(a, b->data + ls, llen);
         int   lh = line_step(a, lf);
-        bool  visible = (y + lh > 0) && (y < a->win_h);
 
         /* Fence-line itself renders in code style; THEN flips state. */
         bool line_is_fence = is_fence_line(b->data + ls, llen);
         bool draw_in_fence = in_fence || line_is_fence;
 
-        if (visible) {
-            if (has_sel && sl < le && sh > ls) {
-                size_t s = sl > ls ? sl : ls;
-                size_t e = sh < le ? sh : le;
-                int sx = xL + MARGIN_X +
-                    edit_line_x_at(a, b->data + ls, llen,
-                                   s > ls ? s - ls : 0, lf, draw_in_fence);
-                int ex = xL + MARGIN_X +
-                    edit_line_x_at(a, b->data + ls, llen,
-                                   e > ls ? e - ls : 0, lf, draw_in_fence);
-                if (sh > le) ex += font_measure(lf, " ", 1);
-                SDL_Rect r = { sx, y, ex - sx, lh };
-                SDL_SetRenderDrawColor(a->renderer,
-                    a->bg_selection.r, a->bg_selection.g,
-                    a->bg_selection.b, a->bg_selection.a);
-                SDL_RenderFillRect(a->renderer, &r);
+        /* Compute wrap break offsets for this line (relative to ls).
+         * In no-wrap mode this returns 0 — single visual row spans whole line. */
+        int* breaks = wrap_buf_for(64);
+        int  n_brk  = 0;
+        if (wrap_on && llen > 0) {
+            n_brk = edit_wrap_breaks(a, b->data + ls, llen, lf, draw_in_fence,
+                                     wrap_w, breaks, g_wrap_cap);
+        }
+        int n_rows = n_brk + 1;
+
+        bool is_h = (lf == a->font_h1 || lf == a->font_h2 || lf == a->font_h3);
+        SDL_Color text_c = is_h ? a->fg_heading : a->fg;
+
+        for (int r = 0; r < n_rows; ++r) {
+            size_t r_lo = (r == 0)       ? 0    : (size_t)breaks[r - 1];
+            size_t r_hi = (r == n_rows-1) ? llen : (size_t)breaks[r];
+            size_t a_lo = ls + r_lo;
+            size_t a_hi = ls + r_hi;
+            bool   visible = (y + lh > 0) && (y < a->win_h);
+
+            if (visible) {
+                if (has_sel && sl < a_hi && sh > a_lo) {
+                    size_t s = sl > a_lo ? sl : a_lo;
+                    size_t e = sh < a_hi ? sh : a_hi;
+                    int sx = xL + MARGIN_X - scroll_x +
+                        edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                       s - a_lo, lf, draw_in_fence);
+                    int ex = xL + MARGIN_X - scroll_x +
+                        edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                       e - a_lo, lf, draw_in_fence);
+                    /* Trailing-newline visual: extend to right edge on the
+                     * last visual row of the line if selection crosses \n. */
+                    if (sh > le && r == n_rows - 1)
+                        ex += font_measure(lf, " ", 1);
+                    SDL_Rect rr = { sx, y, ex - sx, lh };
+                    SDL_SetRenderDrawColor(a->renderer,
+                        a->bg_selection.r, a->bg_selection.g,
+                        a->bg_selection.b, a->bg_selection.a);
+                    SDL_RenderFillRect(a->renderer, &rr);
+                }
+
+                if (r_hi > r_lo) {
+                    edit_line_draw(a, b->data + a_lo, r_hi - r_lo,
+                                   xL + MARGIN_X - scroll_x,
+                                   y + font_ascent(lf), text_c, lf,
+                                   draw_in_fence);
+                }
+
+                /* Cursor goes on the row where it falls; for non-last rows
+                 * use [r_lo, r_hi) so a cursor on a wrap boundary lives at
+                 * the start of the next row rather than at the row's end. */
+                bool cur_in_row = (r == n_rows - 1)
+                    ? (b->cursor >= a_lo && b->cursor <= a_hi)
+                    : (b->cursor >= a_lo && b->cursor <  a_hi);
+                if (cur_in_row && cursor_visible_now(a)) {
+                    int cx = xL + MARGIN_X - scroll_x +
+                        edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                       b->cursor - a_lo, lf, draw_in_fence);
+                    SDL_Rect cr = { cx, y, 2, lh };
+                    SDL_SetRenderDrawColor(a->renderer,
+                        a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
+                    SDL_RenderFillRect(a->renderer, &cr);
+                }
             }
 
-            if (llen > 0) {
-                bool is_h = (lf == a->font_h1 || lf == a->font_h2 || lf == a->font_h3);
-                SDL_Color c = is_h ? a->fg_heading : a->fg;
-                edit_line_draw(a, b->data + ls, llen,
-                               xL + MARGIN_X, y + font_ascent(lf), c, lf,
-                               draw_in_fence);
+            /* Track widest visual row for hscroll extent (no-wrap mode only). */
+            if (!wrap_on && r_hi > r_lo) {
+                int w = edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                       r_hi - r_lo, lf, draw_in_fence);
+                if (w > max_w) max_w = w;
             }
 
-            if (b->cursor >= ls && b->cursor <= le && cursor_visible_now(a)) {
-                int cx = xL + MARGIN_X +
-                    edit_line_x_at(a, b->data + ls, llen, b->cursor - ls,
-                                   lf, draw_in_fence);
-                SDL_Rect cr = { cx, y, 2, lh };
-                SDL_SetRenderDrawColor(a->renderer,
-                    a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
-                SDL_RenderFillRect(a->renderer, &cr);
-            }
+            y       += lh;
+            total_h += lh;
         }
 
         if (line_is_fence) in_fence = !in_fence;
-
-        y       += lh;
-        total_h += lh;
     }
 
     SDL_RenderSetClipRect(a->renderer, NULL);
+    a->doc_width_px = wrap_on ? wrap_w : max_w;
     return total_h;
 }
 
@@ -4588,6 +4944,7 @@ static int chrome_button_size(const App* a) {
 static void action_settings      (App* a);
 static void action_toggle_sidebar(App* a);
 static void action_toggle_edit   (App* a);
+static void action_toggle_wrap   (App* a);
 static void action_find          (App* a);
 static void action_outline_pin   (App* a);
 static void action_vsearch       (App* a);
@@ -5228,6 +5585,178 @@ static void render_scrollbar(App* a)
     sb_draw_arrows(a, &track, alpha);
 }
 
+/* ---- horizontal document scrollbar (only when wrap is off) -------------- */
+
+#define SB_ARROW_W 14
+
+static int doc_hscroll_max(const App* a)
+{
+    int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
+    int over = a->doc_width_px - vw;
+    return over > 0 ? over : 0;
+}
+
+static bool sb_track_has_arrows_h(const SDL_Rect* track)
+{
+    return track->w >= 2 * SB_ARROW_W + 28;
+}
+
+static void sb_arrow_rects_h(const SDL_Rect* track, SDL_Rect* lf, SDL_Rect* rt)
+{
+    if (lf) *lf = (SDL_Rect){ track->x, track->y, SB_ARROW_W, track->h };
+    if (rt) *rt = (SDL_Rect){ track->x + track->w - SB_ARROW_W, track->y,
+                              SB_ARROW_W, track->h };
+}
+
+static void sb_inner_track_h(const SDL_Rect* track, SDL_Rect* inner)
+{
+    if (sb_track_has_arrows_h(track)) {
+        *inner = (SDL_Rect){ track->x + SB_ARROW_W, track->y,
+                             track->w - 2 * SB_ARROW_W, track->h };
+    } else {
+        *inner = *track;
+    }
+}
+
+/* Returns 1 when the hscrollbar is needed (wrap off + content overflows). */
+static int doc_hscrollbar_geom(const App* a,
+                               SDL_Rect* track_out, SDL_Rect* thumb_out)
+{
+    if (a->cfg_edit_wrap || !a->edit_mode) return 0;
+    int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
+    int total = a->doc_width_px;
+    if (total <= vw || vw <= 0) return 0;
+    /* Clamp scroll_x defensively (window resize / wrap toggle / file load
+     * can leave it out of range). Cast to non-const because every caller
+     * passes the live App and we want a single point of truth here. */
+    {
+        int max_sc = total - vw;
+        if (max_sc < 0) max_sc = 0;
+        App* aw = (App*)a;
+        if (aw->scroll_x > max_sc) aw->scroll_x = max_sc;
+        if (aw->scroll_x < 0)      aw->scroll_x = 0;
+    }
+
+    int track_h = 10;
+    /* Reserve space for the vertical scrollbar so the corners don't overlap. */
+    SDL_Rect vtrack, vthumb;
+    int vsb = doc_scrollbar_geom(a, &vtrack, &vthumb) ? 10 : 0;
+    int track_x = doc_x_left(a);
+    int track_w = doc_x_right(a) - doc_x_left(a) - vsb;
+    int track_y = a->win_h - status_bar_h(a) - track_h;
+    SDL_Rect track = { track_x, track_y, track_w, track_h };
+    SDL_Rect inner; sb_inner_track_h(&track, &inner);
+
+    int thumb_w = inner.w * vw / total;
+    if (thumb_w < 24) thumb_w = 24;
+    if (thumb_w > inner.w - 4) thumb_w = inner.w - 4;
+    if (thumb_w < 12) thumb_w = inner.w;
+    int max_x = inner.w - thumb_w;
+    int max_sc = doc_hscroll_max(a);
+    int thumb_x = (max_sc > 0 && max_x > 0)
+                  ? (max_x * a->scroll_x / max_sc) : 0;
+    if (track_out) *track_out = track;
+    if (thumb_out) *thumb_out = (SDL_Rect){ inner.x + thumb_x, track_y + 2,
+                                            thumb_w, track_h - 4 };
+    return 1;
+}
+
+/* Left/right triangle glyph in a horizontal arrow cell. */
+static void sb_draw_arrow_glyph_h(App* a, const SDL_Rect* cell, bool left,
+                                  int alpha)
+{
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, alpha);
+    int pad_x = 3, pad_y = 2;
+    int gw = cell->w - 2 * pad_x;     if (gw < 3) gw = 3;
+    int gh = cell->h - 2 * pad_y;     if (gh < 3) gh = 3;
+    int gx = cell->x + (cell->w - gw) / 2;
+    int gy = cell->y + (cell->h - gh) / 2;
+    int denom = gw > 1 ? gw - 1 : 1;
+    for (int col = 0; col < gw; ++col) {
+        int idx = left ? col : (gw - 1 - col);
+        int h   = 1 + (gh - 1) * idx / denom;
+        SDL_Rect r = { gx + col, gy + (gh - h) / 2, 1, h };
+        SDL_RenderFillRect(a->renderer, &r);
+    }
+}
+
+static void sb_draw_arrows_h(App* a, const SDL_Rect* track, int alpha)
+{
+    if (!sb_track_has_arrows_h(track)) return;
+    SDL_Rect lf, rt;
+    sb_arrow_rects_h(track, &lf, &rt);
+    sb_draw_arrow_glyph_h(a, &lf, true,  alpha);
+    sb_draw_arrow_glyph_h(a, &rt, false, alpha);
+}
+
+static void render_hscrollbar(App* a)
+{
+    SDL_Rect track, thumb;
+    if (!doc_hscrollbar_geom(a, &track, &thumb)) return;
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 30);
+    SDL_RenderFillRect(a->renderer, &track);
+    int alpha = (a->sb_drag == SB_DOC_H) ? 220 : 150;
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, alpha);
+    SDL_RenderFillRect(a->renderer, &thumb);
+    sb_draw_arrows_h(a, &track, alpha);
+}
+
+static int hscroll_from_thumb_drag(int mouse_x, int inner_x, int inner_w,
+                                   int thumb_w, int drag_offset, int max_sc)
+{
+    int new_thumb_x = mouse_x - inner_x - drag_offset;
+    int max_x = inner_w - thumb_w;
+    if (new_thumb_x < 0)     new_thumb_x = 0;
+    if (new_thumb_x > max_x) new_thumb_x = max_x;
+    if (max_sc <= 0 || max_x <= 0) return 0;
+    int sc = max_sc * new_thumb_x / max_x;
+    if (sc < 0) sc = 0;
+    return sc;
+}
+
+/* Returns true if the click was consumed by the hscrollbar (arrow / thumb /
+ * track jump). Updates a->scroll_x and possibly a->sb_drag. */
+static bool hscrollbar_handle_click(App* a, int btn_x, int btn_y)
+{
+    SDL_Rect track, thumb;
+    if (!doc_hscrollbar_geom(a, &track, &thumb)) return false;
+    if (btn_x < track.x || btn_x >= track.x + track.w ||
+        btn_y < track.y || btn_y >= track.y + track.h) return false;
+
+    int max_sc = doc_hscroll_max(a);
+    int step_px = font_line_height(a->font_code) * 2;
+
+    if (sb_track_has_arrows_h(&track)) {
+        SDL_Rect lf, rt;
+        sb_arrow_rects_h(&track, &lf, &rt);
+        if (btn_x >= lf.x && btn_x < lf.x + lf.w) {
+            a->scroll_x -= step_px;
+            if (a->scroll_x < 0) a->scroll_x = 0;
+            return true;
+        }
+        if (btn_x >= rt.x && btn_x < rt.x + rt.w) {
+            a->scroll_x += step_px;
+            if (a->scroll_x > max_sc) a->scroll_x = max_sc;
+            return true;
+        }
+    }
+
+    SDL_Rect inner; sb_inner_track_h(&track, &inner);
+    if (btn_x >= thumb.x && btn_x < thumb.x + thumb.w) {
+        a->sb_drag        = SB_DOC_H;
+        a->sb_drag_offset = btn_x - thumb.x;
+    } else {
+        a->scroll_x = hscroll_from_thumb_drag(btn_x, inner.x, inner.w,
+                                              thumb.w, thumb.w / 2, max_sc);
+        a->sb_drag        = SB_DOC_H;
+        a->sb_drag_offset = thumb.w / 2;
+    }
+    return true;
+}
+
 /* ---- generic overlay-list scrollbar plumbing -------------------------------
  * All "list-style" overlays (vsearch, outline, backlinks, tags, picker) share
  * the same layout: centered box, header rows on top, scrollable rows in the
@@ -5536,6 +6065,7 @@ static const MenuItem MENU_EDIT[] = {
 static const MenuItem MENU_VIEW[] = {
     { "Toggle Edit/Preview", "Ctrl+E", action_toggle_edit },
     { "Toggle Sidebar",      "Ctrl+B", action_toggle_sidebar },
+    { "Toggle Word Wrap",    "Alt+Z",  action_toggle_wrap },
     { "Outline Panel",       NULL,     action_outline_pin },
     { "Outline\xe2\x80\xa6",  NULL,     action_outline },
     { "Backlinks\xe2\x80\xa6",NULL,    action_backlinks },
@@ -6790,7 +7320,7 @@ typedef enum {
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
     SET_COLORS,         /* opens the color picker overlay */
     SET_CONVERT_LF,     /* one-shot: rewrite current note as LF */
-    SET_RESET,          /* delete init-overrides.lua, factory defaults */
+    SET_RESET,          /* delete settings.lua, factory defaults */
     SET_COUNT,
 } SettingsRow;
 
@@ -6992,8 +7522,8 @@ static void fputs_lua_string(FILE* f, const char* s)
     fputc('"', f);
 }
 
-/* Persist the current live settings to data/init-overrides.lua. Loaded after
- * init.lua at next startup, with overlay semantics (overlay keys win). */
+/* Persist the current live settings to settings.lua (next to the exe).
+ * Loaded at startup; overlay keys win over the built-in defaults. */
 /* Trigger settings_persist after the vault is changed at runtime. Defined
  * here so it sits next to the persistence routine; just forwards. */
 static int settings_persist(App* a);
@@ -7064,6 +7594,8 @@ static int settings_persist(App* a)
     fprintf(f, "    line_spacing   = %d,\n", a->cfg_line_spacing);
     fprintf(f, "    line_endings   = %d,  -- 0=preserve 1=LF 2=CRLF\n",
             a->cfg_line_endings);
+    fprintf(f, "    edit_wrap      = %s,\n",
+            a->cfg_edit_wrap ? "true" : "false");
     fprintf(f, "    sidebar_width  = %d,\n", a->sidebar_w);
     fprintf(f, "    outline_pinned = %s,\n",
             a->outline_pinned ? "true" : "false");
@@ -7131,7 +7663,7 @@ static void settings_close(App* a)
     if (!a->settings_active) return;
     a->settings_active = false;
     if (settings_persist(a) == 0)
-        app_notify(a, "settings saved (data/init-overrides.lua)");
+        app_notify(a, "settings saved (settings.lua)");
 }
 
 /* Settings layout — dynamic, derived from font metrics so the panel
@@ -7370,7 +7902,7 @@ static void picker_close(App* a)
     if (!a->picker_active) return;
     a->picker_active = false;
     if (settings_persist(a) == 0)
-        app_notify(a, "colors saved (data/init-overrides.lua)");
+        app_notify(a, "colors saved (settings.lua)");
 }
 
 /* Adjust the focused channel of the focused slot by `delta`, clamped to
@@ -9774,6 +10306,7 @@ static void app_render(App* a)
     if (!a->edit_mode) render_preview_selection(a);
     if (a->edit_mode) render_find_highlights(a);
     render_scrollbar(a);
+    render_hscrollbar(a);
     render_sidebar(a);
     render_outline_panel(a);
     render_chrome(a);
@@ -9819,6 +10352,9 @@ static void render_find_highlights(App* a)
     Buffer* b = &a->buf;
     int xL = doc_x_left(a);
     int y  = doc_y_top(a) - a->scroll_y;
+    int wrap_on  = a->cfg_edit_wrap ? 1 : 0;
+    int wrap_w   = edit_wrap_width(a);
+    int scroll_x = wrap_on ? 0 : a->scroll_x;
 
     SDL_Rect clip = { xL, chrome_bar_h(a), doc_x_right(a) - xL,
                       a->win_h - status_bar_h(a) - chrome_bar_h(a) };
@@ -9834,35 +10370,46 @@ static void render_find_highlights(App* a)
         int    lh   = line_step(a, lf);
         bool   line_is_fence = is_fence_line(b->data + ls, llen);
         bool   draw_in_fence = in_fence || line_is_fence;
-        bool   visible       = (y + lh > 0) && (y < a->win_h);
 
-        if (visible) {
-            for (size_t m = 0; m < a->search_count; ++m) {
-                size_t ms   = a->search_matches[m];
-                size_t mlen = a->search_match_lens
-                              ? a->search_match_lens[m]
-                              : a->search_qlen;
-                size_t me   = ms + mlen;
-                if (me <= ls || ms >= le) continue;
-                size_t s = ms > ls ? ms : ls;
-                size_t e = me < le ? me : le;
-                /* Use edit_line_x_at so proportional body-font lines compute
-                 * the correct match rectangle x-extent. */
-                int sx = xL + MARGIN_X +
-                         edit_line_x_at(a, b->data + ls, llen,
-                                        s > ls ? s - ls : 0, lf, draw_in_fence);
-                int ex = xL + MARGIN_X +
-                         edit_line_x_at(a, b->data + ls, llen,
-                                        e > ls ? e - ls : 0, lf, draw_in_fence);
-                bool is_current = ((int)m == a->search_current);
-                SDL_Rect r = { sx, y, ex - sx, lh };
-                if (is_current) SDL_SetRenderDrawColor(a->renderer, 220, 160,  60, 140);
-                else            SDL_SetRenderDrawColor(a->renderer, 180, 130,  40,  90);
-                SDL_RenderFillRect(a->renderer, &r);
+        int* breaks = wrap_buf_for(64);
+        int  n_brk  = (wrap_on && llen > 0)
+            ? edit_wrap_breaks(a, b->data + ls, llen, lf, draw_in_fence,
+                               wrap_w, breaks, g_wrap_cap)
+            : 0;
+        int rows = n_brk + 1;
+
+        for (int r = 0; r < rows; ++r) {
+            size_t r_lo = (r == 0)        ? 0    : (size_t)breaks[r - 1];
+            size_t r_hi = (r == rows - 1) ? llen : (size_t)breaks[r];
+            size_t a_lo = ls + r_lo;
+            size_t a_hi = ls + r_hi;
+            bool   visible = (y + lh > 0) && (y < a->win_h);
+            if (visible) {
+                for (size_t m = 0; m < a->search_count; ++m) {
+                    size_t ms   = a->search_matches[m];
+                    size_t mlen = a->search_match_lens
+                                  ? a->search_match_lens[m]
+                                  : a->search_qlen;
+                    size_t me   = ms + mlen;
+                    if (me <= a_lo || ms >= a_hi) continue;
+                    size_t s = ms > a_lo ? ms : a_lo;
+                    size_t e = me < a_hi ? me : a_hi;
+                    int sx = xL + MARGIN_X - scroll_x +
+                             edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                            s - a_lo, lf, draw_in_fence);
+                    int ex = xL + MARGIN_X - scroll_x +
+                             edit_line_x_at(a, b->data + a_lo, r_hi - r_lo,
+                                            e - a_lo, lf, draw_in_fence);
+                    bool is_current = ((int)m == a->search_current);
+                    SDL_Rect rr = { sx, y, ex - sx, lh };
+                    if (is_current) SDL_SetRenderDrawColor(a->renderer, 220, 160,  60, 140);
+                    else            SDL_SetRenderDrawColor(a->renderer, 180, 130,  40,  90);
+                    SDL_RenderFillRect(a->renderer, &rr);
+                }
             }
+            y += lh;
         }
         if (line_is_fence) in_fence = !in_fence;
-        y += lh;
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
 }
@@ -9895,23 +10442,75 @@ static void ensure_cursor_visible(App* a)
     if (!a->edit_mode) return;
     size_t line, col;
     buffer_cursor_pos(&a->buf, &line, &col);
-    /* Walk lines accumulating heights — necessary because edit mode now
-     * has variable per-line height (heading lines are taller). */
-    int cy = 0;
+
+    /* In wrap mode we have to count the EXTRA rows produced by every prior
+     * logical line. fence-state has to be tracked too so the wrap measurer
+     * picks the right base styling. */
+    int  wrap_on = a->cfg_edit_wrap ? 1 : 0;
+    int  wrap_w  = edit_wrap_width(a);
+    bool in_fence = false;
+    int  cy = 0;
     for (size_t i = 0; i < line; ++i) {
         size_t ls = buffer_line_start(&a->buf, i);
         size_t le = buffer_line_end(&a->buf, i);
-        Font* lf = edit_line_font(a, a->buf.data + ls, le - ls);
-        cy += line_step(a, lf);
+        size_t llen = le - ls;
+        Font* lf = edit_line_font(a, a->buf.data + ls, llen);
+        bool fl = is_fence_line(a->buf.data + ls, llen);
+        bool df = in_fence || fl;
+        int rows = wrap_on ? edit_visual_rows(a, a->buf.data + ls, llen, lf, df) : 1;
+        cy += rows * line_step(a, lf);
+        if (fl) in_fence = !in_fence;
     }
+
     size_t ls = buffer_line_start(&a->buf, line);
     size_t le = buffer_line_end(&a->buf, line);
-    Font* lf = edit_line_font(a, a->buf.data + ls, le - ls);
+    size_t llen = le - ls;
+    Font* lf = edit_line_font(a, a->buf.data + ls, llen);
+    bool fl = is_fence_line(a->buf.data + ls, llen);
+    bool df = in_fence || fl;
     int lh = line_step(a, lf);
     int vh = viewport_h(a);
+
+    /* Find which visual row holds the cursor, plus its X within that row. */
+    int  cur_row = 0;
+    int  cur_x   = 0;
+    if (wrap_on && llen > 0) {
+        int* breaks = wrap_buf_for(64);
+        int  n_brk  = edit_wrap_breaks(a, a->buf.data + ls, llen, lf, df,
+                                       wrap_w, breaks, g_wrap_cap);
+        size_t off = a->buf.cursor - ls;
+        int  rows  = n_brk + 1;
+        for (int r = 0; r < rows; ++r) {
+            size_t r_lo = (r == 0)        ? 0    : (size_t)breaks[r - 1];
+            size_t r_hi = (r == rows - 1) ? llen : (size_t)breaks[r];
+            bool match = (r == rows - 1) ? (off >= r_lo && off <= r_hi)
+                                         : (off >= r_lo && off <  r_hi);
+            if (match) {
+                cur_row = r;
+                cur_x   = edit_line_x_at(a, a->buf.data + ls + r_lo, r_hi - r_lo,
+                                         off - r_lo, lf, df);
+                break;
+            }
+        }
+    } else {
+        cur_x = edit_line_x_at(a, a->buf.data + ls, llen,
+                               a->buf.cursor - ls, lf, df);
+    }
+    cy += cur_row * lh;
+
     if (cy < a->scroll_y)            a->scroll_y = cy;
     if (cy + lh > a->scroll_y + vh)  a->scroll_y = cy + lh - vh;
     if (a->scroll_y < 0)             a->scroll_y = 0;
+
+    /* Horizontal: only meaningful when wrap is off. Add a small slop so the
+     * cursor doesn't sit flush against the viewport edge. */
+    if (!wrap_on) {
+        int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
+        int slop = 24;
+        if (cur_x - slop < a->scroll_x)         a->scroll_x = cur_x - slop;
+        if (cur_x + slop > a->scroll_x + vw)    a->scroll_x = cur_x + slop - vw;
+        if (a->scroll_x < 0)                    a->scroll_x = 0;
+    }
 }
 
 static void open_file_picker(App* a)
@@ -10043,90 +10642,103 @@ static void edit_paste(App* a)
     SDL_free(t);
 }
 
+/* Map a click X within one visual row to a byte offset (within [base..base+len)).
+ * Walks per-style runs (or a single heading font) and uses half-glyph midpoints
+ * for snappy cursor placement. */
+static size_t edit_byte_at_x_in_row(const App* a, const char* data, size_t len,
+                                    Font* lf, bool in_fence, int local_x,
+                                    size_t base)
+{
+    if (local_x <= 0) return base;
+    if (!is_heading_font(a, lf)) {
+        unsigned char* st = styles_for(len);
+        if (in_fence) memset(st, ES_CODE, len);
+        else          compute_edit_styles(data, len, st);
+        int x = 0;
+        size_t i = 0;
+        while (i < len) {
+            unsigned char s = st[i];
+            size_t j = i + 1;
+            while (j < len && st[j] == s) j++;
+            Font* f = pick_edit_inline_font_for(a, lf, s);
+            int seg_w = font_measure(f, data + i, j - i);
+            if (x + seg_w >= local_x) {
+                size_t k = i;
+                int xx = x;
+                while (k < j) {
+                    size_t nxt = k + 1;
+                    while (nxt < j && ((unsigned char)data[nxt] & 0xC0) == 0x80) nxt++;
+                    int cw = font_measure(f, data + k, nxt - k);
+                    if (xx + cw / 2 >= local_x) return base + k;
+                    xx += cw;
+                    k = nxt;
+                }
+                return base + j;
+            }
+            x += seg_w;
+            i = j;
+        }
+        return base + len;
+    }
+    int x = 0;
+    size_t i = 0;
+    while (i < len) {
+        size_t nxt = i + 1;
+        while (nxt < len && ((unsigned char)data[nxt] & 0xC0) == 0x80) nxt++;
+        int cw = font_measure(lf, data + i, nxt - i);
+        if (x + cw / 2 >= local_x) return base + i;
+        x += cw;
+        i = nxt;
+    }
+    return base + len;
+}
+
 static size_t edit_position_at(const App* a, int mx, int my)
 {
     int xL = doc_x_left(a);
     int local_y = my - doc_y_top(a) + a->scroll_y;
     if (local_y < 0) return 0;
 
-    /* Find the target line by accumulating per-line heights (variable).
-     * Track fence state along the way so the byte-walk below uses the
-     * correct styling for the target line. */
-    size_t n_lines    = buffer_line_count(&a->buf);
-    size_t target_line = 0;
-    int    y_acc      = 0;
-    bool   in_fence   = false;
-    Font*  lf         = a->font_code;
-    for (size_t i = 0; i < n_lines; ++i) {
-        size_t ls = buffer_line_start(&a->buf, i);
-        size_t le = buffer_line_end(&a->buf, i);
-        lf = edit_line_font(a, a->buf.data + ls, le - ls);
-        int lh = line_step(a, lf);
-        if (y_acc + lh > local_y) { target_line = i; break; }
-        if (is_fence_line(a->buf.data + ls, le - ls)) in_fence = !in_fence;
-        y_acc += lh;
-        target_line = i;
-    }
+    int  wrap_on  = a->cfg_edit_wrap ? 1 : 0;
+    int  wrap_w   = edit_wrap_width(a);
+    int  scroll_x = wrap_on ? 0 : a->scroll_x;
+    int  local_x  = mx - xL - MARGIN_X + scroll_x;
 
-    size_t ls = buffer_line_start(&a->buf, target_line);
-    size_t le = buffer_line_end  (&a->buf, target_line);
-    /* Recompute font for the target line (in case the loop ran past last). */
-    lf = edit_line_font(a, a->buf.data + ls, le - ls);
-    bool target_in_fence =
-        in_fence || is_fence_line(a->buf.data + ls, le - ls);
-    int local_x = mx - xL - MARGIN_X;
-    if (local_x <= 0) return ls;
+    size_t n_lines  = buffer_line_count(&a->buf);
+    int    y_acc    = 0;
+    bool   in_fence = false;
 
-    /* Walk per-style runs from line start, accumulating x. Body lines and
-     * fence lines both use the per-style path; only heading lines fall
-     * through to the single-font walk below since their family has no
-     * bold/italic variants. */
-    size_t llen = le - ls;
-    if (!is_heading_font(a, lf)) {
-        unsigned char* st = styles_for(llen);
-        if (target_in_fence) memset(st, ES_CODE, llen);
-        else                 compute_edit_styles(a->buf.data + ls, llen, st);
-        int x = 0;
-        size_t i = 0;
-        while (i < llen) {
-            unsigned char s = st[i];
-            size_t j = i + 1;
-            while (j < llen && st[j] == s) j++;
-            Font* f = pick_edit_inline_font_for(a, lf, s);
-            int seg_w = font_measure(f, a->buf.data + ls + i, j - i);
-            if (x + seg_w >= local_x) {
-                /* The click is inside this segment — find the byte. */
-                size_t k = i;
-                int xx = x;
-                while (k < j) {
-                    size_t nxt = k + 1;
-                    while (nxt < j && ((unsigned char)a->buf.data[ls + nxt]
-                                       & 0xC0) == 0x80) nxt++;
-                    int cw = font_measure(f, a->buf.data + ls + k, nxt - k);
-                    if (xx + cw / 2 >= local_x) return ls + k;
-                    xx += cw;
-                    k = nxt;
-                }
-                return ls + j;
+    /* Walk lines, then visual rows within each line, until we find the row
+     * whose vertical band contains local_y. Past EOF: return buffer end. */
+    for (size_t li = 0; li < n_lines; ++li) {
+        size_t ls   = buffer_line_start(&a->buf, li);
+        size_t le   = buffer_line_end  (&a->buf, li);
+        size_t llen = le - ls;
+        Font*  lf   = edit_line_font(a, a->buf.data + ls, llen);
+        int    lh   = line_step(a, lf);
+        bool   fl   = is_fence_line(a->buf.data + ls, llen);
+        bool   df   = in_fence || fl;
+
+        int* breaks = wrap_buf_for(64);
+        int  n_brk  = (wrap_on && llen > 0)
+            ? edit_wrap_breaks(a, a->buf.data + ls, llen, lf, df, wrap_w,
+                               breaks, g_wrap_cap)
+            : 0;
+        int n_rows = n_brk + 1;
+
+        for (int r = 0; r < n_rows; ++r) {
+            if (y_acc + lh > local_y) {
+                size_t r_lo = (r == 0)        ? 0    : (size_t)breaks[r - 1];
+                size_t r_hi = (r == n_rows-1) ? llen : (size_t)breaks[r];
+                return edit_byte_at_x_in_row(a, a->buf.data + ls + r_lo,
+                                             r_hi - r_lo, lf, df, local_x,
+                                             ls + r_lo);
             }
-            x += seg_w;
-            i = j;
+            y_acc += lh;
         }
-        return le;
+        if (fl) in_fence = !in_fence;
     }
-
-    /* Heading line: single-font walk (no per-style variants). */
-    int x = 0;
-    size_t i = ls;
-    while (i < le) {
-        size_t nxt = i + 1;
-        while (nxt < le && ((unsigned char)a->buf.data[nxt] & 0xC0) == 0x80) nxt++;
-        int cw = font_measure(lf, a->buf.data + i, nxt - i);
-        if (x + cw / 2 >= local_x) return i;
-        x += cw;
-        i = nxt;
-    }
-    return le;
+    return a->buf.len;
 }
 
 /* ----------------------------- quick switcher --------------------------- */
@@ -11020,6 +11632,9 @@ static void edit_cursor_screen_pos(const App* a, int* out_x, int* out_y)
     int xL = doc_x_left(a);
     int y  = doc_y_top(a) - a->scroll_y;
     Buffer* b = (Buffer*)&a->buf;
+    int  wrap_on  = a->cfg_edit_wrap ? 1 : 0;
+    int  wrap_w   = edit_wrap_width(a);
+    int  scroll_x = wrap_on ? 0 : a->scroll_x;
     size_t n_lines = buffer_line_count(b);
     bool   in_fence = false;
     for (size_t li = 0; li < n_lines; ++li) {
@@ -11031,15 +11646,36 @@ static void edit_cursor_screen_pos(const App* a, int* out_x, int* out_y)
         bool line_is_fence = is_fence_line(b->data + ls, llen);
         bool draw_in_fence = in_fence || line_is_fence;
         if (b->cursor >= ls && b->cursor <= le) {
-            int cx = xL + MARGIN_X +
-                edit_line_x_at(a, b->data + ls, llen, b->cursor - ls,
-                               lf, draw_in_fence);
-            if (out_x) *out_x = cx;
-            if (out_y) *out_y = y + lh;       /* below the caret */
+            int* breaks = wrap_buf_for(64);
+            int  n_brk  = (wrap_on && llen > 0)
+                ? edit_wrap_breaks(a, b->data + ls, llen, lf, draw_in_fence,
+                                   wrap_w, breaks, g_wrap_cap)
+                : 0;
+            int rows = n_brk + 1;
+            size_t off = b->cursor - ls;
+            for (int r = 0; r < rows; ++r) {
+                size_t r_lo = (r == 0)        ? 0    : (size_t)breaks[r - 1];
+                size_t r_hi = (r == rows - 1) ? llen : (size_t)breaks[r];
+                bool match = (r == rows - 1) ? (off >= r_lo && off <= r_hi)
+                                             : (off >= r_lo && off <  r_hi);
+                if (match) {
+                    int cx = xL + MARGIN_X - scroll_x +
+                        edit_line_x_at(a, b->data + ls + r_lo, r_hi - r_lo,
+                                       off - r_lo, lf, draw_in_fence);
+                    if (out_x) *out_x = cx;
+                    if (out_y) *out_y = y + lh;
+                    return;
+                }
+                y += lh;
+            }
+            /* Defensive: didn't find — point at end of last row. */
+            if (out_x) *out_x = xL + MARGIN_X - scroll_x;
+            if (out_y) *out_y = y;
             return;
         }
+        int rows = wrap_on ? edit_visual_rows(a, b->data + ls, llen, lf, draw_in_fence) : 1;
+        y += rows * lh;
         if (line_is_fence) in_fence = !in_fence;
-        y += lh;
     }
     if (out_x) *out_x = xL + MARGIN_X;
     if (out_y) *out_y = y;
@@ -11949,6 +12585,12 @@ static void action_find_replace  (App* a) {
         "Tab toggles fields  -  Ctrl+Enter replaces all  -  Esc close");
 }
 static void action_toggle_sidebar(App* a) { a->sidebar_open = !a->sidebar_open; }
+static void action_toggle_wrap   (App* a) {
+    a->cfg_edit_wrap = !a->cfg_edit_wrap;
+    a->scroll_x = 0;
+    settings_persist(a);
+    app_notify(a, a->cfg_edit_wrap ? "word wrap on" : "word wrap off");
+}
 static void action_toggle_edit   (App* a) {
     if (a->viewing_image) {
         app_notify(a, "image files are view-only");
@@ -12375,6 +13017,7 @@ static const ActionEntry ACTIONS[] = {
 
     { "toggle_edit",     "View",       action_toggle_edit     },
     { "toggle_sidebar",  "View",       action_toggle_sidebar  },
+    { "toggle_wrap",     "View",       action_toggle_wrap     },
 
     { "settings",        "App",        action_settings        },
     { "keybindings",     "App",        action_keybindings     },
@@ -12405,6 +13048,7 @@ static const struct { const char* keystr; const char* action; } DEFAULT_KEYS[] =
     { "ctrl+alt+t",   "align_table"    },
     { "ctrl+b",       "toggle_sidebar" },
     { "ctrl+e",       "toggle_edit"    },
+    { "alt+z",        "toggle_wrap"    },
     { "ctrl+z",       "undo"           },
     { "ctrl+shift+z", "redo"           },
     { "ctrl+y",       "redo"           },
@@ -12807,6 +13451,17 @@ static void app_event(App* a, const SDL_Event* e)
                 break;
             }
             /* Active scrollbar drag: translate mouse y to scroll position. */
+            if (a->sb_drag == SB_DOC_H &&
+                (e->motion.state & SDL_BUTTON_LMASK)) {
+                SDL_Rect track, thumb;
+                if (doc_hscrollbar_geom(a, &track, &thumb)) {
+                    SDL_Rect inner; sb_inner_track_h(&track, &inner);
+                    a->scroll_x = hscroll_from_thumb_drag(e->motion.x,
+                        inner.x, inner.w, thumb.w,
+                        a->sb_drag_offset, doc_hscroll_max(a));
+                }
+                break;
+            }
             if (a->sb_drag != SB_NONE &&
                 (e->motion.state & SDL_BUTTON_LMASK)) {
                 SDL_Rect track, thumb;
@@ -13413,6 +14068,9 @@ static void app_event(App* a, const SDL_Event* e)
                         break;
                     }
                 }
+                /* Horizontal doc scrollbar (only when wrap is off). */
+                if (hscrollbar_handle_click(a, e->button.x, e->button.y))
+                    break;
                 int idx = sidebar_item_at(a, e->button.x, e->button.y);
                 if (idx >= 0 && idx < (int)a->vault.count) {
                     VaultItem* it = &a->vault.items[idx];
@@ -13685,6 +14343,21 @@ static void app_event(App* a, const SDL_Event* e)
                 int m = sidebar_max_scroll(a);
                 if (a->sidebar_scroll_y > m) a->sidebar_scroll_y = m;
                 break;
+            }
+            /* Shift+wheel pans horizontally when wrap is off (no-op otherwise);
+             * wheel.x from horizontal scroll devices does the same. */
+            if (a->edit_mode && !a->cfg_edit_wrap) {
+                int dx = e->wheel.x * line_px * 3;
+                if ((SDL_GetModState() & KMOD_SHIFT) && e->wheel.y != 0)
+                    dx = -e->wheel.y * line_px * 3;
+                if (dx != 0) {
+                    a->scroll_x += dx;
+                    int max_sc = doc_hscroll_max(a);
+                    if (a->scroll_x < 0) a->scroll_x = 0;
+                    if (a->scroll_x > max_sc) a->scroll_x = max_sc;
+                    if (dx != 0 && (e->wheel.x != 0 ||
+                        (SDL_GetModState() & KMOD_SHIFT))) break;
+                }
             }
             a->scroll_y -= e->wheel.y * line_px * 3;
             clamp_scroll(a);
