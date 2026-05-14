@@ -6533,17 +6533,31 @@ static void submenu_invoke_row(App* a, int row)
     if (row < 0 || row >= n) { ctx_menu_close(a); return; }
     const char* path = app_recent_dir_at(row);
     ctx_menu_close(a);
-    if (path && *path) {
-        char snap[1024];
-        snprintf(snap, sizeof snap, "%s", path);
-        int nfound = vault_scan(&a->vault, snap);
-        recent_dirs_push(a, snap);
-        settings_persist(a);
+    if (!path || !*path) return;
+
+    char snap[1024];
+    snprintf(snap, sizeof snap, "%s", path);
+
+    /* Reject up-front if the directory is gone (removable drive ejected,
+     * folder deleted, network share offline). Without this check vault_scan
+     * silently returns 0 items, leaving the user staring at an empty
+     * sidebar with no clue why. Don't drop the recent entry — the user
+     * may reconnect the drive and want to retry. */
+    if (!path_dir_exists(snap)) {
         char msg[300];
-        snprintf(msg, sizeof msg, "vault: %.250s (%d note%s)",
-                 snap, nfound, nfound == 1 ? "" : "s");
+        snprintf(msg, sizeof msg,
+                 "vault folder not found: %.240s", snap);
         app_notify(a, msg);
+        return;
     }
+
+    int nfound = vault_scan(&a->vault, snap);
+    recent_dirs_push(a, snap);
+    settings_persist(a);
+    char msg[300];
+    snprintf(msg, sizeof msg, "vault: %.250s (%d note%s)",
+             snap, nfound, nfound == 1 ? "" : "s");
+    app_notify(a, msg);
 }
 
 /* Translate a screen y to the row index inside the menu, or -1 if outside. */
@@ -7267,6 +7281,7 @@ typedef enum {
     SET_SIZE_H3,
     SET_LINE_SPACING,   /* extra pixels between rendered lines */
     SET_LINE_ENDINGS,   /* preserve / LF / CRLF */
+    SET_EDIT_WRAP,      /* on/off: soft-wrap long lines in edit mode */
     SET_SIDEBAR_W,
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
     SET_COLORS,         /* opens the color picker overlay */
@@ -7286,6 +7301,7 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "H3 size",
     "Line spacing",
     "Line endings",
+    "Word wrap (edit)",
     "Sidebar width",
     "Keybindings",
     "Colors",
@@ -7342,6 +7358,7 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
                      a->cfg_line_endings == 2 ? "CRLF (Windows)" :
                                                 "Preserve");
             break;
+        case SET_EDIT_WRAP:   snprintf(out, cap, "%s", a->cfg_edit_wrap ? "On" : "Off"); break;
         case SET_CONVERT_LF:  snprintf(out, cap, "(Enter)");                  break;
         case SET_SIDEBAR_W:   snprintf(out, cap, "%d", a->sidebar_w);        break;
         case SET_KEYBINDINGS: snprintf(out, cap, "(Enter)");                 break;
@@ -7431,6 +7448,13 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
         case SET_LINE_ENDINGS: {
             int v = (a->cfg_line_endings + dir + 3) % 3;
             a->cfg_line_endings = v;
+            break;
+        }
+        case SET_EDIT_WRAP: {
+            (void)dir;     /* binary toggle — direction doesn't matter */
+            a->cfg_edit_wrap = !a->cfg_edit_wrap;
+            a->scroll_x = 0;
+            if (a->edit_mode) ensure_cursor_visible(a);
             break;
         }
         case SET_CONVERT_LF: {
@@ -12699,6 +12723,10 @@ static void action_toggle_sidebar(App* a) { a->sidebar_open = !a->sidebar_open; 
 static void action_toggle_wrap   (App* a) {
     a->cfg_edit_wrap = !a->cfg_edit_wrap;
     a->scroll_x = 0;
+    /* Recompute scroll so the cursor stays visible after the wrap mode
+     * change — without this, toggling on a long line could leave the
+     * caret off-screen and the user thinks nothing happened. */
+    if (a->edit_mode) ensure_cursor_visible(a);
     settings_persist(a);
     app_notify(a, a->cfg_edit_wrap ? "word wrap on" : "word wrap off");
 }

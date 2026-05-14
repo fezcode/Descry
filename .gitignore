@@ -11,7 +11,7 @@ compile_commands.json
 
 # Dev-time artifacts at the repo root
 /*.png
-/*.log
+*.log
 /bash.exe.stackdump
 
 # Per-vault runtime state (sidebar width, scroll position, etc.).

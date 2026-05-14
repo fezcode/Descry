@@ -156,6 +156,10 @@ After a reload (Ctrl+Alt+P > Reload, or restart), the action shows up
 in the command palette with a `Plugin` category chip and can be
 invoked by name or bound to a key.
 
+Full reference — every available API call, lifecycle, debugging,
+and an honest list of what's *not* exposed yet — lives in
+[docs/plugins.md](docs/plugins.md).
+
 ---
 
 ## Keyboard
