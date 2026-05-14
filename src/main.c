@@ -2948,6 +2948,10 @@ static int app_init(App* a, const char* note_path_arg)
         a->cfg_line_endings = 0;
     /* Default to wrap=true; matches Obsidian/VS Code default for prose. */
     a->cfg_edit_wrap = lua_host_cfg_number(a->lua, "edit_wrap", 1) != 0;
+    /* Close animation: 0 off, 1 fade, 2 dissolve. Default = fade so the
+     * goodbye feels intentional rather than a crash. */
+    a->cfg_close_anim = (int)lua_host_cfg_number(a->lua, "close_anim", 1);
+    if (a->cfg_close_anim < 0 || a->cfg_close_anim > 2) a->cfg_close_anim = 1;
     font_choices_init();
     /* Resurrect any persisted custom font (saved cfg_*_path that doesn't
      * map to a built-in entry) so the settings page can cycle to it. */
@@ -3287,8 +3291,131 @@ static void save_collapse_state(App* a)
  * full settings_persist defined later in the file. */
 static void persist_vault_path(App* a);
 
+/* Linear opacity fade over ~220ms. Cheapest "goodbye" — the OS
+ * compositor handles the per-pixel work, we just ramp the alpha. */
+static void app_close_anim_fade(App* a)
+{
+    if (SDL_SetWindowOpacity(a->window, 1.0f) != 0) return;
+    const int  duration_ms = 220;
+    const Uint32 t0 = SDL_GetTicks();
+    for (;;) {
+        Uint32 elapsed = SDL_GetTicks() - t0;
+        if (elapsed >= (Uint32)duration_ms) break;
+        float t = (float)elapsed / (float)duration_ms;
+        float e = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+        float opacity = 1.0f - e;
+        if (opacity < 0.0f) opacity = 0.0f;
+        SDL_SetWindowOpacity(a->window, opacity);
+        app_render(a);
+        SDL_Delay(8);
+    }
+    SDL_SetWindowOpacity(a->window, 0.0f);
+}
+
+/* Cell-based dissolve over ~360ms. Snapshots the live frame to a
+ * texture, then progressively overlays the snapshot with bg-coloured
+ * rectangles in a Fisher-Yates-shuffled order so the chrome appears
+ * to crumble pixel-block by pixel-block into the background. */
+static void app_close_anim_dissolve(App* a)
+{
+    int W = a->win_w, H = a->win_h;
+    if (W <= 0 || H <= 0) return;
+
+    /* 1. Snapshot the current frame. SDL_RenderReadPixels is the
+     *    portable way to grab the back buffer. RGBA32 → texture. */
+    SDL_Surface* snap_surf = SDL_CreateRGBSurfaceWithFormat(
+        0, W, H, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!snap_surf) return;
+    if (SDL_RenderReadPixels(a->renderer, NULL,
+                             SDL_PIXELFORMAT_RGBA32,
+                             snap_surf->pixels, snap_surf->pitch) != 0) {
+        SDL_FreeSurface(snap_surf);
+        return;
+    }
+    SDL_Texture* snap = SDL_CreateTextureFromSurface(a->renderer, snap_surf);
+    SDL_FreeSurface(snap_surf);
+    if (!snap) return;
+
+    /* 2. Tile into cells. 14px is a good visual compromise between
+     *    grain and per-frame cost (~4000 cells at 1100x720). */
+    const int cell = 14;
+    int cols = (W + cell - 1) / cell;
+    int rows = (H + cell - 1) / cell;
+    int n_cells = cols * rows;
+    int* order  = malloc((size_t)n_cells * sizeof(int));
+    if (!order) { SDL_DestroyTexture(snap); return; }
+    for (int i = 0; i < n_cells; ++i) order[i] = i;
+    /* Fisher-Yates shuffle so reveal order looks random, not striped. */
+    for (int i = n_cells - 1; i > 0; --i) {
+        int j = rand() % (i + 1);
+        int tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+    }
+
+    /* 3. Animate. Each frame: paint bg, blit snapshot, then fill the
+     *    first `revealed` cells of the shuffled order with bg colour. */
+    const int duration_ms = 360;
+    const Uint32 t0 = SDL_GetTicks();
+    int prev_revealed = 0;
+    for (;;) {
+        Uint32 elapsed = SDL_GetTicks() - t0;
+        if (elapsed >= (Uint32)duration_ms) break;
+        float t = (float)elapsed / (float)duration_ms;
+        /* Ease-in-cubic — slow start, fast finish. The opening looks
+         * like the screen is "deciding" to fall apart, then collapses. */
+        float e = t * t * t;
+        int revealed = (int)(e * (float)n_cells);
+        if (revealed > n_cells) revealed = n_cells;
+        if (revealed == prev_revealed) { SDL_Delay(8); continue; }
+        prev_revealed = revealed;
+
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg.r, a->bg.g, a->bg.b, 255);
+        SDL_RenderClear(a->renderer);
+        SDL_RenderCopy(a->renderer, snap, NULL, NULL);
+
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg.r, a->bg.g, a->bg.b, 255);
+        for (int i = 0; i < revealed; ++i) {
+            int idx = order[i];
+            int cx = (idx % cols) * cell;
+            int cy = (idx / cols) * cell;
+            SDL_Rect r = { cx, cy, cell, cell };
+            SDL_RenderFillRect(a->renderer, &r);
+        }
+        SDL_RenderPresent(a->renderer);
+        SDL_Delay(8);
+    }
+
+    /* Final wipe so no straggler cells remain even if the timer overshot. */
+    SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, 255);
+    SDL_RenderClear(a->renderer);
+    SDL_RenderPresent(a->renderer);
+
+    free(order);
+    SDL_DestroyTexture(snap);
+}
+
+/* Dispatch on cfg_close_anim. Adding a new animation kind = a new value
+ * + a new branch here. Window/renderer must still be alive when this
+ * runs — call before any teardown. */
+static void app_run_close_animation(App* a)
+{
+    if (!a->window || !a->renderer) return;
+    switch (a->cfg_close_anim) {
+        case 1: app_close_anim_fade    (a); break;
+        case 2: app_close_anim_dissolve(a); break;
+        default: break;     /* 0 = off, anything unknown */
+    }
+}
+
 static void app_shutdown(App* a)
 {
+    /* Goodbye animation runs FIRST so the user sees the window fade
+     * before we tear down state. settings_persist below uses the live
+     * config, but the animation only reads cfg_close_anim + the
+     * window/renderer handles, all still valid here. */
+    app_run_close_animation(a);
+
     /* Persist live settings (theme, fonts, sizes, sidebar width, colors,
      * keybindings) so the user's last selections survive a normal close,
      * not just an explicit settings_close. */
@@ -7282,6 +7409,7 @@ typedef enum {
     SET_LINE_SPACING,   /* extra pixels between rendered lines */
     SET_LINE_ENDINGS,   /* preserve / LF / CRLF */
     SET_EDIT_WRAP,      /* on/off: soft-wrap long lines in edit mode */
+    SET_CLOSE_ANIM,     /* off / fade — animation when the window closes */
     SET_SIDEBAR_W,
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
     SET_COLORS,         /* opens the color picker overlay */
@@ -7302,6 +7430,7 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Line spacing",
     "Line endings",
     "Word wrap (edit)",
+    "Close animation",
     "Sidebar width",
     "Keybindings",
     "Colors",
@@ -7359,6 +7488,12 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
                                                 "Preserve");
             break;
         case SET_EDIT_WRAP:   snprintf(out, cap, "%s", a->cfg_edit_wrap ? "On" : "Off"); break;
+        case SET_CLOSE_ANIM:
+            snprintf(out, cap, "%s",
+                     a->cfg_close_anim == 2 ? "Dissolve" :
+                     a->cfg_close_anim == 1 ? "Fade"     :
+                                              "Off");
+            break;
         case SET_CONVERT_LF:  snprintf(out, cap, "(Enter)");                  break;
         case SET_SIDEBAR_W:   snprintf(out, cap, "%d", a->sidebar_w);        break;
         case SET_KEYBINDINGS: snprintf(out, cap, "(Enter)");                 break;
@@ -7455,6 +7590,12 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->cfg_edit_wrap = !a->cfg_edit_wrap;
             a->scroll_x = 0;
             if (a->edit_mode) ensure_cursor_visible(a);
+            break;
+        }
+        case SET_CLOSE_ANIM: {
+            /* Off (0) / Fade (1) / Dissolve (2) — cycle either direction. */
+            int n = 3;
+            a->cfg_close_anim = (a->cfg_close_anim + dir + n) % n;
             break;
         }
         case SET_CONVERT_LF: {
@@ -7688,6 +7829,8 @@ static int settings_persist(App* a)
             a->cfg_line_endings);
     fprintf(f, "    edit_wrap      = %s,\n",
             a->cfg_edit_wrap ? "true" : "false");
+    fprintf(f, "    close_anim     = %d,  -- 0 off, 1 fade, 2 dissolve\n",
+            a->cfg_close_anim);
     fprintf(f, "    sidebar_width  = %d,\n", a->sidebar_w);
     fprintf(f, "    outline_pinned = %s,\n",
             a->outline_pinned ? "true" : "false");

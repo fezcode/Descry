@@ -248,6 +248,11 @@ typedef struct {
      *   2 = always CRLF                                            */
     int      cfg_line_endings;
 
+    /* Close-window animation kind:
+     *   0 = off (window vanishes instantly)
+     *   1 = fade (~250ms opacity ramp)                            */
+    int      cfg_close_anim;
+
     /* Edit-mode soft wrap. true = long lines wrap visually at the
      * viewport width (file content unchanged). false = lines extend
      * past the viewport and a horizontal scrollbar appears. Toggleable
