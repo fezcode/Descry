@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$version  = "0.70.0"
+$version  = "0.71.0"
 $builder  = "D:\Workhammer\DeployPaladin\release\builder\DeployPaladin.Builder.exe"
 $base     = "D:\Workhammer\DeployPaladin\release\installer\DeployPaladin.exe"
 $payload  = "D:\Workhammer\Downsee"

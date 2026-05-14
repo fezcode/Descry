@@ -1,4 +1,4 @@
-local version = "0.70.0"
+local version = "0.71.0"
 
 SetMetadata("AppName", "Downsee")
 SetMetadata("Version", version)

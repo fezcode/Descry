@@ -33,7 +33,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.70.0"
+#define DOWNSEE_VERSION "0.71.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -7883,6 +7883,11 @@ static int settings_persist(App* a)
     return 0;
 }
 
+/* Defined below alongside settings_close (lives next to the rest of the
+ * snapshot/diff/restore plumbing). Forward-decl here so settings_open can
+ * call it without hoisting the whole struct definition above this point. */
+static void settings_snapshot_capture(const App* a);
+
 static void settings_open (App* a)
 {
     a->settings_active   = true;
@@ -7891,14 +7896,196 @@ static void settings_open (App* a)
     /* Re-sync the font index in case cfg_font_path was changed elsewhere. */
     int i = font_choice_find(a->cfg_font_path);
     if (i >= 0) a->settings_font_idx = i;
+    /* Snapshot the current state so settings_close can detect changes
+     * and offer Save/Discard. Capture is forward-declared via the
+     * SettingsSnapshot struct sitting above settings_close. */
+    settings_snapshot_capture(a);
+}
+
+/* Snapshot of every settings-overlay-controlled field, taken at
+ * settings_open. Used by settings_close to detect whether the user
+ * actually changed anything (so we don't pester them with a prompt
+ * on a no-op visit) and to roll back if they pick Discard. */
+typedef struct {
+    bool valid;
+    char font_path[260];
+    char font_path_ide[260];
+    char font_path_mono[260];
+    int  font_size;
+    int  font_size_h1;
+    int  font_size_h2;
+    int  font_size_h3;
+    int  line_spacing;
+    int  line_endings;
+    int  edit_wrap;
+    int  close_anim;
+    int  sidebar_w;
+    int  theme_idx;
+    int  font_idx;
+    int  font_idx_ide;
+    int  font_idx_mono;
+} SettingsSnapshot;
+static SettingsSnapshot g_settings_snap;
+
+static void settings_snapshot_capture(const App* a)
+{
+    SettingsSnapshot* s = &g_settings_snap;
+    snprintf(s->font_path,      sizeof s->font_path,      "%s", a->cfg_font_path);
+    snprintf(s->font_path_ide,  sizeof s->font_path_ide,  "%s", a->cfg_font_path_ide);
+    snprintf(s->font_path_mono, sizeof s->font_path_mono, "%s", a->cfg_font_path_mono);
+    s->font_size      = a->cfg_font_size;
+    s->font_size_h1   = a->cfg_font_size_h1;
+    s->font_size_h2   = a->cfg_font_size_h2;
+    s->font_size_h3   = a->cfg_font_size_h3;
+    s->line_spacing   = a->cfg_line_spacing;
+    s->line_endings   = a->cfg_line_endings;
+    s->edit_wrap      = a->cfg_edit_wrap ? 1 : 0;
+    s->close_anim     = a->cfg_close_anim;
+    s->sidebar_w      = a->sidebar_w;
+    s->theme_idx      = a->settings_theme_idx;
+    s->font_idx       = a->settings_font_idx;
+    s->font_idx_ide   = a->settings_font_idx_ide;
+    s->font_idx_mono  = a->settings_font_idx_mono;
+    s->valid          = true;
+}
+
+/* Helper: append "label: A → B\n" to msg if old/new differ. Truncation-
+ * safe: if there's no room left, the line is dropped silently. */
+static void diff_str(char* msg, size_t cap,
+                     const char* label, const char* a, const char* b)
+{
+    if (strcmp(a, b) == 0) return;
+    size_t cur = strlen(msg);
+    if (cur + 16 >= cap) return;
+    /* Show file basename for paths to keep lines readable. */
+    const char* da = strrchr(a, '/'); da = da ? da + 1 : a;
+    const char* db = strrchr(b, '/'); db = db ? db + 1 : b;
+    snprintf(msg + cur, cap - cur, "%s: %.40s \xe2\x86\x92 %.40s\n",
+             label, da, db);
+}
+static void diff_int(char* msg, size_t cap,
+                     const char* label, int a, int b)
+{
+    if (a == b) return;
+    size_t cur = strlen(msg);
+    if (cur + 16 >= cap) return;
+    snprintf(msg + cur, cap - cur, "%s: %d \xe2\x86\x92 %d\n", label, a, b);
+}
+static void diff_str_named(char* msg, size_t cap,
+                           const char* label, const char* a, const char* b)
+{
+    if (strcmp(a, b) == 0) return;
+    size_t cur = strlen(msg);
+    if (cur + 16 >= cap) return;
+    snprintf(msg + cur, cap - cur, "%s: %.40s \xe2\x86\x92 %.40s\n",
+             label, a, b);
+}
+
+/* Build a human-readable list of changes since snapshot. Empty string
+ * if nothing changed. Writes into `out` (caller-sized; ~400 chars is
+ * what confirm_msg can hold). */
+static void settings_build_diff(const App* a, char* out, size_t cap)
+{
+    out[0] = 0;
+    const SettingsSnapshot* s = &g_settings_snap;
+    if (!s->valid) return;
+
+    /* Theme by name so the diff reads right. */
+    const char* old_theme = (s->theme_idx >= 0 && s->theme_idx < G_THEME_COUNT)
+        ? g_themes[s->theme_idx].name : "(custom)";
+    const char* new_theme = (a->settings_theme_idx >= 0 &&
+                             a->settings_theme_idx < G_THEME_COUNT)
+        ? g_themes[a->settings_theme_idx].name : "(custom)";
+    diff_str_named(out, cap, "Theme", old_theme, new_theme);
+
+    diff_str(out, cap, "IDE font",     s->font_path_ide,  a->cfg_font_path_ide);
+    diff_str(out, cap, "Preview font", s->font_path,      a->cfg_font_path);
+    diff_str(out, cap, "Editor font",  s->font_path_mono, a->cfg_font_path_mono);
+
+    diff_int(out, cap, "Font size",    s->font_size,    a->cfg_font_size);
+    diff_int(out, cap, "H1 size",      s->font_size_h1, a->cfg_font_size_h1);
+    diff_int(out, cap, "H2 size",      s->font_size_h2, a->cfg_font_size_h2);
+    diff_int(out, cap, "H3 size",      s->font_size_h3, a->cfg_font_size_h3);
+    diff_int(out, cap, "Line spacing", s->line_spacing, a->cfg_line_spacing);
+
+    if (s->line_endings != a->cfg_line_endings) {
+        const char* L[] = { "Preserve", "LF", "CRLF" };
+        diff_str_named(out, cap, "Line endings",
+                       L[s->line_endings & 3], L[a->cfg_line_endings & 3]);
+    }
+    if (s->edit_wrap != (a->cfg_edit_wrap ? 1 : 0)) {
+        diff_str_named(out, cap, "Word wrap",
+                       s->edit_wrap ? "On" : "Off",
+                       a->cfg_edit_wrap ? "On" : "Off");
+    }
+    if (s->close_anim != a->cfg_close_anim) {
+        const char* A[] = { "Off", "Fade", "Dissolve" };
+        diff_str_named(out, cap, "Close animation",
+                       A[s->close_anim & 3], A[a->cfg_close_anim & 3]);
+    }
+    diff_int(out, cap, "Sidebar width", s->sidebar_w, a->sidebar_w);
+}
+
+/* Restore every snapshot field into App and re-apply the live state
+ * (theme + reload_fonts) so the rollback is visible immediately. */
+static void settings_snapshot_restore(App* a)
+{
+    const SettingsSnapshot* s = &g_settings_snap;
+    if (!s->valid) return;
+    /* memcpy because snapshot fields and cfg fields are both 260 bytes;
+     * snprintf with "%s" trips -Wformat-truncation because gcc can't
+     * prove the source ≤ destination. Direct copy + null-terminate. */
+    memcpy(a->cfg_font_path,      s->font_path,      sizeof s->font_path);
+    memcpy(a->cfg_font_path_ide,  s->font_path_ide,  sizeof s->font_path_ide);
+    memcpy(a->cfg_font_path_mono, s->font_path_mono, sizeof s->font_path_mono);
+    a->cfg_font_path[sizeof a->cfg_font_path - 1] = 0;
+    a->cfg_font_path_ide[sizeof a->cfg_font_path_ide - 1] = 0;
+    a->cfg_font_path_mono[sizeof a->cfg_font_path_mono - 1] = 0;
+    a->cfg_font_size       = s->font_size;
+    a->cfg_font_size_h1    = s->font_size_h1;
+    a->cfg_font_size_h2    = s->font_size_h2;
+    a->cfg_font_size_h3    = s->font_size_h3;
+    a->cfg_line_spacing    = s->line_spacing;
+    a->cfg_line_endings    = s->line_endings;
+    a->cfg_edit_wrap       = s->edit_wrap != 0;
+    a->cfg_close_anim      = s->close_anim;
+    a->sidebar_w           = s->sidebar_w;
+    a->settings_theme_idx  = s->theme_idx;
+    a->settings_font_idx   = s->font_idx;
+    a->settings_font_idx_ide  = s->font_idx_ide;
+    a->settings_font_idx_mono = s->font_idx_mono;
+    if (a->settings_theme_idx >= 0 && a->settings_theme_idx < G_THEME_COUNT)
+        theme_apply(a, a->settings_theme_idx);
+    app_reload_fonts(a);
 }
 
 static void settings_close(App* a)
 {
     if (!a->settings_active) return;
     a->settings_active = false;
-    if (settings_persist(a) == 0)
-        app_notify(a, "settings saved (settings.lua)");
+
+    char diff[400] = {0};
+    settings_build_diff(a, diff, sizeof diff);
+    if (diff[0] == 0) {
+        /* Nothing changed — silent close, no need to nag. */
+        g_settings_snap.valid = false;
+        return;
+    }
+
+    /* Build the full confirm message with the diff inline. confirm_msg
+     * already supports multi-line text (\n splits at render). */
+    char msg[400];
+    snprintf(msg, sizeof msg, "Save these changes?\n\n%s", diff);
+    bool save = confirm_action(a, "Settings", msg, "Save", "Discard");
+    if (save) {
+        if (settings_persist(a) == 0)
+            app_notify(a, "settings saved (settings.lua)");
+    } else {
+        settings_snapshot_restore(a);
+        if (settings_persist(a) == 0)
+            app_notify(a, "settings reverted");
+    }
+    g_settings_snap.valid = false;
 }
 
 /* Settings layout — dynamic, derived from font metrics so the panel
@@ -9574,7 +9761,18 @@ static void render_tags(App* a)
     int box_x = (a->win_w - box_w) / 2;
     int box_y = TAGS_BOX_Y;
     int max_box_h = a->win_h - 80;
-    int box_h = rh * (a->tags_count + 3) + 24;
+
+    /* Pre-measure the hint so the box height accounts for hint wrap on
+     * narrow windows. Computed before box_h so the layout stays stable
+     * across wrap thresholds. */
+    const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
+        "Enter \xe2\x86\x92 vault search  \xc2\xb7  Esc close";
+    int hint_lines = wrap_text(a, a->font_ide, hint, 0, 0,
+                               box_w - 32, rh,
+                               (SDL_Color){0,0,0,0}, false);
+    if (hint_lines < 1) hint_lines = 1;
+
+    int box_h = rh * (a->tags_count + 2 + hint_lines) + 24;
     if (box_h > max_box_h) box_h = max_box_h;
 
     SDL_Rect box = { box_x, box_y, box_w, box_h };
@@ -9632,12 +9830,11 @@ static void render_tags(App* a)
         overlay_scrollbar_draw(a, &sb_track, &sb_thumb,
                                a->sb_drag == SB_TAGS);
 
-    const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
-        "Enter \xe2\x86\x92 vault search  \xc2\xb7  Esc close";
-    font_draw_line(a->font_ide, hint, strlen(hint),
-                   box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
-                   a->fg_muted);
+    /* Render the hint wrapped — pre-measured above; place its top so
+     * the LAST line sits at the original baseline. */
+    int hint_top = box_y + box_h - 8 - rh * hint_lines;
+    wrap_text(a, a->font_ide, hint,
+              box_x + 16, hint_top, box_w - 32, rh, a->fg_muted, true);
 }
 
 /* ----------------------------- template picker -------------------------- */
