@@ -208,6 +208,42 @@ char* vault_open_dialog(SDL_Window* parent)
 #endif
 }
 
+char* vault_pick_file(SDL_Window* parent, const char* title,
+                      const char* filter_label, const char* filter_pattern)
+{
+#if defined(_WIN32)
+    /* Build the OPENFILENAME filter string: "Label\0Pattern\0All\0*.*\0\0".
+     * Two null terminators end the list, so we hand-build it with memcpy. */
+    char filter[256] = {0};
+    size_t pos = 0;
+    size_t ll = strlen(filter_label ? filter_label : "Files");
+    size_t pl = strlen(filter_pattern ? filter_pattern : "*.*");
+    if (pos + ll + 1 + pl + 1 + 14 + 1 + 4 + 2 < sizeof filter) {
+        memcpy(filter + pos, filter_label ? filter_label : "Files", ll); pos += ll + 1;
+        memcpy(filter + pos, filter_pattern ? filter_pattern : "*.*", pl); pos += pl + 1;
+        memcpy(filter + pos, "All files (*.*)", 15);  pos += 16;
+        memcpy(filter + pos, "*.*", 3);               pos += 4;
+        /* trailing extra null already present from the {0} initializer */
+    }
+
+    OPENFILENAMEA ofn;
+    char filename[MAX_PATH] = {0};
+    memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner   = wm_hwnd(parent);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile   = filename;
+    ofn.nMaxFile    = sizeof filename;
+    ofn.lpstrTitle  = title ? title : "Open file";
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn)) return strdup(filename);
+    return NULL;
+#else
+    (void)parent; (void)title; (void)filter_label; (void)filter_pattern;
+    return NULL;     /* TODO: zenity / kdialog passthrough */
+#endif
+}
+
 char* vault_pick_dir(SDL_Window* parent, const char* title)
 {
 #if defined(_WIN32)

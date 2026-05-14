@@ -1,4 +1,4 @@
-local version = "0.67.0"
+local version = "0.70.0"
 
 SetMetadata("AppName", "Downsee")
 SetMetadata("Version", version)
@@ -33,8 +33,6 @@ CopyFiles("build/libpng16-16.dll",        "%INSTALLDIR%/libpng16-16.dll")
 CopyFiles("build/libstdc++-6.dll",        "%INSTALLDIR%/libstdc++-6.dll")
 CopyFiles("build/libwinpthread-1.dll",    "%INSTALLDIR%/libwinpthread-1.dll")
 CopyFiles("build/zlib1.dll",              "%INSTALLDIR%/zlib1.dll")
-
-CopyFiles("README.md", "%INSTALLDIR%/README.md")
 
 -- Desktop and Start Menu shortcuts
 CreateShortcut("%INSTALLDIR%/downsee.exe", "%DESKTOP%", "Downsee", { label = "Create Desktop Shortcut", isOptional = true, isSelected = true })

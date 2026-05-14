@@ -19,7 +19,14 @@ typedef struct {
     int           win_w;
     int           win_h;
 
-    /* Body font + 3 inline-style variants from the same TTF. */
+    /* IDE chrome font (regular only) — title bar, menus, sidebar, status
+     * bar, settings overlay, every modal/picker/popup. Independent of the
+     * preview body font so the user can pin chrome to a clean UI sans-serif
+     * while reading prose in something more bookish. */
+    Font* font_ide;
+
+    /* Body font + 3 inline-style variants from the same TTF. Used by the
+     * preview pane only — markdown body text, lists, blockquotes, tables. */
     Font* font_body;
     Font* font_body_bold;
     Font* font_body_italic;
@@ -226,8 +233,9 @@ typedef struct {
     int      ctx_menu_hover;         /* index of currently hovered row    */
 
     /* Live font / size config (mutable by the settings page). */
-    char     cfg_font_path[260];
-    char     cfg_font_path_mono[260];
+    char     cfg_font_path[260];        /* preview body */
+    char     cfg_font_path_ide[260];    /* chrome / sidebar / overlays */
+    char     cfg_font_path_mono[260];   /* editor + inline code */
     int      cfg_font_size;
     int      cfg_font_size_h1;
     int      cfg_font_size_h2;
@@ -329,7 +337,9 @@ typedef struct {
     bool     settings_active;
     int      settings_selected;
     int      settings_hover;         /* row under cursor, -1 if none */
-    int      settings_font_idx;      /* index into g_font_choices */
+    int      settings_font_idx;      /* preview body — index into g_font_choices */
+    int      settings_font_idx_ide;  /* IDE chrome    — index into g_font_choices */
+    int      settings_font_idx_mono; /* editor / mono — index into g_font_choices */
     int      settings_theme_idx;     /* index into g_themes */
 
     /* Keybindings overlay (F1) state — also serves as the help surface;

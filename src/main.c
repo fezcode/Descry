@@ -33,7 +33,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.67.0"
+#define DOWNSEE_VERSION "0.70.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -353,12 +353,32 @@ static int font_choice_find(const char* path)
     return -1;
 }
 
+/* Append a "Custom: <basename>" entry pointing at `path`, or return the
+ * existing index if it's already in the list. -1 if the table is full. */
+static int font_choice_add_custom(const char* path)
+{
+    if (!path || !*path) return -1;
+    int existing = font_choice_find(path);
+    if (existing >= 0) return existing;
+    if (g_font_choice_count >=
+        (int)(sizeof g_font_choices / sizeof g_font_choices[0])) return -1;
+    const char* b = path;
+    for (const char* p = path; *p; ++p)
+        if (*p == '/' || *p == '\\') b = p + 1;
+    snprintf(g_font_choices[g_font_choice_count].name,
+             sizeof g_font_choices[0].name, "Custom: %s", b);
+    snprintf(g_font_choices[g_font_choice_count].path,
+             sizeof g_font_choices[0].path, "%s", path);
+    return g_font_choice_count++;
+}
+
 /* (Re)load every font according to the live App.cfg_* settings. Frees any
  * previously loaded font handles. Returns 0 on success, -1 if any font
  * fails to load. Reapplies the user's fallback chain after loading. */
 static int app_reload_fonts(App* a)
 {
     /* Free old. */
+    if (a->font_ide)              font_destroy(a->font_ide);
     if (a->font_body)             font_destroy(a->font_body);
     if (a->font_body_bold)        font_destroy(a->font_body_bold);
     if (a->font_body_italic)      font_destroy(a->font_body_italic);
@@ -370,6 +390,7 @@ static int app_reload_fonts(App* a)
     if (a->font_code_bold)        font_destroy(a->font_code_bold);
     if (a->font_code_italic)      font_destroy(a->font_code_italic);
     if (a->font_code_bold_italic) font_destroy(a->font_code_bold_italic);
+    a->font_ide = NULL;
     a->font_body = a->font_body_bold = a->font_body_italic =
         a->font_body_bold_italic = NULL;
     a->font_h1 = a->font_h2 = a->font_h3 = NULL;
@@ -377,12 +398,15 @@ static int app_reload_fonts(App* a)
         a->font_code_bold_italic = NULL;
 
     const char* fp  = a->cfg_font_path;
+    const char* fpi = a->cfg_font_path_ide[0] ? a->cfg_font_path_ide
+                                              : a->cfg_font_path;
     const char* fpm = a->cfg_font_path_mono;
     int sz  = a->cfg_font_size;
     int sh1 = a->cfg_font_size_h1;
     int sh2 = a->cfg_font_size_h2;
     int sh3 = a->cfg_font_size_h3;
 
+    a->font_ide               = font_create(a->renderer, fpi, sz, FONT_STYLE_REGULAR);
     a->font_body              = font_create(a->renderer, fp, sz,  FONT_STYLE_REGULAR);
     a->font_body_bold         = font_create(a->renderer, fp, sz,  FONT_STYLE_BOLD);
     a->font_body_italic       = font_create(a->renderer, fp, sz,  FONT_STYLE_ITALIC);
@@ -394,17 +418,20 @@ static int app_reload_fonts(App* a)
     a->font_code_bold         = font_create(a->renderer, fpm, sz, FONT_STYLE_BOLD);
     a->font_code_italic       = font_create(a->renderer, fpm, sz, FONT_STYLE_ITALIC);
     a->font_code_bold_italic  = font_create(a->renderer, fpm, sz, FONT_STYLE_BOLD_ITALIC);
-    if (!a->font_body || !a->font_body_bold || !a->font_body_italic ||
-        !a->font_body_bold_italic || !a->font_h1 || !a->font_h2 ||
-        !a->font_h3 || !a->font_code || !a->font_code_bold ||
+    if (!a->font_ide || !a->font_body || !a->font_body_bold ||
+        !a->font_body_italic || !a->font_body_bold_italic ||
+        !a->font_h1 || !a->font_h2 || !a->font_h3 ||
+        !a->font_code || !a->font_code_bold ||
         !a->font_code_italic || !a->font_code_bold_italic) {
-        fprintf(stderr, "app_reload_fonts: font_create failed (%s, %s)\n", fp, fpm);
+        fprintf(stderr, "app_reload_fonts: font_create failed (ide=%s body=%s mono=%s)\n",
+                fpi, fp, fpm);
         return -1;
     }
     /* Helper: add a fallback font to every face in the chain. Skips silently
      * if the file doesn't exist (font.c logs to stderr internally). */
     #define ADD_FB(path_)                                                   \
         do {                                                                \
+            font_add_fallback(a->font_ide,               (path_));          \
             font_add_fallback(a->font_body,              (path_));          \
             font_add_fallback(a->font_body_bold,         (path_));          \
             font_add_fallback(a->font_body_italic,       (path_));          \
@@ -506,7 +533,7 @@ static int title_bar_h(const App* a) { (void)a; return 32; }
  * to include the title bar shifts everything below correctly. */
 static int chrome_bar_h(const App* a)
 {
-    return title_bar_h(a) + font_line_height(a->font_body) + 16;
+    return title_bar_h(a) + font_line_height(a->font_ide) + 16;
 }
 
 /* Height of the inner chrome row (below the title bar): breadcrumb, mode
@@ -519,7 +546,7 @@ static int chrome_row_h(const App* a)
 
 static int status_bar_h(const App* a)
 {
-    return font_line_height(a->font_body) + 6;     /* slimmer in v0.31 */
+    return font_line_height(a->font_ide) + 6;     /* slimmer in v0.31 */
 }
 
 /* Top y at which document content begins, after the chrome bar + a bit of
@@ -963,7 +990,7 @@ static int confirm_msg_line_count(const App* a)
  * multi-line — height grows to fit. */
 static SDL_Rect confirm_box_rect(const App* a)
 {
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     int box_w = 480;
     int msg_h = sz_y * confirm_msg_line_count(a);
@@ -976,7 +1003,7 @@ static SDL_Rect confirm_box_rect(const App* a)
 static int confirm_btn_y(const App* a)
 {
     SDL_Rect box = confirm_box_rect(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     return box.y + box.h - btn_h - 20;
 }
@@ -989,7 +1016,7 @@ static int confirm_btn_w(const App* a, const char* label)
 {
     int pad = 28;
     int min_w = 100;
-    int w = font_measure(a->font_body, label, strlen(label)) + pad;
+    int w = font_measure(a->font_ide, label, strlen(label)) + pad;
     return w < min_w ? min_w : w;
 }
 
@@ -997,7 +1024,7 @@ static int confirm_hit_test(const App* a, int mx, int my)
 {
     if (!a->confirm_active) return -1;
     SDL_Rect box = confirm_box_rect(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
     const char* lab1 = a->confirm_btn1_label[0] ? a->confirm_btn1_label : "Cancel";
@@ -1020,7 +1047,7 @@ static void render_confirm_modal(App* a)
     SDL_Rect box = confirm_box_rect(a);
     overlay_card(a, box);
 
-    int sz_y = font_line_height(a->font_body);
+    int sz_y = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
 
     /* Row anchors (top of each line). Must match the spacing assumed by
@@ -1042,8 +1069,8 @@ static void render_confirm_modal(App* a)
     int b0_x  = b1_x - w0 - 12;
 
     /* Title */
-    font_draw_line(a->font_body, a->confirm_title, strlen(a->confirm_title),
-                   box.x + 20, title_top + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, a->confirm_title, strlen(a->confirm_title),
+                   box.x + 20, title_top + font_ascent(a->font_ide),
                    a->fg_link);
     /* Message — split on '\n' so the About dialog (and any future
      * multi-paragraph prompt) renders each line. */
@@ -1053,8 +1080,8 @@ static void render_confirm_modal(App* a)
         while (*p) {
             const char* nl = strchr(p, '\n');
             size_t n = nl ? (size_t)(nl - p) : strlen(p);
-            font_draw_line(a->font_body, p, n,
-                           box.x + 20, ly + font_ascent(a->font_body),
+            font_draw_line(a->font_ide, p, n,
+                           box.x + 20, ly + font_ascent(a->font_ide),
                            a->fg);
             ly += sz_y;
             if (!nl) break;
@@ -1076,10 +1103,10 @@ static void render_confirm_modal(App* a)
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab0, strlen(lab0));
-        font_draw_line(a->font_body, lab0, strlen(lab0),
+        int lw = font_measure(a->font_ide, lab0, strlen(lab0));
+        font_draw_line(a->font_ide, lab0, strlen(lab0),
                        b0_x + (w0 - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
     /* Btn1 — default action, accent fill. */
@@ -1089,21 +1116,21 @@ static void render_confirm_modal(App* a)
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab1, strlen(lab1));
+        int lw = font_measure(a->font_ide, lab1, strlen(lab1));
         int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
-        font_draw_line(a->font_body, lab1, strlen(lab1),
+        font_draw_line(a->font_ide, lab1, strlen(lab1),
                        b1_x + (w1 - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        tc);
     }
 
     /* Hint */
     const char* hint = "Enter / Esc cancel  -  Y confirm";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box.x + 20,
-                   hint_top + font_ascent(a->font_body),
+                   hint_top + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -1186,11 +1213,11 @@ static SDL_Rect tinput_box_rect(App* a)
     return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
 }
 
-static int tinput_list_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
+static int tinput_list_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
 static int tinput_list_top  (App* a)
 {
     SDL_Rect box = tinput_box_rect(a);
-    int sz_y = font_line_height(a->font_body);
+    int sz_y = font_line_height(a->font_ide);
     int input_h = sz_y + 16;
     int in_y    = box.y + 20 + sz_y + 8;
     int dir_y   = in_y + input_h + 8;
@@ -1200,7 +1227,7 @@ static int tinput_list_top  (App* a)
 static int tinput_list_bot  (App* a)
 {
     SDL_Rect box = tinput_box_rect(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     int btn_y = box.y + box.h - btn_h - 16;
     int hint_h = sz_y + 6;
@@ -1211,16 +1238,16 @@ static int tinput_hit_test(App* a, int mx, int my)
 {
     if (!a->tinput_active) return -1;
     SDL_Rect box = tinput_box_rect(a);
-    int btn_h = font_line_height(a->font_body) + 16;
+    int btn_h = font_line_height(a->font_ide) + 16;
     int btn_y = box.y + box.h - btn_h - 16;
     /* Match render's label-sized buttons. */
     const char* lab_ok = a->tinput_pick_dir ? "Use this folder" : "Save";
     const char* lab_cn = "Cancel";
     const char* lab_nf = "New Folder";
     int btn_pad = 28, min_w = 120;
-    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
-    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
-    int w_nf = font_measure(a->font_body, lab_nf, strlen(lab_nf)) + btn_pad;
+    int w_ok = font_measure(a->font_ide, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_ide, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_nf = font_measure(a->font_ide, lab_nf, strlen(lab_nf)) + btn_pad;
     if (w_ok < min_w) w_ok = min_w;
     if (w_cn < min_w) w_cn = min_w;
     int b1_x = box.x + box.w - w_ok - 16;
@@ -1753,8 +1780,8 @@ static void input_render_selection(App* a, const InputField* f,
 {
     if (!input_has_sel(f)) return;
     int lo, hi; input_get_sel(f, &lo, &hi);
-    int x0 = tx + font_measure(a->font_body, f->buf, lo);
-    int x1 = tx + font_measure(a->font_body, f->buf, hi);
+    int x0 = tx + font_measure(a->font_ide, f->buf, lo);
+    int x1 = tx + font_measure(a->font_ide, f->buf, hi);
     SDL_Rect r = { x0, ty_top, x1 - x0, line_h };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_link.r, a->fg_link.g, a->fg_link.b, 90);
@@ -1769,13 +1796,13 @@ static void render_tinput_modal(App* a)
     SDL_Rect box = tinput_box_rect(a);
     overlay_card(a, box);
 
-    int sz_y = font_line_height(a->font_body);
+    int sz_y = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     int btn_w = 120;
     bool pick = a->tinput_pick_dir;
 
-    font_draw_line(a->font_body, a->tinput_title, strlen(a->tinput_title),
-                   box.x + 20, box.y + 20 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, a->tinput_title, strlen(a->tinput_title),
+                   box.x + 20, box.y + 20 + font_ascent(a->font_ide),
                    a->fg_link);
 
     /* Input field. In save/rename mode this is the filename. In dir-pick
@@ -1795,7 +1822,7 @@ static void render_tinput_modal(App* a)
     draw_rrect(a->renderer, in_r, 6);
 
     int tx = in_r.x + 10;
-    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
+    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
     /* Selection highlight under the text. */
@@ -1808,13 +1835,13 @@ static void render_tinput_modal(App* a)
         input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
     }
     if (a->tinput_len > 0) {
-        font_draw_line(a->font_body, a->tinput_text, a->tinput_len,
+        font_draw_line(a->font_ide, a->tinput_text, a->tinput_len,
                        tx, ty, a->fg);
     } else if (pick) {
         const char* ph = "Type a folder path  -  Enter to go";
-        font_draw_line(a->font_body, ph, strlen(ph), tx, ty, a->fg_muted);
+        font_draw_line(a->font_ide, ph, strlen(ph), tx, ty, a->fg_muted);
     }
-    int cw = font_measure(a->font_body, a->tinput_text, a->tinput_cursor);
+    int cw = font_measure(a->font_ide, a->tinput_text, a->tinput_cursor);
     SDL_Rect caret = { tx + cw, in_r.y + 4, 2, in_h - 8 };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
@@ -1846,8 +1873,8 @@ static void render_tinput_modal(App* a)
     if (dir_lab[0]) {
         SDL_Color lc = a->tinput_path_err
             ? (SDL_Color){230, 110, 110, 220} : a->fg_muted;
-        font_draw_line(a->font_body, dir_lab, strlen(dir_lab),
-                       box.x + 20, dir_y + font_ascent(a->font_body), lc);
+        font_draw_line(a->font_ide, dir_lab, strlen(dir_lab),
+                       box.x + 20, dir_y + font_ascent(a->font_ide), lc);
     }
 
     int list_top = dir_y + sz_y + 8;
@@ -1893,16 +1920,16 @@ static void render_tinput_modal(App* a)
         IconId ic = is_dir ? ICON_FOLDER : ICON_FILE;
         int ic_y = y + (rh - ic_sz) / 2;
         icon_draw(a->renderer, ic, list_r.x + 12, ic_y, ic_sz, ic_c);
-        font_draw_line(a->font_body, a->tinput_files[i],
+        font_draw_line(a->font_ide, a->tinput_files[i],
                        strlen(a->tinput_files[i]),
                        list_r.x + 12 + ic_sz + 8,
-                       row_text_baseline(a->font_body, y, rh), tc);
+                       row_text_baseline(a->font_ide, y, rh), tc);
     }
     if (a->tinput_files_count == 0) {
         const char* empty = "(empty directory)";
-        font_draw_line(a->font_body, empty, strlen(empty),
+        font_draw_line(a->font_ide, empty, strlen(empty),
                        list_r.x + 12,
-                       row_text_baseline(a->font_body, list_top, rh),
+                       row_text_baseline(a->font_ide, list_top, rh),
                        a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -1939,9 +1966,9 @@ static void render_tinput_modal(App* a)
             a->fg, (SDL_Color){230, 110, 110, 255}
         };
         for (int i = 0; i < 2; ++i) {
-            font_draw_line(a->font_body, labels[i], strlen(labels[i]),
+            font_draw_line(a->font_ide, labels[i], strlen(labels[i]),
                            mr.x + 12,
-                           row_text_baseline(a->font_body,
+                           row_text_baseline(a->font_ide,
                                              mr.y + i * rh_ctx, rh_ctx),
                            colors[i]);
         }
@@ -1953,9 +1980,9 @@ static void render_tinput_modal(App* a)
     const char* lab_cn = "Cancel";
     const char* lab_nf = "New Folder";
     int btn_pad = 28;
-    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
-    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
-    int w_nf = font_measure(a->font_body, lab_nf, strlen(lab_nf)) + btn_pad;
+    int w_ok = font_measure(a->font_ide, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_ide, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_nf = font_measure(a->font_ide, lab_nf, strlen(lab_nf)) + btn_pad;
     if (w_ok < btn_w) w_ok = btn_w;
     if (w_cn < btn_w) w_cn = btn_w;
     int b1_x  = box.x + box.w - w_ok - 16;
@@ -1974,10 +2001,10 @@ static void render_tinput_modal(App* a)
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab_nf, strlen(lab_nf));
-        font_draw_line(a->font_body, lab_nf, strlen(lab_nf),
+        int lw = font_measure(a->font_ide, lab_nf, strlen(lab_nf));
+        font_draw_line(a->font_ide, lab_nf, strlen(lab_nf),
                        b_nf_x + (w_nf - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
 
@@ -1989,10 +2016,10 @@ static void render_tinput_modal(App* a)
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab_cn, strlen(lab_cn));
-        font_draw_line(a->font_body, lab_cn, strlen(lab_cn),
+        int lw = font_measure(a->font_ide, lab_cn, strlen(lab_cn));
+        font_draw_line(a->font_ide, lab_cn, strlen(lab_cn),
                        b0_x + (w_cn - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
     /* OK button (accent) */
@@ -2002,20 +2029,20 @@ static void render_tinput_modal(App* a)
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab_ok, strlen(lab_ok));
+        int lw = font_measure(a->font_ide, lab_ok, strlen(lab_ok));
         int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
-        font_draw_line(a->font_body, lab_ok, strlen(lab_ok),
+        font_draw_line(a->font_ide, lab_ok, strlen(lab_ok),
                        b1_x + (w_ok - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        tc);
     }
     /* Hint */
     const char* hint = pick
         ? "Click a folder to enter  -  ..  to go up  -  Esc cancel"
         : "Enter save  -  Esc cancel";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box.x + 20, btn_y - 8, a->fg_muted);
 }
 
@@ -2037,14 +2064,14 @@ static SDL_Rect renpop_box_rect(const App* a)
 static int renpop_hit_test(const App* a, int mx, int my)
 {
     SDL_Rect box = renpop_box_rect(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     int btn_y = box.y + box.h - btn_h - 16;
     const char* lab_ok = "Rename";
     const char* lab_cn = "Cancel";
     int btn_pad = 28;
-    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
-    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_ok = font_measure(a->font_ide, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_ide, lab_cn, strlen(lab_cn)) + btn_pad;
     if (w_ok < 100) w_ok = 100;
     if (w_cn < 100) w_cn = 100;
     int b1_x = box.x + box.w - w_ok - 16;
@@ -2064,21 +2091,21 @@ static void render_rename_popup(App* a)
     SDL_Rect box = renpop_box_rect(a);
     overlay_card(a, box);
 
-    int sz_y = font_line_height(a->font_body);
+    int sz_y = font_line_height(a->font_ide);
 
     /* Title */
     const char* title = "Rename";
-    font_draw_line(a->font_body, title, strlen(title),
-                   box.x + 20, box.y + 20 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, title, strlen(title),
+                   box.x + 20, box.y + 20 + font_ascent(a->font_ide),
                    a->fg_link);
 
     /* Subtitle quoting the original name so the user knows exactly
      * what's being renamed. */
     char sub[320];
     snprintf(sub, sizeof sub, "'%s' to:", a->tinput_renpop_old);
-    font_draw_line(a->font_body, sub, strlen(sub),
+    font_draw_line(a->font_ide, sub, strlen(sub),
                    box.x + 20,
-                   box.y + 20 + sz_y + 6 + font_ascent(a->font_body),
+                   box.y + 20 + sz_y + 6 + font_ascent(a->font_ide),
                    a->fg_muted);
 
     /* Input field */
@@ -2096,7 +2123,7 @@ static void render_rename_popup(App* a)
     draw_rrect(a->renderer, in_r, 6);
 
     int tx = in_r.x + 10;
-    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_body);
+    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
     {
@@ -2110,11 +2137,11 @@ static void render_rename_popup(App* a)
         input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
     }
     if (a->tinput_renpop_len > 0) {
-        font_draw_line(a->font_body,
+        font_draw_line(a->font_ide,
                        a->tinput_renpop_text, a->tinput_renpop_len,
                        tx, ty, a->fg);
     }
-    int cw = font_measure(a->font_body,
+    int cw = font_measure(a->font_ide,
                           a->tinput_renpop_text, a->tinput_renpop_cursor);
     SDL_Rect caret = { tx + cw, in_r.y + 4, 2, in_h - 8 };
     SDL_SetRenderDrawColor(a->renderer,
@@ -2124,11 +2151,11 @@ static void render_rename_popup(App* a)
 
     /* Error label below the input, if any. */
     if (a->tinput_renpop_err && a->tinput_renpop_err_text[0]) {
-        font_draw_line(a->font_body,
+        font_draw_line(a->font_ide,
                        a->tinput_renpop_err_text,
                        strlen(a->tinput_renpop_err_text),
                        box.x + 20,
-                       in_r.y + in_r.h + 6 + font_ascent(a->font_body),
+                       in_r.y + in_r.h + 6 + font_ascent(a->font_ide),
                        (SDL_Color){230, 110, 110, 255});
     }
 
@@ -2138,8 +2165,8 @@ static void render_rename_popup(App* a)
     const char* lab_ok = "Rename";
     const char* lab_cn = "Cancel";
     int btn_pad = 28;
-    int w_ok = font_measure(a->font_body, lab_ok, strlen(lab_ok)) + btn_pad;
-    int w_cn = font_measure(a->font_body, lab_cn, strlen(lab_cn)) + btn_pad;
+    int w_ok = font_measure(a->font_ide, lab_ok, strlen(lab_ok)) + btn_pad;
+    int w_cn = font_measure(a->font_ide, lab_cn, strlen(lab_cn)) + btn_pad;
     if (w_ok < 100) w_ok = 100;
     if (w_cn < 100) w_cn = 100;
     int b1_x = box.x + box.w - w_ok - 16;
@@ -2153,10 +2180,10 @@ static void render_rename_popup(App* a)
             a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
             a->bg_sidebar_hover.b, hover ? 255 : 180);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab_cn, strlen(lab_cn));
-        font_draw_line(a->font_body, lab_cn, strlen(lab_cn),
+        int lw = font_measure(a->font_ide, lab_cn, strlen(lab_cn));
+        font_draw_line(a->font_ide, lab_cn, strlen(lab_cn),
                        b0_x + (w_cn - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
     /* Rename (accent) */
@@ -2166,13 +2193,13 @@ static void render_rename_popup(App* a)
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
         fill_rrect(a->renderer, r, btn_h / 2);
-        int lw = font_measure(a->font_body, lab_ok, strlen(lab_ok));
+        int lw = font_measure(a->font_ide, lab_ok, strlen(lab_ok));
         int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
-        font_draw_line(a->font_body, lab_ok, strlen(lab_ok),
+        font_draw_line(a->font_ide, lab_ok, strlen(lab_ok),
                        b1_x + (w_ok - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        tc);
     }
 }
@@ -2418,7 +2445,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                          * Anything else dismisses the menu and falls
                          * through to normal handling. */
                         if (a->tinput_ctx_active) {
-                            int rh_ctx = font_line_height(a->font_body) + 8;
+                            int rh_ctx = font_line_height(a->font_ide) + 8;
                             int mw_ctx = 140;
                             int mh_ctx = rh_ctx * 2;
                             int mx0 = a->tinput_ctx_x;
@@ -2901,8 +2928,13 @@ static int app_init(App* a, const char* note_path_arg)
         a->lua, "font_path", "C:/Windows/Fonts/consola.ttf");
     const char* font_mono = lua_host_cfg_string(
         a->lua, "font_path_mono", font_path);
+    /* IDE chrome font: defaults to body so existing setups don't suddenly
+     * shift their UI on first launch after this change. */
+    const char* font_ide  = lua_host_cfg_string(
+        a->lua, "font_path_ide",  font_path);
     /* Cache the live font config on App so the settings page can mutate it. */
     snprintf(a->cfg_font_path,      sizeof a->cfg_font_path,      "%s", font_path);
+    snprintf(a->cfg_font_path_ide,  sizeof a->cfg_font_path_ide,  "%s", font_ide);
     snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono, "%s", font_mono);
     a->cfg_font_size    = sz_body;
     a->cfg_font_size_h1 = sz_h1;
@@ -2917,8 +2949,20 @@ static int app_init(App* a, const char* note_path_arg)
     /* Default to wrap=true; matches Obsidian/VS Code default for prose. */
     a->cfg_edit_wrap = lua_host_cfg_number(a->lua, "edit_wrap", 1) != 0;
     font_choices_init();
-    a->settings_font_idx = font_choice_find(a->cfg_font_path);
-    if (a->settings_font_idx < 0) a->settings_font_idx = 0;
+    /* Resurrect any persisted custom font (saved cfg_*_path that doesn't
+     * map to a built-in entry) so the settings page can cycle to it. */
+    if (a->cfg_font_path[0]      && font_choice_find(a->cfg_font_path)      < 0)
+        font_choice_add_custom(a->cfg_font_path);
+    if (a->cfg_font_path_ide[0]  && font_choice_find(a->cfg_font_path_ide)  < 0)
+        font_choice_add_custom(a->cfg_font_path_ide);
+    if (a->cfg_font_path_mono[0] && font_choice_find(a->cfg_font_path_mono) < 0)
+        font_choice_add_custom(a->cfg_font_path_mono);
+    a->settings_font_idx      = font_choice_find(a->cfg_font_path);
+    a->settings_font_idx_ide  = font_choice_find(a->cfg_font_path_ide);
+    a->settings_font_idx_mono = font_choice_find(a->cfg_font_path_mono);
+    if (a->settings_font_idx      < 0) a->settings_font_idx      = 0;
+    if (a->settings_font_idx_ide  < 0) a->settings_font_idx_ide  = 0;
+    if (a->settings_font_idx_mono < 0) a->settings_font_idx_mono = 0;
     /* Empty default — first-run check below uses NULL/empty to know
      * we need to prompt the user for a vault folder. We also scrub
      * any sentinel / non-directory value that may have been written
@@ -3279,6 +3323,7 @@ static void app_shutdown(App* a)
     if (a->cur_nesw)  SDL_FreeCursor(a->cur_nesw);
     vault_free(&a->vault);
     if (a->imgcache) image_cache_destroy(a->imgcache);
+    if (a->font_ide)              font_destroy(a->font_ide);
     if (a->font_body)             font_destroy(a->font_body);
     if (a->font_body_bold)        font_destroy(a->font_body_bold);
     if (a->font_body_italic)      font_destroy(a->font_body_italic);
@@ -4784,8 +4829,8 @@ static void titlebar_button_invoke(App* a, int btn)
 static void render_titlebar(App* a, int TBH)
 {
     int right = a->win_w;
-    int text_h = font_ascent(a->font_body) + font_descent(a->font_body);
-    int by = (TBH - text_h) / 2 + font_ascent(a->font_body);
+    int text_h = font_ascent(a->font_ide) + font_descent(a->font_ide);
+    int by = (TBH - text_h) / 2 + font_ascent(a->font_ide);
 
     /* App icon (small folder glyph) at the very left. */
     int icon_pad = 8;
@@ -4797,7 +4842,7 @@ static void render_titlebar(App* a, int TBH)
     /* Menu items: File / Edit / View / Help. */
     for (int i = 0; i < 4; ++i) {
         const char* label = MENU_LABELS[i];
-        int lw = font_measure(a->font_body, label, strlen(label));
+        int lw = font_measure(a->font_ide, label, strlen(label));
         int item_w = lw + 16;
         SDL_Rect r = { x, 2, item_w, TBH - 4 };
         a->menu_rects[i] = r;
@@ -4812,7 +4857,7 @@ static void render_titlebar(App* a, int TBH)
             fill_rrect(a->renderer, r, 4);
         }
         SDL_Color tc = (is_open || t > 0.05f) ? a->fg_link : a->fg;
-        font_draw_line(a->font_body, label, strlen(label),
+        font_draw_line(a->font_ide, label, strlen(label),
                        x + 8, by, tc);
         x += item_w + 2;
     }
@@ -4822,14 +4867,14 @@ static void render_titlebar(App* a, int TBH)
         const char* title = (a->fm_present && a->fm_title[0])
                             ? a->fm_title
                             : (a->note_path ? vault_basename(a->note_path) : "Downsee");
-        int tw = font_measure(a->font_body, title, strlen(title));
+        int tw = font_measure(a->font_ide, title, strlen(title));
         int min_x = x + 16;
         int max_x = right - 3 * TB_BTN_W - 16;
         int tx = (a->win_w - tw) / 2;
         if (tx < min_x) tx = min_x;
         if (tx + tw > max_x) tx = max_x - tw;
         if (tx >= min_x && tx + tw <= max_x) {
-            font_draw_line(a->font_body, title, strlen(title),
+            font_draw_line(a->font_ide, title, strlen(title),
                            tx, by, a->fg_muted);
         }
     }
@@ -5036,8 +5081,8 @@ static void render_chrome(App* a)
     /* Breadcrumb: vault › title. Each segment is its own clickable hit-rect
      * with an animated hover color cross-fade. Vertical centering is within
      * the chrome ROW (below the title bar), not the full chrome height. */
-    int text_h = font_ascent(a->font_body) + font_descent(a->font_body);
-    int by = TBH + (CRH - text_h) / 2 + font_ascent(a->font_body);
+    int text_h = font_ascent(a->font_ide) + font_descent(a->font_ide);
+    int by = TBH + (CRH - text_h) / 2 + font_ascent(a->font_ide);
     int bx = 14;
     a->crumb_rect_vault = (SDL_Rect){ 0, 0, 0, 0 };
     a->crumb_rect_title = (SDL_Rect){ 0, 0, 0, 0 };
@@ -5052,7 +5097,7 @@ static void render_chrome(App* a)
         })
     if (a->vault.dir) {
         const char* vault = vault_basename(a->vault.dir);
-        int vw = font_measure(a->font_body, vault, strlen(vault));
+        int vw = font_measure(a->font_ide, vault, strlen(vault));
         a->crumb_rect_vault = (SDL_Rect){ bx - 4, TBH + 4, vw + 8, CRH - 8 };
         SDL_Color vc = CRUMB_COLOR(a->fg_muted, a->crumb_hover_t[0]);
         if (a->crumb_hover_t[0] > 0.01f) {
@@ -5062,16 +5107,16 @@ static void render_chrome(App* a)
                 (Uint8)(160 * ease_out_cubic(a->crumb_hover_t[0])));
             fill_rrect(a->renderer, a->crumb_rect_vault, 4);
         }
-        font_draw_line(a->font_body, vault, strlen(vault), bx, by, vc);
+        font_draw_line(a->font_ide, vault, strlen(vault), bx, by, vc);
         bx += vw + 6;
-        font_draw_line(a->font_body, "\xe2\x80\xba", 3,    /* › */
+        font_draw_line(a->font_ide, "\xe2\x80\xba", 3,    /* › */
                        bx, by, a->fg_muted);
-        bx += font_measure(a->font_body, "\xe2\x80\xba", 3) + 6;
+        bx += font_measure(a->font_ide, "\xe2\x80\xba", 3) + 6;
     }
     const char* title = (a->fm_present && a->fm_title[0])
                        ? a->fm_title
                        : (a->note_path ? vault_basename(a->note_path) : "(unsaved)");
-    int tw = font_measure(a->font_body, title, strlen(title));
+    int tw = font_measure(a->font_ide, title, strlen(title));
     a->crumb_rect_title = (SDL_Rect){ bx - 4, TBH + 4, tw + 8, CRH - 8 };
     SDL_Color tc = CRUMB_COLOR(a->fg, a->crumb_hover_t[1]);
     if (a->crumb_hover_t[1] > 0.01f) {
@@ -5081,10 +5126,10 @@ static void render_chrome(App* a)
             (Uint8)(160 * ease_out_cubic(a->crumb_hover_t[1])));
         fill_rrect(a->renderer, a->crumb_rect_title, 4);
     }
-    font_draw_line(a->font_body, title, strlen(title), bx, by, tc);
+    font_draw_line(a->font_ide, title, strlen(title), bx, by, tc);
     if (a->buf.dirty) {
         bx += tw + 6;
-        font_draw_line(a->font_body, "\xe2\x80\xa2", 3,    /* • */
+        font_draw_line(a->font_ide, "\xe2\x80\xa2", 3,    /* • */
                        bx, by, a->fg_link);
     }
     #undef CRUMB_COLOR
@@ -5200,7 +5245,7 @@ static void render_chrome(App* a)
                   pill_h / 2, pill_c);
 
         const char* label = active ? "EDIT" : "PREVIEW";
-        int lw = font_measure(a->font_body, label, strlen(label));
+        int lw = font_measure(a->font_ide, label, strlen(label));
         SDL_Color lc;
         if (active) {
             int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
@@ -5212,7 +5257,7 @@ static void render_chrome(App* a)
             int lb = (int)(a->fg.b + (a->fg_link.b - a->fg.b) * et);
             lc = (SDL_Color){ (Uint8)lr, (Uint8)lg, (Uint8)lb, 255 };
         }
-        font_draw_line(a->font_body, label, strlen(label),
+        font_draw_line(a->font_ide, label, strlen(label),
                        pill_x + (pill_w - lw) / 2, by, lc);
     }
 }
@@ -5241,12 +5286,12 @@ static int sidebar_folder_file_count(const App* a, int folder_idx)
     return count;
 }
 
-static int sidebar_item_height(const App* a) { return font_line_height(a->font_body) + 10; }
+static int sidebar_item_height(const App* a) { return font_line_height(a->font_ide) + 10; }
 /* Sidebar items start below the chrome bar + a vault-name header (a body
  * line + 16px of breathing room). */
 static int sidebar_items_top  (const App* a)
 {
-    return chrome_bar_h(a) + font_line_height(a->font_body) + 18;
+    return chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
 }
 
 /* Build the list of vault item indices currently visible (filter out items
@@ -5342,9 +5387,9 @@ static void render_sidebar(App* a)
     int hdr_icon_y  = header_y + 1;
     icon_draw(a->renderer, ICON_FOLDER_OPEN,
               SIDEBAR_PAD_X, hdr_icon_y, hdr_icon_sz, a->fg);
-    font_draw_line(a->font_body, title, strlen(title),
+    font_draw_line(a->font_ide, title, strlen(title),
                    SIDEBAR_PAD_X + hdr_icon_sz + 8,
-                   header_y + font_ascent(a->font_body) + 2, a->fg);
+                   header_y + font_ascent(a->font_ide) + 2, a->fg);
     /* Hairline separator under the header so the items section reads as
      * its own region. */
     SDL_Rect hdr_sep = { SIDEBAR_PAD_X, header_y + sidebar_item_height(a) - 4,
@@ -5381,9 +5426,9 @@ static void render_sidebar(App* a)
         const char* msg = (a->vault.count == 0)
             ? "(no .md files in vault)"
             : "(no items visible)";
-        font_draw_line(a->font_body, msg, strlen(msg),
+        font_draw_line(a->font_ide, msg, strlen(msg),
                        SIDEBAR_PAD_X,
-                       item_y + font_ascent(a->font_body) + 5,
+                       item_y + font_ascent(a->font_ide) + 5,
                        a->fg_muted);
     }
 
@@ -5448,7 +5493,7 @@ static void render_sidebar(App* a)
         int x_caret  = x_indent;
         int x_icon   = x_indent + 14;
         int x_text   = x_icon + SIDEBAR_ICON_SZ + 6;
-        int baseline = item_y + font_ascent(a->font_body) + 5;
+        int baseline = item_y + font_ascent(a->font_ide) + 5;
 
         SDL_Color icon_c = is_sel ? a->fg_link : a->fg_muted;
 
@@ -5466,7 +5511,7 @@ static void render_sidebar(App* a)
 
         SDL_Color text_c = is_sel ? a->fg
                          : it->is_dir ? a->fg : a->fg;
-        font_draw_line(a->font_body, it->name, strlen(it->name),
+        font_draw_line(a->font_ide, it->name, strlen(it->name),
                        x_text, baseline, text_c);
 
         /* Right-edge widget: dirty marker / folder count. */
@@ -5475,15 +5520,15 @@ static void render_sidebar(App* a)
             if (count > 0) {
                 char cnt[16];
                 snprintf(cnt, sizeof cnt, "%d", count);
-                int cw = font_measure(a->font_body, cnt, strlen(cnt));
-                font_draw_line(a->font_body, cnt, strlen(cnt),
+                int cw = font_measure(a->font_ide, cnt, strlen(cnt));
+                font_draw_line(a->font_ide, cnt, strlen(cnt),
                                a->sidebar_w - SIDEBAR_PAD_X - cw,
                                baseline, a->fg_muted);
             }
         } else if (is_sel && a->buf.dirty) {
             const char* dot = "\xe2\x80\xa2";    /* • */
-            int dw = font_measure(a->font_body, dot, 3);
-            font_draw_line(a->font_body, dot, 3,
+            int dw = font_measure(a->font_ide, dot, 3);
+            font_draw_line(a->font_ide, dot, 3,
                            a->sidebar_w - SIDEBAR_PAD_X - dw,
                            baseline, a->fg_link);
         }
@@ -6301,7 +6346,7 @@ static const char* ctx_shortcut_at(const App* a, int row)
     return "";
 }
 
-static int ctx_menu_row_h(const App* a) { return font_line_height(a->font_body) + 8; }
+static int ctx_menu_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
 static int ctx_menu_w   (const App* a)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return 240;
@@ -6314,8 +6359,8 @@ static int ctx_menu_w   (const App* a)
         for (int i = 0; i < n; ++i) {
             const char* L = ctx_label_at(a, i);
             const char* S = ctx_shortcut_at(a, i);
-            int lw = font_measure(a->font_body, L, strlen(L));
-            int sw = (S && *S) ? font_measure(a->font_body, S, strlen(S)) : 0;
+            int lw = font_measure(a->font_ide, L, strlen(L));
+            int sw = (S && *S) ? font_measure(a->font_ide, S, strlen(S)) : 0;
             if (lw > max_label) max_label = lw;
             if (sw > max_short) max_short = sw;
         }
@@ -6422,7 +6467,7 @@ static void ctx_menu_close(App* a) {
 
 static int submenu_row_h(const App* a)
 {
-    return font_line_height(a->font_body) + 8;
+    return font_line_height(a->font_ide) + 8;
 }
 
 static int submenu_w(const App* a)
@@ -6432,7 +6477,7 @@ static int submenu_w(const App* a)
     int max_label = 0;
     for (int i = 0; i < n; ++i) {
         const char* L = app_recent_dir_at(i);
-        int lw = font_measure(a->font_body, L, strlen(L));
+        int lw = font_measure(a->font_ide, L, strlen(L));
         if (lw > max_label) max_label = lw;
     }
     int w = max_label + 26;          /* 14 left pad + 12 right pad */
@@ -6561,23 +6606,23 @@ static void render_context_menu(App* a)
         int lg = (int)(a->fg.g + (a->fg_link.g - a->fg.g) * rt);
         int lb = (int)(a->fg.b + (a->fg_link.b - a->fg.b) * rt);
         SDL_Color c  = { (Uint8)lr, (Uint8)lg, (Uint8)lb, (Uint8)alpha };
-        font_draw_line(a->font_body, label, strlen(label),
+        font_draw_line(a->font_ide, label, strlen(label),
                        box.x + 14,
-                       y + font_ascent(a->font_body) + 3, c);
+                       y + font_ascent(a->font_ide) + 3, c);
         if (shortc && *shortc) {
-            int sw = font_measure(a->font_body, shortc, strlen(shortc));
+            int sw = font_measure(a->font_ide, shortc, strlen(shortc));
             SDL_Color sc = a->fg_muted; sc.a = (Uint8)(alpha * 0.7f);
-            font_draw_line(a->font_body, shortc, strlen(shortc),
+            font_draw_line(a->font_ide, shortc, strlen(shortc),
                            box.x + w - sw - 12,
-                           y + font_ascent(a->font_body) + 3, sc);
+                           y + font_ascent(a->font_ide) + 3, sc);
         } else if (ctx_is_recent_submenu_row(a, r)) {
             /* Submenu chevron on the right edge — same color cross-fade
              * as the label so it tints with hover. */
             const char* chev = ">";
-            int cw_ = font_measure(a->font_body, chev, strlen(chev));
-            font_draw_line(a->font_body, chev, strlen(chev),
+            int cw_ = font_measure(a->font_ide, chev, strlen(chev));
+            font_draw_line(a->font_ide, chev, strlen(chev),
                            box.x + w - cw_ - 12,
-                           y + font_ascent(a->font_body) + 3, c);
+                           y + font_ascent(a->font_ide) + 3, c);
         }
         y += rh;
     }
@@ -6630,9 +6675,9 @@ static void render_recent_submenu(App* a)
          * spill out of the card. */
         SDL_Rect clip = { box.x + 4, y, box.w - 8, rh };
         SDL_RenderSetClipRect(a->renderer, &clip);
-        font_draw_line(a->font_body, label, strlen(label),
+        font_draw_line(a->font_ide, label, strlen(label),
                        box.x + 14,
-                       y + font_ascent(a->font_body) + 3, c);
+                       y + font_ascent(a->font_ide) + 3, c);
         SDL_RenderSetClipRect(a->renderer, NULL);
         y += rh;
     }
@@ -7117,16 +7162,16 @@ static void render_dnd_ghost(App* a)
     }
 
     /* Ghost label following the cursor. */
-    int tw = font_measure(a->font_body, src->name, strlen(src->name)) + 24;
-    int th = font_line_height(a->font_body) + 6;
+    int tw = font_measure(a->font_ide, src->name, strlen(src->name)) + 24;
+    int th = font_line_height(a->font_ide) + 6;
     SDL_Rect gr = { a->dnd_x + 12, a->dnd_y + 8, tw, th };
     SDL_SetRenderDrawColor(a->renderer, 30, 30, 36, 230);
     SDL_RenderFillRect(a->renderer, &gr);
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_link.r, a->fg_link.g, a->fg_link.b, 220);
     SDL_RenderDrawRect(a->renderer, &gr);
-    font_draw_line(a->font_body, src->name, strlen(src->name),
-                   gr.x + 12, gr.y + font_ascent(a->font_body) + 2,
+    font_draw_line(a->font_ide, src->name, strlen(src->name),
+                   gr.x + 12, gr.y + font_ascent(a->font_ide) + 2,
                    a->fg);
 }
 
@@ -7213,7 +7258,9 @@ static SDL_Color* color_slot_ptr(App* a, int idx);
 
 typedef enum {
     SET_THEME,
-    SET_FONT,
+    SET_FONT_IDE,       /* chrome / sidebar / overlays */
+    SET_FONT,           /* preview body (markdown rendering) */
+    SET_FONT_MONO,      /* editor + code blocks */
     SET_SIZE,
     SET_SIZE_H1,
     SET_SIZE_H2,
@@ -7230,7 +7277,9 @@ typedef enum {
 
 static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Theme",
-    "Body font",
+    "IDE font",
+    "Preview font",
+    "Editor font",
     "Font size",
     "H1 size",
     "H2 size",
@@ -7263,6 +7312,24 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
                          g_font_choices[a->settings_font_idx].name);
             else
                 snprintf(out, cap, "%s", a->cfg_font_path);
+            break;
+        case SET_FONT_IDE:
+            if (a->settings_font_idx_ide >= 0 &&
+                a->settings_font_idx_ide < g_font_choice_count)
+                snprintf(out, cap, "%s",
+                         g_font_choices[a->settings_font_idx_ide].name);
+            else
+                snprintf(out, cap, "%s",
+                         a->cfg_font_path_ide[0] ? a->cfg_font_path_ide
+                                                  : a->cfg_font_path);
+            break;
+        case SET_FONT_MONO:
+            if (a->settings_font_idx_mono >= 0 &&
+                a->settings_font_idx_mono < g_font_choice_count)
+                snprintf(out, cap, "%s",
+                         g_font_choices[a->settings_font_idx_mono].name);
+            else
+                snprintf(out, cap, "%s", a->cfg_font_path_mono);
             break;
         case SET_SIZE:        snprintf(out, cap, "%d", a->cfg_font_size);    break;
         case SET_SIZE_H1:     snprintf(out, cap, "%d", a->cfg_font_size_h1); break;
@@ -7303,8 +7370,24 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->settings_font_idx = (a->settings_font_idx + dir + n) % n;
             snprintf(a->cfg_font_path, sizeof a->cfg_font_path,
                      "%s", g_font_choices[a->settings_font_idx].path);
+            need_reload_fonts = true;
+            break;
+        }
+        case SET_FONT_IDE: {
+            if (g_font_choice_count == 0) break;
+            int n = g_font_choice_count;
+            a->settings_font_idx_ide = (a->settings_font_idx_ide + dir + n) % n;
+            snprintf(a->cfg_font_path_ide, sizeof a->cfg_font_path_ide,
+                     "%s", g_font_choices[a->settings_font_idx_ide].path);
+            need_reload_fonts = true;
+            break;
+        }
+        case SET_FONT_MONO: {
+            if (g_font_choice_count == 0) break;
+            int n = g_font_choice_count;
+            a->settings_font_idx_mono = (a->settings_font_idx_mono + dir + n) % n;
             snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono,
-                     "%s", g_font_choices[a->settings_font_idx].path);
+                     "%s", g_font_choices[a->settings_font_idx_mono].path);
             need_reload_fonts = true;
             break;
         }
@@ -7394,6 +7477,8 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
              * to bring back any preferences. */
             snprintf(a->cfg_font_path, sizeof a->cfg_font_path,
                      "C:/Windows/Fonts/consola.ttf");
+            snprintf(a->cfg_font_path_ide, sizeof a->cfg_font_path_ide,
+                     "C:/Windows/Fonts/consola.ttf");
             snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono,
                      "C:/Windows/Fonts/consola.ttf");
             a->cfg_font_size    = 16;
@@ -7404,7 +7489,11 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->settings_theme_idx = 0;
             theme_apply(a, 0);
             int idx = font_choice_find(a->cfg_font_path);
-            if (idx >= 0) a->settings_font_idx = idx;
+            if (idx >= 0) {
+                a->settings_font_idx      = idx;
+                a->settings_font_idx_ide  = idx;
+                a->settings_font_idx_mono = idx;
+            }
             need_reload_fonts = true;
             remove("settings.lua");
             app_notify(a, "settings reset to defaults");
@@ -7413,6 +7502,67 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
         default: break;
     }
     if (need_reload_fonts) app_reload_fonts(a);
+}
+
+/* Open a native file picker filtered to TTF/OTF, register the chosen file
+ * as a custom font choice, and apply it to the slot identified by `row`
+ * (must be one of SET_FONT, SET_FONT_IDE, SET_FONT_MONO). On cancel: no-op.
+ * On font_create failure: rolls the slot back to its previous value and
+ * surfaces a notification. */
+static void settings_pick_custom_font(App* a, SettingsRow row)
+{
+    /* Resolve which slot we're targeting before doing any I/O so the rest
+     * of this function can talk in pointers instead of a switch. */
+    char* dst_cfg     = NULL;
+    int*  dst_idx     = NULL;
+    const char* slot_name = "font";
+    switch (row) {
+        case SET_FONT:
+            dst_cfg = a->cfg_font_path;
+            dst_idx = &a->settings_font_idx;
+            slot_name = "preview font";
+            break;
+        case SET_FONT_IDE:
+            dst_cfg = a->cfg_font_path_ide;
+            dst_idx = &a->settings_font_idx_ide;
+            slot_name = "IDE font";
+            break;
+        case SET_FONT_MONO:
+            dst_cfg = a->cfg_font_path_mono;
+            dst_idx = &a->settings_font_idx_mono;
+            slot_name = "editor font";
+            break;
+        default: return;
+    }
+
+    char* picked = vault_pick_file(a->window, "Choose a font",
+                                   "Fonts (*.ttf, *.otf)",
+                                   "*.ttf;*.otf");
+    if (!picked) return;
+    for (char* p = picked; *p; ++p) if (*p == '\\') *p = '/';
+    int idx = font_choice_add_custom(picked);
+    if (idx < 0) { free(picked); app_notify(a, "font list full"); return; }
+
+    /* Snapshot for rollback. dst_cfg is sized 260 in app.h. */
+    char prev_path[260];
+    int  prev_idx = *dst_idx;
+    snprintf(prev_path, sizeof prev_path, "%s", dst_cfg);
+
+    *dst_idx = idx;
+    snprintf(dst_cfg, 260, "%s", g_font_choices[idx].path);
+
+    if (app_reload_fonts(a) != 0) {
+        snprintf(dst_cfg, 260, "%s", prev_path);
+        *dst_idx = prev_idx;
+        app_reload_fonts(a);
+        app_notify(a, "font load failed (file isn't a usable TTF/OTF?)");
+    } else {
+        char msg[200];
+        snprintf(msg, sizeof msg, "%s: %.140s",
+                 slot_name, g_font_choices[idx].name);
+        app_notify(a, msg);
+    }
+    free(picked);
 }
 
 /* Write a Lua string literal — handles `"` and `\` escapes (Windows paths). */
@@ -7503,6 +7653,7 @@ static int settings_persist(App* a)
         "-- only until the next save.\n"
         "return {\n");
     fprintf(f, "    font_path      = "); fputs_lua_string(f, a->cfg_font_path);      fprintf(f, ",\n");
+    fprintf(f, "    font_path_ide  = "); fputs_lua_string(f, a->cfg_font_path_ide);  fprintf(f, ",\n");
     fprintf(f, "    font_path_mono = "); fputs_lua_string(f, a->cfg_font_path_mono); fprintf(f, ",\n");
     fprintf(f, "    font_size      = %d,\n", a->cfg_font_size);
     fprintf(f, "    font_size_h1   = %d,\n", a->cfg_font_size_h1);
@@ -7593,7 +7744,7 @@ static int settings_label_w(const App* a)
 {
     int wmax = 0;
     for (int r = 0; r < SET_COUNT; ++r) {
-        int w = font_measure(a->font_body, SETTINGS_LABELS[r],
+        int w = font_measure(a->font_ide, SETTINGS_LABELS[r],
                              strlen(SETTINGS_LABELS[r]));
         if (w > wmax) wmax = w;
     }
@@ -7611,14 +7762,14 @@ static int settings_value_w(const App* a)
     char val[260];
     for (int r = 0; r < SET_COUNT; ++r) {
         settings_value_str(a, (SettingsRow)r, val, sizeof val);
-        int w = font_measure(a->font_body, val, strlen(val));
+        int w = font_measure(a->font_ide, val, strlen(val));
         if (w > wmax) wmax = w;
     }
     return wmax;
 }
 
 /* Geometry helpers, all derived from font metrics + label/value widths. */
-static int settings_chev_sz   (const App* a) { return font_line_height(a->font_body) + 8; }
+static int settings_chev_sz   (const App* a) { return font_line_height(a->font_ide) + 8; }
 static int settings_box_w     (const App* a)
 {
     /* Layout: 24 (left pad) + label + 32 (gap) + chev + 12 (gap)
@@ -7648,7 +7799,7 @@ static int settings_box_x     (const App* a) { return (a->win_w - settings_box_w
 static int settings_hit_test(const App* a, int mx, int my,
                              char* part, bool* inside_box)
 {
-    int row_h = font_line_height(a->font_body) + 8;
+    int row_h = font_line_height(a->font_ide) + 8;
     int box_w = settings_box_w(a);
     int box_h = row_h * (SET_COUNT + 2) + 28;
     int box_x = settings_box_x(a);
@@ -7673,15 +7824,81 @@ static int settings_hit_test(const App* a, int mx, int my,
     return r;
 }
 
+/* Word-wrap helper. Walks `text` greedily by whitespace-delimited tokens
+ * and either measures the wrapped line count (when `draw == false`) or
+ * draws each line top-down starting at (x, y_top). Returns the number of
+ * lines produced. Single tokens wider than `max_w` are emitted on their
+ * own line and visually clipped. */
+static int wrap_text(App* a, Font* f, const char* text,
+                     int x, int y_top, int max_w, int line_h,
+                     SDL_Color color, bool draw)
+{
+    if (!text || !*text || max_w <= 0) return 0;
+    int n = (int)strlen(text);
+    int i = 0;
+    int lines = 0;
+    int y = y_top;
+    while (i < n) {
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        if (i >= n) break;
+        int line_start = i;
+        int last_break = i;
+        while (i < n) {
+            int j = i;
+            while (j < n && text[j] != ' ' && text[j] != '\t') j++;
+            int k = j;
+            while (k < n && (text[k] == ' ' || text[k] == '\t')) k++;
+            int w = font_measure(f, text + line_start, k - line_start);
+            if (w <= max_w) {
+                last_break = k;
+                if (k >= n) { i = k; break; }
+                i = k;
+            } else {
+                if (last_break > line_start) {
+                    i = last_break;
+                } else {
+                    /* Single oversize token — emit alone and move on. */
+                    i = j; last_break = j;
+                }
+                break;
+            }
+        }
+        int draw_len = last_break - line_start;
+        while (draw_len > 0 && (text[line_start + draw_len - 1] == ' ' ||
+                                text[line_start + draw_len - 1] == '\t'))
+            draw_len--;
+        if (draw && draw_len > 0)
+            font_draw_line(f, text + line_start, draw_len,
+                           x, y + font_ascent(f), color);
+        y += line_h;
+        lines++;
+    }
+    (void)a;
+    return lines;
+}
+
 static void render_settings(App* a)
 {
     if (!a->settings_active) return;
 
     overlay_backdrop(a);
 
-    int row_h = font_line_height(a->font_body) + 8;
+    int row_h = font_line_height(a->font_ide) + 8;
     int box_w = settings_box_w(a);
-    int box_h = row_h * (SET_COUNT + 2) + 28;       /* +2 = title + hint */
+    /* Pre-measure the hint so we can reserve the right number of lines.
+     * The font rows get a longer contextual hint and may wrap to 2 rows
+     * inside narrow windows. */
+    bool on_font_row = (a->settings_selected == SET_FONT ||
+                        a->settings_selected == SET_FONT_IDE ||
+                        a->settings_selected == SET_FONT_MONO);
+    const char* hint = on_font_row
+        ? "Up/Dn navigate  -  Left/Right cycle  -  Enter: pick custom \xe2\x80\xa6  -  Esc save & close"
+        : "Up/Dn navigate  -  Left/Right change  -  Esc save & close";
+    int hint_lines = wrap_text(a, a->font_ide, hint, 0, 0,
+                               box_w - 32, row_h,
+                               (SDL_Color){0,0,0,0}, false);
+    if (hint_lines < 1) hint_lines = 1;
+    int box_h = row_h * (SET_COUNT + 1 + hint_lines) + 28;
     int box_x = settings_box_x(a);
     int box_y = SETTINGS_BOX_Y;
     int chev  = settings_chev_sz(a);
@@ -7693,8 +7910,8 @@ static void render_settings(App* a)
     /* Title */
     {
         const char* title = "Settings";
-        font_draw_line(a->font_body, title, strlen(title),
-                       box_x + 16, y + font_ascent(a->font_body), a->fg_link);
+        font_draw_line(a->font_ide, title, strlen(title),
+                       box_x + 16, y + font_ascent(a->font_ide), a->fg_link);
     }
     y += row_h;
     SDL_Rect div = { box_x + 8, y - 2, box_w - 16, 1 };
@@ -7714,9 +7931,9 @@ static void render_settings(App* a)
             SDL_RenderFillRect(a->renderer, &hr);
         }
         SDL_Color label_c = sel ? a->fg : a->fg_muted;
-        font_draw_line(a->font_body, SETTINGS_LABELS[r],
+        font_draw_line(a->font_ide, SETTINGS_LABELS[r],
                        strlen(SETTINGS_LABELS[r]),
-                       box_x + 16, y + font_ascent(a->font_body) + 2,
+                       box_x + 16, y + font_ascent(a->font_ide) + 2,
                        label_c);
 
         /* Value column. Chevrons drawn procedurally so they always render —
@@ -7736,16 +7953,16 @@ static void render_settings(App* a)
                       right_chev_x, y + (row_h - chev) / 2, chev, a->fg_link);
         }
         SDL_Color val_c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_body, val, strlen(val),
-                       val_x, y + font_ascent(a->font_body) + 2, val_c);
+        font_draw_line(a->font_ide, val, strlen(val),
+                       val_x, y + font_ascent(a->font_ide) + 2, val_c);
         y += row_h;
     }
 
-    /* Hint line — plain text so glyph fallback isn't needed. */
+    /* Hint line(s) — pre-measured above so box_h already reserved enough
+     * vertical room. wrap_text handles single-line and multi-line cases. */
     y += 4;
-    const char* hint = "Up/Dn navigate  -  Left/Right change  -  Esc save & close";
-    font_draw_line(a->font_body, hint, strlen(hint),
-                   box_x + 16, y + font_ascent(a->font_body), a->fg_muted);
+    wrap_text(a, a->font_ide, hint,
+              box_x + 16, y, box_w - 32, row_h, a->fg_muted, true);
 }
 
 /* ----------------------------- color picker ----------------------------- */
@@ -7844,7 +8061,7 @@ static void picker_adjust(App* a, int delta)
     a->settings_theme_idx = -1;
 }
 
-static int picker_row_h(const App* a) { return font_line_height(a->font_body) + 8; }
+static int picker_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
 
 static int picker_scrollbar_geom(const App* a,
                                  SDL_Rect* track, SDL_Rect* thumb)
@@ -7915,8 +8132,8 @@ static void render_picker(App* a)
     /* Title */
     {
         const char* title = "Theme colors";
-        font_draw_line(a->font_body, title, strlen(title),
-                       box_x + 16, box_y + 10 + font_ascent(a->font_body),
+        font_draw_line(a->font_ide, title, strlen(title),
+                       box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                        a->fg_link);
     }
 
@@ -7952,8 +8169,8 @@ static void render_picker(App* a)
         /* Label */
         const char* lab = g_color_slots[i].label;
         SDL_Color lab_c = sel ? a->fg : a->fg_muted;
-        font_draw_line(a->font_body, lab, strlen(lab),
-                       box_x + 44, y + font_ascent(a->font_body) + 2,
+        font_draw_line(a->font_ide, lab, strlen(lab),
+                       box_x + 44, y + font_ascent(a->font_ide) + 2,
                        lab_c);
 
         /* Channels: "R: 24  G: 24  B: 28  A: 255". The active channel of the
@@ -7967,8 +8184,8 @@ static void render_picker(App* a)
                 snprintf(cell, sizeof cell, "%c: %3d", names[k], comps[k]);
                 bool active_chan = sel && (k == a->picker_channel);
                 SDL_Color cc = active_chan ? a->fg_link : a->fg;
-                font_draw_line(a->font_body, cell, strlen(cell),
-                               cx, y + font_ascent(a->font_body) + 2, cc);
+                font_draw_line(a->font_ide, cell, strlen(cell),
+                               cx, y + font_ascent(a->font_ide) + 2, cc);
                 cx += 60;
             }
         }
@@ -7985,9 +8202,9 @@ static void render_picker(App* a)
     const char* hint =
         "Tab channel  \xc2\xb7  \xc2\xb1" "5 / Shift \xc2\xb1" "1  "
         "\xc2\xb7  Wheel adjust  \xc2\xb7  Esc closes";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -8003,7 +8220,7 @@ static void search_rebuild       (App* a);
 #define OUTLINE_BOX_W   520
 #define OUTLINE_BOX_Y    60
 
-static int outline_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
+static int outline_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
 
 /* Walk the buffer and collect every `#`/`##`/... heading into outline_entries.
  * Lines starting with 1-6 hashes followed by a space qualify (matches the
@@ -8128,8 +8345,8 @@ static void render_outline(App* a)
     char title[80];
     snprintf(title, sizeof title, "Outline  (%d heading%s)",
              a->outline_count, a->outline_count == 1 ? "" : "s");
-    font_draw_line(a->font_body, title, strlen(title),
-                   box_x + 16, box_y + 10 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, title, strlen(title),
+                   box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                    a->fg_link);
 
     int rows_top = box_y + rh + 12;
@@ -8152,17 +8369,17 @@ static void render_outline(App* a)
         }
         int indent = (o->level - 1) * 16;
         SDL_Color tc = sel ? a->fg : (o->level == 1 ? a->fg_heading : a->fg_muted);
-        font_draw_line(a->font_body, o->text, strlen(o->text),
+        font_draw_line(a->font_ide, o->text, strlen(o->text),
                        box_x + 16 + indent,
-                       row_text_baseline(a->font_body, y, rh),
+                       row_text_baseline(a->font_ide, y, rh),
                        tc);
     }
 
     if (a->outline_count == 0) {
         const char* empty = "(no headings in this note)";
-        font_draw_line(a->font_body, empty, strlen(empty),
+        font_draw_line(a->font_ide, empty, strlen(empty),
                        box_x + 16,
-                       rows_top + font_ascent(a->font_body),
+                       rows_top + font_ascent(a->font_ide),
                        a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -8175,9 +8392,9 @@ static void render_outline(App* a)
     /* Hint. */
     const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
         "Enter jump  \xc2\xb7  Esc close";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -8202,7 +8419,7 @@ static int outline_index_of_cursor(const App* a)
 static int outline_panel_x(const App* a) { return a->win_w - a->outline_panel_w; }
 
 static int outline_panel_row_h(const App* a) {
-    return font_line_height(a->font_body) + 8;
+    return font_line_height(a->font_ide) + 8;
 }
 
 /* Hit-test the pinned panel: returns outline entry index, or -1. */
@@ -8211,7 +8428,7 @@ static int outline_panel_hit_test(const App* a, int mx, int my)
     if (!a->outline_pinned) return -1;
     int px = outline_panel_x(a);
     if (mx < px || mx >= a->win_w) return -1;
-    int top = chrome_bar_h(a) + font_line_height(a->font_body) + 18;
+    int top = chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
     int bot = a->win_h - status_bar_h(a);
     if (my < top || my >= bot) return -1;
     int rh = outline_panel_row_h(a);
@@ -8267,11 +8484,11 @@ static void render_outline_panel(App* a)
     char header[80];
     snprintf(header, sizeof header, "Outline  \xc2\xb7  %d",
              a->outline_count);
-    font_draw_line(a->font_body, header, strlen(header),
-                   px + 12, header_y + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, header, strlen(header),
+                   px + 12, header_y + font_ascent(a->font_ide),
                    a->fg);
 
-    int rows_top = top + font_line_height(a->font_body) + 18;
+    int rows_top = top + font_line_height(a->font_ide) + 18;
     /* Hairline divider under the header so it reads as a section, not as
      * just another row in the list. */
     SDL_Rect hdiv = { px + 12, rows_top - 6, pw - 24, 1 };
@@ -8317,17 +8534,17 @@ static void render_outline_panel(App* a)
         int avail_w = pw - 16 - indent - 8;
         if (avail_w < 30) avail_w = 30;
         while (tlen > 0 &&
-               font_measure(a->font_body, text, tlen) > avail_w) tlen--;
-        font_draw_line(a->font_body, text, tlen,
-                       px + 12 + indent, y + font_ascent(a->font_body) + 2,
+               font_measure(a->font_ide, text, tlen) > avail_w) tlen--;
+        font_draw_line(a->font_ide, text, tlen,
+                       px + 12 + indent, y + font_ascent(a->font_ide) + 2,
                        tc);
     }
 
     if (a->outline_count == 0) {
         const char* empty = "(no headings)";
-        font_draw_line(a->font_body, empty, strlen(empty),
+        font_draw_line(a->font_ide, empty, strlen(empty),
                        px + 12,
-                       rows_top + font_ascent(a->font_body),
+                       rows_top + font_ascent(a->font_ide),
                        a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -8354,8 +8571,8 @@ static void action_outline_pin(App* a)
  * are forward-declared at the top of the outline section above. */
 static int  load_note(App* a, const char* path);
 
-static int  vsearch_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
-static int  vsearch_input_h(const App* a) { return font_line_height(a->font_body) + 12; }
+static int  vsearch_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
+static int  vsearch_input_h(const App* a) { return font_line_height(a->font_ide) + 12; }
 
 /* Append a row to the hits buffer, growing as needed. The struct is
  * defined inline in app.h; size is captured here at call sites. */
@@ -8635,31 +8852,31 @@ static void render_vsearch(App* a)
     /* Input row at the top: "Search vault:  <query>             [Re] [Aa] N hits in M files" */
     int y = box_y + 8;
     const char* lab = "Search vault: ";
-    int lab_w = font_measure(a->font_body, lab, strlen(lab));
-    font_draw_line(a->font_body, lab, strlen(lab),
-                   box_x + 16, y + font_ascent(a->font_body), a->fg_link);
-    font_draw_line(a->font_body, a->vsearch_query, a->vsearch_qlen,
-                   box_x + 16 + lab_w, y + font_ascent(a->font_body), a->fg);
+    int lab_w = font_measure(a->font_ide, lab, strlen(lab));
+    font_draw_line(a->font_ide, lab, strlen(lab),
+                   box_x + 16, y + font_ascent(a->font_ide), a->fg_link);
+    font_draw_line(a->font_ide, a->vsearch_query, a->vsearch_qlen,
+                   box_x + 16 + lab_w, y + font_ascent(a->font_ide), a->fg);
 
     /* Mode indicators. */
     int ind_x = box_x + box_w - 16;
     {
         const char* r_lab = "[Re]";
-        int rw = font_measure(a->font_body, r_lab, 4);
+        int rw = font_measure(a->font_ide, r_lab, 4);
         ind_x -= rw + 6;
         SDL_Color rc = a->vsearch_regex ? a->fg_link : a->fg_muted;
         if (a->vsearch_regex && a->vsearch_re_err[0])
             rc = (SDL_Color){ 230, 110, 110, 255 };
-        font_draw_line(a->font_body, r_lab, 4, ind_x,
-                       y + font_ascent(a->font_body), rc);
+        font_draw_line(a->font_ide, r_lab, 4, ind_x,
+                       y + font_ascent(a->font_ide), rc);
     }
     {
         const char* i_lab = "[Aa]";
-        int iw = font_measure(a->font_body, i_lab, 4);
+        int iw = font_measure(a->font_ide, i_lab, 4);
         ind_x -= iw + 6;
         SDL_Color ic = a->vsearch_ci ? a->fg_link : a->fg_muted;
-        font_draw_line(a->font_body, i_lab, 4, ind_x,
-                       y + font_ascent(a->font_body), ic);
+        font_draw_line(a->font_ide, i_lab, 4, ind_x,
+                       y + font_ascent(a->font_ide), ic);
     }
 
     /* Counts (or error). */
@@ -8673,12 +8890,12 @@ static void render_vsearch(App* a)
     else
         snprintf(counts, sizeof counts, "%d hits in %d files",
                  a->vsearch_total_hits, a->vsearch_files_with_hits);
-    int cw = font_measure(a->font_body, counts, strlen(counts));
+    int cw = font_measure(a->font_ide, counts, strlen(counts));
     ind_x -= cw + 12;
     SDL_Color cc = (a->vsearch_regex && a->vsearch_re_err[0])
                    ? (SDL_Color){ 230, 110, 110, 255 } : a->fg_muted;
-    font_draw_line(a->font_body, counts, strlen(counts),
-                   ind_x, y + font_ascent(a->font_body), cc);
+    font_draw_line(a->font_ide, counts, strlen(counts),
+                   ind_x, y + font_ascent(a->font_ide), cc);
 
     /* Divider below the input. */
     SDL_Rect div = { box_x + 8, box_y + ih, box_w - 16, 1 };
@@ -8700,11 +8917,11 @@ static void render_vsearch(App* a)
 
         if (h->line_no == 0) {
             /* File header: filename in heading color, no selection. */
-            font_draw_line(a->font_body, "\xe2\x96\xb8", 3,    /* ▸ */
-                           box_x + 12, row_text_baseline(a->font_body, ry, rh),
+            font_draw_line(a->font_ide, "\xe2\x96\xb8", 3,    /* ▸ */
+                           box_x + 12, row_text_baseline(a->font_ide, ry, rh),
                            a->fg_muted);
-            font_draw_line(a->font_body, h->preview, strlen(h->preview),
-                           box_x + 28, row_text_baseline(a->font_body, ry, rh),
+            font_draw_line(a->font_ide, h->preview, strlen(h->preview),
+                           box_x + 28, row_text_baseline(a->font_ide, ry, rh),
                            a->fg_heading);
             continue;
         }
@@ -8719,8 +8936,8 @@ static void render_vsearch(App* a)
         }
         char ln[20];
         snprintf(ln, sizeof ln, "L%d", h->line_no);
-        font_draw_line(a->font_body, ln, strlen(ln),
-                       box_x + 36, row_text_baseline(a->font_body, ry, rh),
+        font_draw_line(a->font_ide, ln, strlen(ln),
+                       box_x + 36, row_text_baseline(a->font_ide, ry, rh),
                        a->fg_muted);
 
         /* Preview text. Highlight the matched run with the selection color
@@ -8730,9 +8947,9 @@ static void render_vsearch(App* a)
             h->match_col_in_line >= 0 &&
             (size_t)(h->match_col_in_line + h->match_len) <= plen)
         {
-            int x0 = font_measure(a->font_body, h->preview,
+            int x0 = font_measure(a->font_ide, h->preview,
                                   h->match_col_in_line);
-            int x1 = font_measure(a->font_body, h->preview,
+            int x1 = font_measure(a->font_ide, h->preview,
                                   h->match_col_in_line + h->match_len);
             SDL_Rect mr = { box_x + VSEARCH_PREVIEW_X + x0,
                             ry + 2, x1 - x0, rh - 4 };
@@ -8740,9 +8957,9 @@ static void render_vsearch(App* a)
             SDL_RenderFillRect(a->renderer, &mr);
         }
         SDL_Color tc = sel ? a->fg : a->fg_muted;
-        font_draw_line(a->font_body, h->preview, plen,
+        font_draw_line(a->font_ide, h->preview, plen,
                        box_x + VSEARCH_PREVIEW_X,
-                       row_text_baseline(a->font_body, ry, rh), tc);
+                       row_text_baseline(a->font_ide, ry, rh), tc);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
 
@@ -8754,9 +8971,9 @@ static void render_vsearch(App* a)
     /* Hint at the bottom. */
     const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
         "Enter open  \xc2\xb7  Alt+R regex  \xc2\xb7  Alt+I case  \xc2\xb7  Esc close";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -8765,7 +8982,7 @@ static void render_vsearch(App* a)
 #define BLINK_BOX_W      640
 #define BLINK_BOX_Y       60
 
-static int blink_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
+static int blink_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
 
 /* Lowercase ASCII compare of two strings, NUL-terminated. */
 static int ascii_iequal(const char* a, const char* b)
@@ -8963,8 +9180,8 @@ static void render_backlinks(App* a)
     else              snprintf(self, sizeof self, "(unsaved)");
     snprintf(title, sizeof title, "Backlinks to [[%s]]  (%d)",
              self, a->backlinks_count);
-    font_draw_line(a->font_body, title, strlen(title),
-                   box_x + 16, box_y + 10 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, title, strlen(title),
+                   box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                    a->fg_link);
 
     int rows_top = box_y + rh + 12;
@@ -8990,21 +9207,21 @@ static void render_backlinks(App* a)
                             ? a->vault.items[h->vault_idx].name : "?";
         char prefix[256];
         snprintf(prefix, sizeof prefix, "%s : L%d", fname, h->line_no);
-        int pw = font_measure(a->font_body, prefix, strlen(prefix));
-        font_draw_line(a->font_body, prefix, strlen(prefix),
-                       box_x + 16, row_text_baseline(a->font_body, y, rh),
+        int pw = font_measure(a->font_ide, prefix, strlen(prefix));
+        font_draw_line(a->font_ide, prefix, strlen(prefix),
+                       box_x + 16, row_text_baseline(a->font_ide, y, rh),
                        sel ? a->fg_link : a->fg_heading);
-        font_draw_line(a->font_body, h->preview, strlen(h->preview),
+        font_draw_line(a->font_ide, h->preview, strlen(h->preview),
                        box_x + 16 + pw + 16,
-                       row_text_baseline(a->font_body, y, rh),
+                       row_text_baseline(a->font_ide, y, rh),
                        sel ? a->fg : a->fg_muted);
     }
 
     if (a->backlinks_count == 0) {
         const char* empty = "(no backlinks found)";
-        font_draw_line(a->font_body, empty, strlen(empty),
+        font_draw_line(a->font_ide, empty, strlen(empty),
                        box_x + 16,
-                       rows_top + font_ascent(a->font_body),
+                       rows_top + font_ascent(a->font_ide),
                        a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -9015,9 +9232,9 @@ static void render_backlinks(App* a)
                                a->sb_drag == SB_BACKLINKS);
 
     const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  Enter open  \xc2\xb7  Esc close";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -9026,7 +9243,7 @@ static void render_backlinks(App* a)
 #define TAGS_BOX_W   460
 #define TAGS_BOX_Y    60
 
-static int tags_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
+static int tags_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
 
 /* Same boundary rules as compute_edit_styles: # at start-of-line or after
  * whitespace/`(`/`[`, then at least one word char. Tag body extends through
@@ -9198,8 +9415,8 @@ static void render_tags(App* a)
 
     char title[80];
     snprintf(title, sizeof title, "Tags  (%d)", a->tags_count);
-    font_draw_line(a->font_body, title, strlen(title),
-                   box_x + 16, box_y + 10 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, title, strlen(title),
+                   box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                    a->fg_link);
 
     int rows_top = box_y + rh + 12;
@@ -9222,23 +9439,23 @@ static void render_tags(App* a)
         }
         char tag[80];
         snprintf(tag, sizeof tag, "#%s", t->name);
-        font_draw_line(a->font_body, tag, strlen(tag),
-                       box_x + 16, row_text_baseline(a->font_body, y, rh),
+        font_draw_line(a->font_ide, tag, strlen(tag),
+                       box_x + 16, row_text_baseline(a->font_ide, y, rh),
                        sel ? a->fg : a->fg_link);
         char cnt[16];
         snprintf(cnt, sizeof cnt, "%d", t->count);
-        int cw = font_measure(a->font_body, cnt, strlen(cnt));
-        font_draw_line(a->font_body, cnt, strlen(cnt),
+        int cw = font_measure(a->font_ide, cnt, strlen(cnt));
+        font_draw_line(a->font_ide, cnt, strlen(cnt),
                        box_x + box_w - 16 - cw,
-                       row_text_baseline(a->font_body, y, rh),
+                       row_text_baseline(a->font_ide, y, rh),
                        a->fg_muted);
     }
 
     if (a->tags_count == 0) {
         const char* empty = "(no #tags found in vault)";
-        font_draw_line(a->font_body, empty, strlen(empty),
+        font_draw_line(a->font_ide, empty, strlen(empty),
                        box_x + 16,
-                       rows_top + font_ascent(a->font_body),
+                       rows_top + font_ascent(a->font_ide),
                        a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -9250,9 +9467,9 @@ static void render_tags(App* a)
 
     const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
         "Enter \xe2\x86\x92 vault search  \xc2\xb7  Esc close";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -9261,7 +9478,7 @@ static void render_tags(App* a)
 #define TPL_BOX_W   460
 #define TPL_BOX_Y    80
 
-static int tpl_row_h(const App* a) { return font_line_height(a->font_body) + 6; }
+static int tpl_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
 
 /* Walk vault.items and pick everything under `data/templates/`. Cheap: the
  * vault scan already enumerated the directory; we just filter by path. */
@@ -9442,8 +9659,8 @@ static void render_template_picker(App* a)
     overlay_card(a, box);
 
     const char* title = "New file from template";
-    font_draw_line(a->font_body, title, strlen(title),
-                   box_x + 16, box_y + 10 + font_ascent(a->font_body),
+    font_draw_line(a->font_ide, title, strlen(title),
+                   box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                    a->fg_link);
 
     int rows_top = box_y + rh + 12;
@@ -9464,18 +9681,18 @@ static void render_template_picker(App* a)
             SDL_SetRenderDrawColor(a->renderer, bc.r, bc.g, bc.b, 255);
             SDL_RenderFillRect(a->renderer, &hr);
         }
-        font_draw_line(a->font_body, t->name, strlen(t->name),
+        font_draw_line(a->font_ide, t->name, strlen(t->name),
                        box_x + 16,
-                       row_text_baseline(a->font_body, y, rh),
+                       row_text_baseline(a->font_ide, y, rh),
                        sel ? a->fg : a->fg_muted);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
 
     const char* hint = "\xe2\x86\x91/\xe2\x86\x93 navigate  \xc2\xb7  "
         "Enter use template  \xc2\xb7  Esc blank";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   row_text_baseline(a->font_body,
+                   row_text_baseline(a->font_ide,
                                      box_y + box_h - 8 - rh, rh),
                    a->fg_muted);
 }
@@ -9520,7 +9737,7 @@ static void keybind_close(App* a)
     a->keybind_capturing = false;
 }
 
-static int kbind_row_h(const App* a) { return font_line_height(a->font_body) + 8; }
+static int kbind_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
 
 /* The keybindings overlay shows two kinds of rows: a category header (one
  * per group) and an action row (one per ACTIONS entry). The action_idx is
@@ -9700,8 +9917,8 @@ static void render_keybind(App* a)
         const char* title = a->keybind_capturing
             ? "Help & Keybindings \xe2\x80\x94 press a key combo (Esc to cancel)"
             : "Help & Keybindings";
-        font_draw_line(a->font_body, title, strlen(title),
-                       box_x + 16, box_y + 10 + font_ascent(a->font_body),
+        font_draw_line(a->font_ide, title, strlen(title),
+                       box_x + 16, box_y + 10 + font_ascent(a->font_ide),
                        a->fg_link);
     }
 
@@ -9721,9 +9938,9 @@ static void render_keybind(App* a)
 
         if (row->action_idx < 0) {
             /* Category header — small caps style label + thin underline. */
-            font_draw_line(a->font_body,
+            font_draw_line(a->font_ide,
                 row->header_text, strlen(row->header_text),
-                box_x + 16, row->y + font_ascent(a->font_body) + 4,
+                box_x + 16, row->y + font_ascent(a->font_ide) + 4,
                 a->fg_quote);
             SDL_Rect underline = { box_x + 16, row->y + row->h - 2,
                                    box_w - 32, 1 };
@@ -9747,15 +9964,15 @@ static void render_keybind(App* a)
         bool shadowed  = unbound && action_is_shadowed(act);
 
         SDL_Color label_c = sel ? a->fg : a->fg_muted;
-        font_draw_line(a->font_body, act, strlen(act),
-                       box_x + 28, row->y + font_ascent(a->font_body) + 2,
+        font_draw_line(a->font_ide, act, strlen(act),
+                       box_x + 28, row->y + font_ascent(a->font_ide) + 2,
                        label_c);
 
         /* Warning glyph in front of the label for shadowed rows. */
         if (shadowed) {
-            font_draw_line(a->font_body, "\xe2\x9a\xa0", 3,    /* ⚠ */
+            font_draw_line(a->font_ide, "\xe2\x9a\xa0", 3,    /* ⚠ */
                            box_x + 12,
-                           row->y + font_ascent(a->font_body) + 2,
+                           row->y + font_ascent(a->font_ide) + 2,
                            warn_c);
         }
 
@@ -9780,8 +9997,8 @@ static void render_keybind(App* a)
             show  = ks;
             val_c = a->fg_link;
         }
-        font_draw_line(a->font_body, show, strlen(show),
-                       box_x + 280, row->y + font_ascent(a->font_body) + 2,
+        font_draw_line(a->font_ide, show, strlen(show),
+                       box_x + 280, row->y + font_ascent(a->font_ide) + 2,
                        val_c);
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
@@ -9800,9 +10017,9 @@ static void render_keybind(App* a)
     const char* hint = a->keybind_capturing
         ? "Press a key combo to bind, or Esc to cancel"
         : "Enter / Click to capture  -  Del to clear  -  Esc to close";
-    font_draw_line(a->font_body, hint, strlen(hint),
+    font_draw_line(a->font_ide, hint, strlen(hint),
                    box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_body),
+                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
                    a->fg_muted);
 }
 
@@ -9869,7 +10086,7 @@ static void render_resize_badge(App* a)
     char label[64];
     snprintf(label, sizeof label, "%d x %d", a->win_w, a->win_h);
 
-    Font* f = a->font_h2 ? a->font_h2 : a->font_body;
+    Font* f = a->font_h2 ? a->font_h2 : a->font_ide;
     int sz_y = font_line_height(f);
     int lw   = font_measure(f, label, strlen(label));
     int pad_x = 24, pad_y = 12;
@@ -9904,7 +10121,7 @@ static void render_resize_badge(App* a)
 static void render_link_tooltip(App* a)
 {
     if (!a->tip_active || !a->tip_text[0]) return;
-    Font* f = a->font_body;
+    Font* f = a->font_ide;
     int sz_y  = font_line_height(f);
     int pad_x = 10;
     int pad_y = 6;
@@ -9994,7 +10211,7 @@ static void render_status(App* a)
 {
     int sh = status_bar_h(a);
     int sy = a->win_h - sh;
-    int by = sy + font_ascent(a->font_body) + 4;
+    int by = sy + font_ascent(a->font_ide) + 4;
 
     SDL_Rect bg = { 0, sy, a->win_w, sh };
     SDL_SetRenderDrawColor(a->renderer,
@@ -10009,7 +10226,7 @@ static void render_status(App* a)
 
     uint32_t now = SDL_GetTicks();
     if (a->notification_msg && now < a->notification_until) {
-        font_draw_line(a->font_body, a->notification_msg,
+        font_draw_line(a->font_ide, a->notification_msg,
                        strlen(a->notification_msg),
                        12, by, a->fg_link);
         return;
@@ -10048,9 +10265,9 @@ static void render_status(App* a)
     /* Mode prefix in accent color, then the rest in muted. */
     const char* mode = a->edit_mode ? "EDIT" : "PREVIEW";
     int x = 12;
-    font_draw_line(a->font_body, mode, strlen(mode), x, by, a->fg_link);
-    x += font_measure(a->font_body, mode, strlen(mode)) + 12;
-    font_draw_line(a->font_body, buf, strlen(buf), x, by, a->fg_status);
+    font_draw_line(a->font_ide, mode, strlen(mode), x, by, a->fg_link);
+    x += font_measure(a->font_ide, mode, strlen(mode)) + 12;
+    font_draw_line(a->font_ide, buf, strlen(buf), x, by, a->fg_status);
 
     /* Right-aligned cluster: word count, then Ln/Col position. Position is
      * always shown (the buffer cursor is meaningful even in preview); the
@@ -10071,9 +10288,9 @@ static void render_status(App* a)
         char pos[80];
         snprintf(pos, sizeof pos, "Ln %zu / %zu  Col %zu",
                  line + 1, total, col + 1);
-        int pw = font_measure(a->font_body, pos, strlen(pos));
+        int pw = font_measure(a->font_ide, pos, strlen(pos));
         rx -= pw;
-        font_draw_line(a->font_body, pos, strlen(pos), rx, by, accent_muted);
+        font_draw_line(a->font_ide, pos, strlen(pos), rx, by, accent_muted);
         rx -= 18;     /* gap before next item */
     }
 
@@ -10086,9 +10303,9 @@ static void render_status(App* a)
     }
     char wc[64];
     word_count_str(buf_word_count(wd, wl), wc, sizeof wc);
-    int wc_w = font_measure(a->font_body, wc, strlen(wc));
+    int wc_w = font_measure(a->font_ide, wc, strlen(wc));
     rx -= wc_w;
-    font_draw_line(a->font_body, wc, strlen(wc), rx, by, accent_muted);
+    font_draw_line(a->font_ide, wc, strlen(wc), rx, by, accent_muted);
 }
 
 static void render_search_overlay(App* a);
@@ -10733,7 +10950,7 @@ static int switcher_row_at(const App* a, int mx, int my)
 {
     if (!a->switcher_active) return -1;
     int max_rows = 12;
-    int row_h    = font_line_height(a->font_body) + 8;
+    int row_h    = font_line_height(a->font_ide) + 8;
     int rows     = a->switcher_count < max_rows ? a->switcher_count : max_rows;
     if (rows == 0) return -1;
     int box_w = 560;
@@ -10769,7 +10986,7 @@ static void render_switcher(App* a)
     SDL_RenderFillRect(a->renderer, &bd);
 
     int max_rows = 12;
-    int row_h    = font_line_height(a->font_body) + 8;
+    int row_h    = font_line_height(a->font_ide) + 8;
     int rows     = a->switcher_count < max_rows ? a->switcher_count : max_rows;
     if (rows == 0) rows = 1;
     int box_w = 560;
@@ -10781,15 +10998,15 @@ static void render_switcher(App* a)
     overlay_card(a, box);
 
     int y = box_y + 8;
-    int label_w = font_measure(a->font_body, "Open: ", 6);
-    font_draw_line(a->font_body, "Open: ", 6,
-                   box_x + 12, y + font_ascent(a->font_body), a->fg_muted);
-    font_draw_line(a->font_body, a->switcher_query, a->switcher_qlen,
-                   box_x + 12 + label_w, y + font_ascent(a->font_body), a->fg);
+    int label_w = font_measure(a->font_ide, "Open: ", 6);
+    font_draw_line(a->font_ide, "Open: ", 6,
+                   box_x + 12, y + font_ascent(a->font_ide), a->fg_muted);
+    font_draw_line(a->font_ide, a->switcher_query, a->switcher_qlen,
+                   box_x + 12 + label_w, y + font_ascent(a->font_ide), a->fg);
 
-    int qw = font_measure(a->font_body, a->switcher_query, a->switcher_qlen);
+    int qw = font_measure(a->font_ide, a->switcher_query, a->switcher_qlen);
     SDL_Rect cur = { box_x + 12 + label_w + qw, y, 2,
-                     font_line_height(a->font_body) };
+                     font_line_height(a->font_ide) };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
     SDL_RenderFillRect(a->renderer, &cur);
@@ -10797,10 +11014,10 @@ static void render_switcher(App* a)
     char info[40];
     snprintf(info, sizeof info, "%d/%zu",
              a->switcher_count, a->vault.count);
-    int iw = font_measure(a->font_body, info, strlen(info));
-    font_draw_line(a->font_body, info, strlen(info),
+    int iw = font_measure(a->font_ide, info, strlen(info));
+    font_draw_line(a->font_ide, info, strlen(info),
                    box_x + box_w - 12 - iw,
-                   y + font_ascent(a->font_body), a->fg_muted);
+                   y + font_ascent(a->font_ide), a->fg_muted);
 
     y += row_h;
     SDL_Rect div = { box_x + 8, y - 2, box_w - 16, 1 };
@@ -10830,10 +11047,10 @@ static void render_switcher(App* a)
             SDL_RenderFillRect(a->renderer, &r);
         }
         SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_body, a->vault.items[vi].name,
+        font_draw_line(a->font_ide, a->vault.items[vi].name,
                        strlen(a->vault.items[vi].name),
                        box_x + 16,
-                       row_text_baseline(a->font_body, y, row_h), c);
+                       row_text_baseline(a->font_ide, y, row_h), c);
         y += row_h;
     }
 }
@@ -10961,7 +11178,7 @@ static int fuzzy_match(const char* hay, const char* needle, size_t nlen);
 /* Bring a selected row into view by adjusting cmdp_scroll. Called when the
  * keyboard selection moves; mouse hover does NOT call this so the list
  * doesn't auto-pan under the cursor. */
-static int cmdp_row_h(const App* a) { return font_line_height(a->font_body) + 8; }
+static int cmdp_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
 static int cmdp_max_rows(void)      { return 12; }
 static int cmdp_max_scroll(const App* a)
 {
@@ -11111,7 +11328,7 @@ static void render_cmdp(App* a)
     SDL_RenderFillRect(a->renderer, &bd);
 
     int max_rows = 12;
-    int row_h    = font_line_height(a->font_body) + 8;
+    int row_h    = font_line_height(a->font_ide) + 8;
     int rows     = a->cmdp_count < max_rows ? a->cmdp_count : max_rows;
     if (rows == 0) rows = 1;
     int box_w = 620;
@@ -11125,32 +11342,32 @@ static void render_cmdp(App* a)
     /* Prompt + query input. */
     int y = box_y + 8;
     const char* prompt = "> ";
-    int label_w = font_measure(a->font_body, prompt, strlen(prompt));
-    font_draw_line(a->font_body, prompt, strlen(prompt),
-                   box_x + 12, y + font_ascent(a->font_body), a->fg_muted);
+    int label_w = font_measure(a->font_ide, prompt, strlen(prompt));
+    font_draw_line(a->font_ide, prompt, strlen(prompt),
+                   box_x + 12, y + font_ascent(a->font_ide), a->fg_muted);
     if (a->cmdp_qlen > 0) {
-        font_draw_line(a->font_body, a->cmdp_query, a->cmdp_qlen,
+        font_draw_line(a->font_ide, a->cmdp_query, a->cmdp_qlen,
                        box_x + 12 + label_w,
-                       y + font_ascent(a->font_body), a->fg);
+                       y + font_ascent(a->font_ide), a->fg);
     } else {
         const char* ph = "Run a command...";
-        font_draw_line(a->font_body, ph, strlen(ph),
+        font_draw_line(a->font_ide, ph, strlen(ph),
                        box_x + 12 + label_w,
-                       y + font_ascent(a->font_body), a->fg_muted);
+                       y + font_ascent(a->font_ide), a->fg_muted);
     }
-    int qw = font_measure(a->font_body, a->cmdp_query, a->cmdp_qlen);
+    int qw = font_measure(a->font_ide, a->cmdp_query, a->cmdp_qlen);
     SDL_Rect cur = { box_x + 12 + label_w + qw, y, 2,
-                     font_line_height(a->font_body) };
+                     font_line_height(a->font_ide) };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
     SDL_RenderFillRect(a->renderer, &cur);
 
     char info[40];
     snprintf(info, sizeof info, "%d/%d", a->cmdp_count, a->cmdp_entry_count);
-    int iw = font_measure(a->font_body, info, strlen(info));
-    font_draw_line(a->font_body, info, strlen(info),
+    int iw = font_measure(a->font_ide, info, strlen(info));
+    font_draw_line(a->font_ide, info, strlen(info),
                    box_x + box_w - 12 - iw,
-                   y + font_ascent(a->font_body), a->fg_muted);
+                   y + font_ascent(a->font_ide), a->fg_muted);
 
     y += row_h;
     SDL_Rect div = { box_x + 8, y - 2, box_w - 16, 1 };
@@ -11188,22 +11405,22 @@ static void render_cmdp(App* a)
         }
         int  y = row_y;     /* shadowed for the chip math below */
         SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_body, e->label, strlen(e->label),
+        font_draw_line(a->font_ide, e->label, strlen(e->label),
                        box_x + 16,
-                       row_text_baseline(a->font_body, y, row_h), c);
+                       row_text_baseline(a->font_ide, y, row_h), c);
         /* Right-aligned chips: shortcut, category. */
         int rx = box_x + box_w - 16;
         if (e->shortcut[0]) {
-            int sw = font_measure(a->font_body, e->shortcut,
+            int sw = font_measure(a->font_ide, e->shortcut,
                                   strlen(e->shortcut));
             rx -= sw;
-            font_draw_line(a->font_body, e->shortcut, strlen(e->shortcut),
-                           rx, row_text_baseline(a->font_body, y, row_h),
+            font_draw_line(a->font_ide, e->shortcut, strlen(e->shortcut),
+                           rx, row_text_baseline(a->font_ide, y, row_h),
                            a->fg_muted);
             rx -= 16;
         }
         if (e->category[0]) {
-            int cw = font_measure(a->font_body, e->category,
+            int cw = font_measure(a->font_ide, e->category,
                                   strlen(e->category));
             int chip_pad = 8;
             int chip_w = cw + chip_pad * 2;
@@ -11224,9 +11441,9 @@ static void render_cmdp(App* a)
                 chip_fg = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                         : (SDL_Color){240, 240, 250, 255};
             }
-            font_draw_line(a->font_body, e->category, strlen(e->category),
+            font_draw_line(a->font_ide, e->category, strlen(e->category),
                            chip_x + chip_pad,
-                           row_text_baseline(a->font_body, y, row_h),
+                           row_text_baseline(a->font_ide, y, row_h),
                            chip_fg);
         }
     }
@@ -11302,13 +11519,13 @@ static SDL_Rect plugins_box_rect(const App* a)
 
 static int plugins_row_h(const App* a)
 {
-    return font_line_height(a->font_body) + 8;
+    return font_line_height(a->font_ide) + 8;
 }
 
 static int plugins_reload_btn(const App* a, SDL_Rect* out)
 {
     SDL_Rect box = plugins_box_rect(a);
-    int sz_y     = font_line_height(a->font_body);
+    int sz_y     = font_line_height(a->font_ide);
     int header_h = sz_y + 24;
     int btn_h    = sz_y + 10;
     int btn_w    = 110;
@@ -11369,11 +11586,11 @@ static void render_plugins(App* a)
     SDL_Rect box = plugins_box_rect(a);
     overlay_card(a, box);
 
-    int sz_y = font_line_height(a->font_body);
+    int sz_y = font_line_height(a->font_ide);
     int header_h = sz_y + 24;
 
     /* ----- Header row ----- */
-    int header_baseline = box.y + 14 + font_ascent(a->font_body);
+    int header_baseline = box.y + 14 + font_ascent(a->font_ide);
     /* Reload button — rightmost of the header. */
     int btn_h = sz_y + 10;
     int btn_w = 110;
@@ -11384,24 +11601,24 @@ static void render_plugins(App* a)
     fill_rrect(a->renderer, (SDL_Rect){btn_x, btn_y, btn_w, btn_h}, btn_h / 2);
     {
         const char* lab = "Reload";
-        int lw = font_measure(a->font_body, lab, strlen(lab));
+        int lw = font_measure(a->font_ide, lab, strlen(lab));
         int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
         SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
                                      : (SDL_Color){240, 240, 250, 255};
-        font_draw_line(a->font_body, lab, strlen(lab),
+        font_draw_line(a->font_ide, lab, strlen(lab),
                        btn_x + (btn_w - lw) / 2,
-                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_body),
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        tc);
     }
     /* "X loaded" — sits just left of the button. */
     char info[64];
     snprintf(info, sizeof info, "%d loaded", a->plugins_count);
-    int iw = font_measure(a->font_body, info, strlen(info));
-    font_draw_line(a->font_body, info, strlen(info),
+    int iw = font_measure(a->font_ide, info, strlen(info));
+    font_draw_line(a->font_ide, info, strlen(info),
                    btn_x - 16 - iw, header_baseline, a->fg_muted);
     /* Title on the left. */
     const char* title = "Plugins";
-    font_draw_line(a->font_body, title, strlen(title),
+    font_draw_line(a->font_ide, title, strlen(title),
                    box.x + 20, header_baseline, a->fg_link);
 
     /* Hairline divider under the header. */
@@ -11420,8 +11637,8 @@ static void render_plugins(App* a)
 
     if (a->plugins_count == 0) {
         const char* empty = "no plugins loaded — drop a *.lua file in data/plugins/";
-        font_draw_line(a->font_body, empty, strlen(empty),
-                       box.x + 20, y + font_ascent(a->font_body),
+        font_draw_line(a->font_ide, empty, strlen(empty),
+                       box.x + 20, y + font_ascent(a->font_ide),
                        a->fg_muted);
         SDL_RenderSetClipRect(a->renderer, NULL);
         return;
@@ -11431,17 +11648,17 @@ static void render_plugins(App* a)
         const struct PluginRow* p = &a->plugins_rows[i];
         bool failed = (p->status[0] == 'e');
         SDL_Color name_c = failed ? (SDL_Color){230, 110, 110, 255} : a->fg_link;
-        int baseline = y + font_ascent(a->font_body);
+        int baseline = y + font_ascent(a->font_ide);
 
         /* Plugin header row: bold name, status pill on the right. */
-        font_draw_line(a->font_body_bold ? a->font_body_bold : a->font_body,
+        font_draw_line(a->font_body_bold ? a->font_body_bold : a->font_ide,
                        p->name, strlen(p->name),
                        box.x + 20, baseline, name_c);
         int nw = font_measure(a->font_body_bold ? a->font_body_bold
-                                                : a->font_body,
+                                                : a->font_ide,
                               p->name, strlen(p->name));
         /* Status chip next to name. */
-        int sw = font_measure(a->font_body, p->status, strlen(p->status));
+        int sw = font_measure(a->font_ide, p->status, strlen(p->status));
         int chip_pad_x = 8;
         int chip_w = sw + chip_pad_x * 2;
         int chip_h = rh - 6;
@@ -11453,9 +11670,9 @@ static void render_plugins(App* a)
                                failed ? 220 : 180);
         fill_rrect(a->renderer,
                    (SDL_Rect){chip_x, chip_y, chip_w, chip_h}, chip_h / 2);
-        font_draw_line(a->font_body, p->status, strlen(p->status),
+        font_draw_line(a->font_ide, p->status, strlen(p->status),
                        chip_x + chip_pad_x,
-                       row_text_baseline(a->font_body, chip_y, chip_h),
+                       row_text_baseline(a->font_ide, chip_y, chip_h),
                        failed ? (SDL_Color){240, 200, 200, 255} : a->fg);
         y += rh;
 
@@ -11463,20 +11680,20 @@ static void render_plugins(App* a)
          * Truncated with leading "..." so the filename stays visible. */
         char shown[512];
         int  max_pw = box.w - 36 - 20;
-        path_fit_left(a->font_body, p->path, max_pw, shown, sizeof shown);
-        font_draw_line(a->font_body, shown, strlen(shown),
+        path_fit_left(a->font_ide, p->path, max_pw, shown, sizeof shown);
+        font_draw_line(a->font_ide, shown, strlen(shown),
                        box.x + 36,
-                       y + font_ascent(a->font_body), a->fg_muted);
+                       y + font_ascent(a->font_ide), a->fg_muted);
         y += rh;
 
         /* Error message, if any. */
         if (p->error[0]) {
             char err_shown[300];
-            path_fit_left(a->font_body, p->error, max_pw,
+            path_fit_left(a->font_ide, p->error, max_pw,
                           err_shown, sizeof err_shown);
-            font_draw_line(a->font_body, err_shown, strlen(err_shown),
+            font_draw_line(a->font_ide, err_shown, strlen(err_shown),
                            box.x + 36,
-                           y + font_ascent(a->font_body),
+                           y + font_ascent(a->font_ide),
                            (SDL_Color){230, 110, 110, 255});
             y += rh;
         }
@@ -11484,21 +11701,21 @@ static void render_plugins(App* a)
         /* Action rows, indented with a bullet. */
         if (p->action_count == 0 && !failed) {
             const char* none = "(no actions registered)";
-            font_draw_line(a->font_body, none, strlen(none),
+            font_draw_line(a->font_ide, none, strlen(none),
                            box.x + 36,
-                           y + font_ascent(a->font_body), a->fg_muted);
+                           y + font_ascent(a->font_ide), a->fg_muted);
             y += rh;
         }
         for (int ai = 0; ai < p->action_count; ++ai) {
             const char* dot = "- ";
-            font_draw_line(a->font_body, dot, strlen(dot),
-                           box.x + 36, y + font_ascent(a->font_body),
+            font_draw_line(a->font_ide, dot, strlen(dot),
+                           box.x + 36, y + font_ascent(a->font_ide),
                            a->fg_muted);
-            int dw = font_measure(a->font_body, dot, strlen(dot));
-            font_draw_line(a->font_body, p->actions[ai],
+            int dw = font_measure(a->font_ide, dot, strlen(dot));
+            font_draw_line(a->font_ide, p->actions[ai],
                            strlen(p->actions[ai]),
                            box.x + 36 + dw,
-                           y + font_ascent(a->font_body), a->fg);
+                           y + font_ascent(a->font_ide), a->fg);
             y += rh;
         }
 
@@ -11661,7 +11878,7 @@ static void render_wiki_complete(App* a)
     if (!a->wc_active) return;
     if (!a->edit_mode || a->switcher_active || a->search_mode != 0) return;
 
-    int row_h    = font_line_height(a->font_body) + 6;
+    int row_h    = font_line_height(a->font_ide) + 6;
     int max_rows = 8;
     int rows     = a->wc_count < max_rows ? a->wc_count : max_rows;
     if (rows == 0) rows = 1;
@@ -11681,8 +11898,8 @@ static void render_wiki_complete(App* a)
 
     if (a->wc_count == 0) {
         const char* msg = "No matching notes";
-        font_draw_line(a->font_body, msg, strlen(msg),
-                       box_x + 12, box_y + 6 + font_ascent(a->font_body),
+        font_draw_line(a->font_ide, msg, strlen(msg),
+                       box_x + 12, box_y + 6 + font_ascent(a->font_ide),
                        a->fg_muted);
         return;
     }
@@ -11712,8 +11929,8 @@ static void render_wiki_complete(App* a)
         char disp[256];
         size_t dn = wc_display_name(a->vault.items[vi].name, disp, sizeof disp);
         SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_body, disp, dn,
-                       box_x + 10, y + font_ascent(a->font_body) + 2, c);
+        font_draw_line(a->font_ide, disp, dn,
+                       box_x + 10, y + font_ascent(a->font_ide) + 2, c);
         y += row_h;
     }
 }
@@ -11979,7 +12196,7 @@ static bool search_geometry(const App* a, SDL_Rect* bar, SDL_Rect* input,
     if (a->search_mode == 0) return false;
     int xL    = doc_x_left(a);
     int xR    = doc_x_right(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int input_h = sz_y + 14;
     int gap   = 8;
     int rows  = (a->search_mode == 2) ? 2 : 1;
@@ -11989,9 +12206,9 @@ static bool search_geometry(const App* a, SDL_Rect* bar, SDL_Rect* input,
     int chip_pad = 8;
     int chip_h   = input_h - 4;
     int chip_y   = yT + 8 + (input_h - chip_h) / 2;
-    int chip_re_w = font_measure(a->font_body, "Re", 2) + 2 * chip_pad;
-    int chip_aa_w = font_measure(a->font_body, "Aa", 2) + 2 * chip_pad;
-    int chip_w_w  = font_measure(a->font_body, "W",  1) + 2 * chip_pad;
+    int chip_re_w = font_measure(a->font_ide, "Re", 2) + 2 * chip_pad;
+    int chip_aa_w = font_measure(a->font_ide, "Aa", 2) + 2 * chip_pad;
+    int chip_w_w  = font_measure(a->font_ide, "W",  1) + 2 * chip_pad;
     int chips_total = chip_re_w + chip_aa_w + chip_w_w + 2 * 6 + 12;
 
     /* Chevron button: square, sits flush left of the input pill. */
@@ -12028,8 +12245,8 @@ static bool search_geometry(const App* a, SDL_Rect* bar, SDL_Rect* input,
     int repl_btn_h = chip_h;
     int repl_pad_h = 14;        /* horizontal pad inside each button       */
     int repl_gap   = 10;        /* gap between the two buttons             */
-    int w1 = font_measure(a->font_body, "Replace",     7) + 2 * repl_pad_h;
-    int w2 = font_measure(a->font_body, "Replace all", 11) + 2 * repl_pad_h;
+    int w1 = font_measure(a->font_ide, "Replace",     7) + 2 * repl_pad_h;
+    int w2 = font_measure(a->font_ide, "Replace all", 11) + 2 * repl_pad_h;
     int repl_x_far = input_x + input_w + 12 + chips_total - 12;     /* same right edge as chips */
     int repl_y     = input_y + input_h + gap + (input_h - repl_btn_h) / 2;
     if (btn_repl_all)
@@ -12083,7 +12300,7 @@ static void render_search_overlay(App* a)
 
     int xL    = doc_x_left(a);
     int xR    = doc_x_right(a);
-    int sz_y  = font_line_height(a->font_body);
+    int sz_y  = font_line_height(a->font_ide);
     int input_h = sz_y + 14;
     int gap   = 8;
     int rows  = (a->search_mode == 2) ? 2 : 1;
@@ -12122,7 +12339,7 @@ static void render_search_overlay(App* a)
     int chip_y   = yT + 8 + (input_h - chip_h) / 2;
 
     /* Helper to measure a chip given its label. */
-    #define CHIP_W(label) (font_measure(a->font_body, (label), strlen(label)) + 2 * chip_pad)
+    #define CHIP_W(label) (font_measure(a->font_ide, (label), strlen(label)) + 2 * chip_pad)
 
     const char* lab_re   = "Re";
     const char* lab_aa   = "Aa";
@@ -12160,13 +12377,13 @@ static void render_search_overlay(App* a)
 
     /* Query text or placeholder. */
     int text_x   = icon_x + icon_sz + 6;
-    int text_y   = input_y + (input_h - sz_y) / 2 + font_ascent(a->font_body);
+    int text_y   = input_y + (input_h - sz_y) / 2 + font_ascent(a->font_ide);
     if (a->search_qlen > 0) {
-        font_draw_line(a->font_body, a->search_query, a->search_qlen,
+        font_draw_line(a->font_ide, a->search_query, a->search_qlen,
                        text_x, text_y, a->fg);
     } else {
         const char* ph = "Search this note...";
-        font_draw_line(a->font_body, ph, strlen(ph),
+        font_draw_line(a->font_ide, ph, strlen(ph),
                        text_x, text_y, a->fg_muted);
     }
     /* Caret in the find field — only when this field is focused, otherwise
@@ -12174,7 +12391,7 @@ static void render_search_overlay(App* a)
     if (!a->search_focus_replace) {
         size_t cur = a->search_qcursor;
         if (cur > a->search_qlen) cur = a->search_qlen;
-        int cx = text_x + font_measure(a->font_body, a->search_query, cur);
+        int cx = text_x + font_measure(a->font_ide, a->search_query, cur);
         SDL_Rect caret = { cx, input_y + 4, 2, input_h - 8 };
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
@@ -12193,10 +12410,10 @@ static void render_search_overlay(App* a)
     else
         info[0] = 0;
     if (info[0]) {
-        int info_w = font_measure(a->font_body, info, strlen(info));
+        int info_w = font_measure(a->font_ide, info, strlen(info));
         SDL_Color info_c = (a->search_regex && a->search_re_err[0])
                            ? (SDL_Color){230, 110, 110, 255} : a->fg_muted;
-        font_draw_line(a->font_body, info, strlen(info),
+        font_draw_line(a->font_ide, info, strlen(info),
                        input_x + input_w - info_w - 12,
                        text_y, info_c);
     }
@@ -12214,7 +12431,7 @@ static void render_search_overlay(App* a)
             if (err_) _f = (SDL_Color){230, 110, 110, 220};                \
             SDL_SetRenderDrawColor(a->renderer, _f.r, _f.g, _f.b, _f.a);  \
             fill_rrect(a->renderer, _r, chip_h / 2);                      \
-            int _lw = font_measure(a->font_body, (label_), strlen(label_));\
+            int _lw = font_measure(a->font_ide, (label_), strlen(label_));\
             SDL_Color _tc;                                                 \
             if (on_) {                                                    \
                 int _lum = a->fg_link.r * 30 + a->fg_link.g * 59          \
@@ -12222,10 +12439,10 @@ static void render_search_overlay(App* a)
                 _tc = (_lum > 12000) ? (SDL_Color){20, 20, 26, 255}        \
                                      : (SDL_Color){240, 240, 250, 255};   \
             } else _tc = a->fg;                                            \
-            font_draw_line(a->font_body, (label_), strlen(label_),         \
+            font_draw_line(a->font_ide, (label_), strlen(label_),         \
                            cx + ((w_) - _lw) / 2,                          \
                            chip_y + (chip_h - sz_y) / 2 +                  \
-                               font_ascent(a->font_body),                  \
+                               font_ascent(a->font_ide),                  \
                            _tc);                                           \
             cx += (w_) + 6;                                                \
         } while (0)
@@ -12248,31 +12465,31 @@ static void render_search_overlay(App* a)
         SDL_SetRenderDrawColor(a->renderer, rb.r, rb.g, rb.b, rb.a);
         draw_rrect(a->renderer, ri, input_h / 2);
         const char* lab = "→";
-        font_draw_line(a->font_body, lab, strlen(lab),
+        font_draw_line(a->font_ide, lab, strlen(lab),
                        input_x + 12,
                        input_y2 + (input_h - sz_y) / 2
-                                + font_ascent(a->font_body),
+                                + font_ascent(a->font_ide),
                        a->fg_muted);
-        int text_x2 = input_x + 12 + font_measure(a->font_body, lab, strlen(lab)) + 8;
+        int text_x2 = input_x + 12 + font_measure(a->font_ide, lab, strlen(lab)) + 8;
         if (a->search_rlen > 0) {
-            font_draw_line(a->font_body, a->search_replace, a->search_rlen,
+            font_draw_line(a->font_ide, a->search_replace, a->search_rlen,
                            text_x2,
                            input_y2 + (input_h - sz_y) / 2
-                                    + font_ascent(a->font_body),
+                                    + font_ascent(a->font_ide),
                            a->fg);
         } else {
             const char* ph = "Replace with...";
-            font_draw_line(a->font_body, ph, strlen(ph),
+            font_draw_line(a->font_ide, ph, strlen(ph),
                            text_x2,
                            input_y2 + (input_h - sz_y) / 2
-                                    + font_ascent(a->font_body),
+                                    + font_ascent(a->font_ide),
                            a->fg_muted);
         }
         if (a->search_focus_replace) {
             size_t cur = a->search_rcursor;
             if (cur > a->search_rlen) cur = a->search_rlen;
             int cx = text_x2
-                + font_measure(a->font_body, a->search_replace, cur);
+                + font_measure(a->font_ide, a->search_replace, cur);
             SDL_Rect caret = { cx, input_y2 + 4, 2, input_h - 8 };
             SDL_SetRenderDrawColor(a->renderer,
                 a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
@@ -12303,7 +12520,7 @@ static void render_search_overlay(App* a)
             SDL_SetRenderDrawColor(a->renderer,
                 fill_c.r, fill_c.g, fill_c.b, fill_c.a);
             fill_rrect(a->renderer, r, r.h / 2);
-            int lw = font_measure(a->font_body, L, strlen(L));
+            int lw = font_measure(a->font_ide, L, strlen(L));
             SDL_Color tc;
             if (primary && can_replace) {
                 int lum = a->fg_link.r * 30 + a->fg_link.g * 59
@@ -12313,9 +12530,9 @@ static void render_search_overlay(App* a)
             } else {
                 tc = can_replace ? a->fg : a->fg_muted;
             }
-            font_draw_line(a->font_body, L, strlen(L),
+            font_draw_line(a->font_ide, L, strlen(L),
                            r.x + (r.w - lw) / 2,
-                           row_text_baseline(a->font_body, r.y, r.h),
+                           row_text_baseline(a->font_ide, r.y, r.h),
                            tc);
         }
     }
@@ -13072,7 +13289,7 @@ static void build_keystr(SDL_Keycode k, int mod, char* out, size_t outlen)
 
 static void app_event(App* a, const SDL_Event* e)
 {
-    int line_px   = font_line_height(a->font_body);
+    int line_px   = font_line_height(a->font_ide);
     int page_step = viewport_h(a) - line_px;
     if (page_step < line_px) page_step = line_px;
 
@@ -13531,7 +13748,7 @@ static void app_event(App* a, const SDL_Event* e)
                     int box_x = (a->win_w - box_w) / 2;
                     int box_y = 90;
                     int max_rows = 12;
-                    int row_h    = font_line_height(a->font_body) + 8;
+                    int row_h    = font_line_height(a->font_ide) + 8;
                     int rows     = a->switcher_count < max_rows ? a->switcher_count : max_rows;
                     if (rows == 0) rows = 1;
                     int box_h = row_h * (1 + rows) + 18;
@@ -13769,7 +13986,7 @@ static void app_event(App* a, const SDL_Event* e)
                     search_geometry(a, NULL, &input, &replace,
                                     NULL, NULL, NULL, NULL);
                     a->search_focus_replace = (hit == SEARCH_HIT_REPLACE);
-                    Font* f = a->font_body;
+                    Font* f = a->font_ide;
                     int sz_y = font_line_height(f);
                     int icon_sz = (input.h - 6);  /* matches render */
                     int text_x;
@@ -13949,7 +14166,7 @@ static void app_event(App* a, const SDL_Event* e)
                             e->button.x, e->button.y,
                             &track, &thumb, SB_DOC,
                             &a->scroll_y, a->doc_height_px,
-                            line_step(a, a->font_body)))
+                            line_step(a, a->font_ide)))
                     {
                         clamp_scroll(a);
                         break;
@@ -14811,9 +15028,17 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
                 if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
-                    /* Enter cycles forward (handy for cycling fonts). */
-                    settings_adjust(a,
-                        (SettingsRow)a->settings_selected, +1);
+                    SettingsRow row = (SettingsRow)a->settings_selected;
+                    /* Font rows get a special Enter: open a native file
+                     * picker and load whatever .ttf/.otf the user points
+                     * at into the matching slot. Left/Right still cycle. */
+                    if (row == SET_FONT ||
+                        row == SET_FONT_IDE ||
+                        row == SET_FONT_MONO) {
+                        settings_pick_custom_font(a, row);
+                    } else {
+                        settings_adjust(a, row, +1);
+                    }
                     break;
                 }
                 break;     /* swallow everything else */

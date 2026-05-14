@@ -17,10 +17,13 @@ return {
     -- Start in EDIT instead of PREVIEW. (Toggle any time with Ctrl+E.)
     start_in_edit_mode = false,
 
-    -- Body font (used for prose, list items, quotes). Must be a TrueType.
+    -- Preview body font (prose, lists, quotes, table cells, headings).
+    -- Must be a TrueType file.
     font_path      = "C:/Windows/Fonts/consola.ttf",
-    -- Optional: separate monospace face for inline `code` and code blocks.
-    -- Defaults to font_path if unset.
+    -- IDE chrome font: title bar, menus, sidebar, status bar, overlays
+    -- and modals. Defaults to font_path if unset.
+    font_path_ide  = "C:/Windows/Fonts/consola.ttf",
+    -- Editor + code-block monospace face. Defaults to font_path if unset.
     font_path_mono = "C:/Windows/Fonts/consola.ttf",
 
     font_size     = 16,
