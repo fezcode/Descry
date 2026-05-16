@@ -62,6 +62,12 @@ typedef struct {
     int      doc_height_px;
     int      doc_width_px;      /* widest visible line in px, for hscroll */
 
+    /* Tracks the wrap settings the per-line row cache (Buffer.line_rows) was
+     * computed against. When either changes between frames, the cache is
+     * bulk-invalidated so we don't reuse stale heights. */
+    int      row_cache_wrap_w;
+    bool     row_cache_wrap_on;
+
     /* Vault sidebar */
     Vault    vault;
     bool     sidebar_open;
@@ -231,6 +237,10 @@ typedef struct {
     int      ctx_menu_y;
     int      ctx_menu_target;        /* vault item index, or -1 for empty */
     int      ctx_menu_hover;         /* index of currently hovered row    */
+    /* Preview-mode right-click context: byte offset in doc.data the user
+     * clicked at, so the "Go to source" action can hunt that text down in
+     * the source buffer and jump the cursor there. (size_t)-1 means none. */
+    size_t   ctx_menu_preview_doc_off;
 
     /* Live font / size config (mutable by the settings page). */
     char     cfg_font_path[260];        /* preview body */
@@ -265,6 +275,13 @@ typedef struct {
     bool     confirm_active;
     int      confirm_choice;         /* -1 pending, 0 = discard, 1 = cancel */
     int      confirm_hover;          /* 0 = discard btn, 1 = cancel btn */
+
+    /* 3-row line-ending picker (Edit > Convert line endings…). Same
+     * synchronous-pump pattern as confirm_action. choice: -2 pending,
+     *   -1 = cancel, 0 = LF, 1 = CRLF. hover: 0/1/2 (LF / CRLF / Cancel). */
+    bool     eol_pick_active;
+    int      eol_pick_choice;
+    int      eol_pick_hover;
     char     confirm_title[64];
     char     confirm_msg[400];     /* multi-line — split on '\n' at render */
     /* Optional custom button labels. Empty falls back to "Discard"/"Cancel".

@@ -32,6 +32,23 @@ typedef struct {
     int    pref_col;
     bool   dirty;
 
+    /* Line-start index. line_starts[0] == 0 always. line_starts[i] is the
+     * byte offset of the first character of line i. Maintained incrementally
+     * by every mutation so line_count/start/end and cursor_pos are O(1) /
+     * O(log L) instead of O(N). */
+    size_t* line_starts;
+    size_t  line_starts_count;
+    size_t  line_starts_cap;
+
+    /* Per-line visual-row-count cache, parallel to line_starts. -1 means
+     * "unknown — caller may compute and cache lazily". Lets render walks
+     * skip wrap measurement for off-screen lines. Invalidated automatically
+     * on edits (the touched line and everything below, to handle fence-state
+     * cascades) and bulk-invalidated by buffer_invalidate_row_cache when
+     * external state (wrap width, fonts) changes. */
+    int*    line_rows;
+    size_t  line_rows_cap;
+
     /* undo log */
     BufferOp* ops;
     size_t    op_count;
@@ -79,5 +96,10 @@ size_t buffer_line_count(const Buffer* b);
 size_t buffer_line_start(const Buffer* b, size_t line);
 size_t buffer_line_end  (const Buffer* b, size_t line);
 void   buffer_cursor_pos(const Buffer* b, size_t* line, size_t* col);
+
+/* Bulk-invalidate the per-line visual-row cache. Call when wrap width,
+ * fonts, or the wrap toggle changes — anything external to the buffer
+ * data that affects measurement. */
+void   buffer_invalidate_row_cache(Buffer* b);
 
 #endif

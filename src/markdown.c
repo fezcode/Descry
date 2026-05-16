@@ -72,7 +72,7 @@ static void emit_line(ParseCtx* c, LineKind kind, int indent,
     }
     c->doc->lines[c->doc->line_count++] = (MdLine){
         .kind = kind, .indent = indent, .start = start, .len = len,
-        .task_mark_off = tmo,
+        .task_mark_off = tmo, .cached_h = -1,
     };
 }
 

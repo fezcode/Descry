@@ -43,6 +43,124 @@ static void reserve(Buffer* b, size_t extra)
     b->cap  = nc;
 }
 
+/* ---------- line-start index ------------------------------------------ */
+static void lis_reserve(Buffer* b, size_t extra)
+{
+    if (b->line_starts_count + extra <= b->line_starts_cap) return;
+    size_t nc = b->line_starts_cap ? b->line_starts_cap * 2 : 64;
+    while (nc < b->line_starts_count + extra) nc *= 2;
+    b->line_starts = realloc(b->line_starts, nc * sizeof(size_t));
+    b->line_starts_cap = nc;
+}
+
+/* Keep line_rows[] sized to at least `need` and parallel to line_starts. */
+static void lir_reserve(Buffer* b, size_t need)
+{
+    if (need <= b->line_rows_cap) return;
+    size_t nc = b->line_rows_cap ? b->line_rows_cap * 2 : 64;
+    while (nc < need) nc *= 2;
+    b->line_rows = realloc(b->line_rows, nc * sizeof(int));
+    b->line_rows_cap = nc;
+}
+
+/* Mark line_rows[from .. count) as unknown. memset of 0xff yields -1 (int). */
+static void lir_invalidate_from(Buffer* b, size_t from)
+{
+    if (from >= b->line_starts_count) return;
+    memset(&b->line_rows[from], 0xff,
+           (b->line_starts_count - from) * sizeof(int));
+}
+
+/* Smallest index i with line_starts[i] > pos, or count if none. */
+static size_t lis_first_after(const Buffer* b, size_t pos)
+{
+    size_t lo = 0, hi = b->line_starts_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (b->line_starts[mid] > pos) hi = mid;
+        else                            lo = mid + 1;
+    }
+    return lo;
+}
+
+static void lis_rebuild(Buffer* b)
+{
+    b->line_starts_count = 0;
+    lis_reserve(b, 1);
+    b->line_starts[b->line_starts_count++] = 0;
+    for (size_t i = 0; i < b->len; ++i) {
+        if (b->data[i] == '\n') {
+            lis_reserve(b, 1);
+            b->line_starts[b->line_starts_count++] = i + 1;
+        }
+    }
+    /* Reset row cache — entire doc unknown. */
+    lir_reserve(b, b->line_starts_count);
+    memset(b->line_rows, 0xff, b->line_starts_count * sizeof(int));
+}
+
+/* Patch the index after `n` bytes were inserted at `pos`. The index still
+ * carries the pre-insert offsets; this routine relocates and inserts. */
+static void lis_after_insert(Buffer* b, size_t pos, const char* s, size_t n)
+{
+    if (n == 0) return;
+    size_t nl = 0;
+    for (size_t i = 0; i < n; ++i) if (s[i] == '\n') nl++;
+    size_t after = lis_first_after(b, pos);
+    if (nl > 0) {
+        lis_reserve(b, nl);
+        memmove(&b->line_starts[after + nl],
+                &b->line_starts[after],
+                (b->line_starts_count - after) * sizeof(size_t));
+        b->line_starts_count += nl;
+        /* Mirror the shift in the row cache so indices stay parallel. */
+        lir_reserve(b, b->line_starts_count);
+        memmove(&b->line_rows[after + nl],
+                &b->line_rows[after],
+                (b->line_starts_count - nl - after) * sizeof(int));
+    } else {
+        lir_reserve(b, b->line_starts_count);
+    }
+    for (size_t i = after + nl; i < b->line_starts_count; ++i)
+        b->line_starts[i] += n;
+    size_t k = after;
+    for (size_t i = 0; i < n; ++i) {
+        if (s[i] == '\n') b->line_starts[k++] = pos + i + 1;
+    }
+    /* Touched line + everything below: invalidate (handles fence cascades). */
+    size_t touched = (after > 0) ? after - 1 : 0;
+    lir_invalidate_from(b, touched);
+}
+
+/* Patch after deleting [pos, pos+n). Lines whose start is in (pos, pos+n]
+ * disappear (their birth-newline was deleted); later starts shift -n. */
+static void lis_after_delete(Buffer* b, size_t pos, size_t n)
+{
+    if (n == 0) return;
+    size_t first_dead = lis_first_after(b, pos);
+    size_t first_kept = lis_first_after(b, pos + n);
+    if (first_kept > first_dead) {
+        size_t dead_count = first_kept - first_dead;
+        memmove(&b->line_starts[first_dead],
+                &b->line_starts[first_kept],
+                (b->line_starts_count - first_kept) * sizeof(size_t));
+        memmove(&b->line_rows[first_dead],
+                &b->line_rows[first_kept],
+                (b->line_starts_count - first_kept) * sizeof(int));
+        b->line_starts_count -= dead_count;
+    }
+    for (size_t i = first_dead; i < b->line_starts_count; ++i)
+        b->line_starts[i] -= n;
+    size_t touched = (first_dead > 0) ? first_dead - 1 : 0;
+    lir_invalidate_from(b, touched);
+}
+
+void buffer_invalidate_row_cache(Buffer* b)
+{
+    if (!b || !b->line_rows) return;
+    memset(b->line_rows, 0xff, b->line_starts_count * sizeof(int));
+}
+
 /* ---------- raw data mutations (no op tracking) ------------------------ */
 static void apply_insert(Buffer* b, size_t pos, const char* s, size_t n)
 {
@@ -50,12 +168,14 @@ static void apply_insert(Buffer* b, size_t pos, const char* s, size_t n)
     memmove(b->data + pos + n, b->data + pos, b->len - pos + 1);
     memcpy(b->data + pos, s, n);
     b->len += n;
+    lis_after_insert(b, pos, s, n);
 }
 
 static void apply_delete(Buffer* b, size_t pos, size_t n)
 {
     memmove(b->data + pos, b->data + pos + n, b->len - pos - n + 1);
     b->len -= n;
+    lis_after_delete(b, pos, n);
 }
 
 /* ---------- op log management ----------------------------------------- */
@@ -107,6 +227,7 @@ void buffer_init(Buffer* b)
     b->sel_anchor = -1;
     reserve(b, 0);
     b->data[0] = 0;
+    lis_rebuild(b);
 }
 
 void buffer_free(Buffer* b)
@@ -115,6 +236,8 @@ void buffer_free(Buffer* b)
     free(b->data);
     for (size_t i = 0; i < b->op_count; ++i) free(b->ops[i].text);
     free(b->ops);
+    free(b->line_starts);
+    free(b->line_rows);
     memset(b, 0, sizeof *b);
     b->sel_anchor = -1;
 }
@@ -136,6 +259,7 @@ void buffer_set_text(Buffer* b, const char* s, size_t n)
     for (size_t i = 0; i < b->op_count; ++i) free(b->ops[i].text);
     b->op_count = b->op_head = b->saved_head = 0;
     b->coalesce = OP_NONE;
+    lis_rebuild(b);
 }
 
 int buffer_save(Buffer* b, const char* path)
@@ -405,40 +529,32 @@ void buffer_set_cursor(Buffer* b, size_t pos, bool select)
     b->coalesce = OP_NONE;
 }
 
-/* ---------- line queries ---------------------------------------------- */
+/* ---------- line queries (O(1) / O(log L) via line_starts index) ------- */
 size_t buffer_line_count(const Buffer* b)
 {
-    size_t c = 1;
-    for (size_t i = 0; i < b->len; ++i) if (b->data[i] == '\n') c++;
-    return c;
+    return b->line_starts_count;
 }
 
 size_t buffer_line_start(const Buffer* b, size_t line)
 {
-    if (line == 0) return 0;
-    size_t cur = 0;
-    for (size_t i = 0; i < b->len; ++i) {
-        if (b->data[i] == '\n') {
-            cur++;
-            if (cur == line) return i + 1;
-        }
-    }
-    return b->len;
+    if (line >= b->line_starts_count) return b->len;
+    return b->line_starts[line];
 }
 
 size_t buffer_line_end(const Buffer* b, size_t line)
 {
-    size_t s = buffer_line_start(b, line);
-    while (s < b->len && b->data[s] != '\n') s++;
-    return s;
+    if (line >= b->line_starts_count) return b->len;
+    if (line + 1 < b->line_starts_count) {
+        /* Next line's start sits one past the '\n' that ends this line. */
+        return b->line_starts[line + 1] - 1;
+    }
+    return b->len;
 }
 
 void buffer_cursor_pos(const Buffer* b, size_t* line, size_t* col)
 {
-    size_t ln = 0, ls = 0;
-    for (size_t i = 0; i < b->cursor; ++i) {
-        if (b->data[i] == '\n') { ln++; ls = i + 1; }
-    }
+    size_t after = lis_first_after(b, b->cursor);   /* never 0: line_starts[0]==0 */
+    size_t ln    = after - 1;
     *line = ln;
-    *col  = b->cursor - ls;
+    *col  = b->cursor - b->line_starts[ln];
 }

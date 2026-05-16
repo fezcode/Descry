@@ -377,6 +377,10 @@ static int font_choice_add_custom(const char* path)
  * fails to load. Reapplies the user's fallback chain after loading. */
 static int app_reload_fonts(App* a)
 {
+    /* Drop per-line measurement caches: they were keyed on the now-stale
+     * font metrics. */
+    buffer_invalidate_row_cache(&a->buf);
+
     /* Free old. */
     if (a->font_ide)              font_destroy(a->font_ide);
     if (a->font_body)             font_destroy(a->font_body);
@@ -1195,6 +1199,120 @@ static bool confirm_discard(App* a)
     if (!a->buf.dirty) return true;
     return confirm_action(a, "Unsaved changes",
         "You have unsaved changes. Discard them?", "Discard", "Cancel");
+}
+
+/* ---- Line-ending picker (Edit > Convert line endings…) ----------------- */
+
+static SDL_Rect eol_pick_box_rect(const App* a)
+{
+    int sz = font_line_height(a->font_ide);
+    int row_h = sz + 18;
+    int w = 320;
+    int h = 20 + sz + 14 + row_h * 3 + 16;       /* title + 3 rows + pads */
+    SDL_Rect r = { (a->win_w - w) / 2, (a->win_h - h) / 3, w, h };
+    return r;
+}
+
+/* Returns row index (0 = LF, 1 = CRLF, 2 = Cancel) under (mx,my), or -1. */
+static int eol_pick_hit_test(const App* a, int mx, int my)
+{
+    if (!a->eol_pick_active) return -1;
+    SDL_Rect box = eol_pick_box_rect(a);
+    int sz = font_line_height(a->font_ide);
+    int row_h = sz + 18;
+    int rows_top = box.y + 20 + sz + 14;
+    if (mx < box.x + 16 || mx >= box.x + box.w - 16) return -1;
+    if (my < rows_top    || my >= rows_top + row_h * 3) return -1;
+    int r = (my - rows_top) / row_h;
+    if (r < 0 || r > 2) return -1;
+    return r;
+}
+
+static void render_eol_picker(App* a)
+{
+    if (!a->eol_pick_active) return;
+    overlay_backdrop(a);
+    SDL_Rect box = eol_pick_box_rect(a);
+    overlay_card(a, box);
+
+    int sz = font_line_height(a->font_ide);
+    font_draw_line(a->font_ide, "Convert line endings", 20,
+                   box.x + 20, box.y + 20 + font_ascent(a->font_ide),
+                   a->fg_link);
+
+    static const char* LABELS[3] = {
+        "LF (Unix)",
+        "CRLF (Windows)",
+        "Cancel",
+    };
+    int row_h = sz + 18;
+    int rows_top = box.y + 20 + sz + 14;
+    for (int i = 0; i < 3; ++i) {
+        int y = rows_top + row_h * i;
+        bool hov = (i == a->eol_pick_hover);
+        if (hov) {
+            SDL_Rect r = { box.x + 16, y + 2, box.w - 32, row_h - 4 };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->bg_sidebar_active.r, a->bg_sidebar_active.g,
+                a->bg_sidebar_active.b, 255);
+            fill_rrect(a->renderer, r, 8);
+        }
+        SDL_Color c = (i == 2) ? a->fg_muted
+                               : (hov ? a->fg : a->fg_link);
+        font_draw_line(a->font_ide, LABELS[i], strlen(LABELS[i]),
+                       box.x + 28,
+                       y + (row_h - sz) / 2 + font_ascent(a->font_ide), c);
+    }
+}
+
+/* Synchronous picker. Returns -1 cancel, 0 LF, 1 CRLF. */
+static int eol_picker_modal(App* a)
+{
+    a->eol_pick_active = true;
+    a->eol_pick_choice = -2;
+    a->eol_pick_hover  = 0;
+
+    while (a->eol_pick_choice == -2 && a->running) {
+        SDL_Event e;
+        if (SDL_WaitEvent(&e)) {
+            switch (e.type) {
+            case SDL_QUIT:
+                a->eol_pick_choice = -1; break;
+            case SDL_MOUSEMOTION: {
+                int h = eol_pick_hit_test(a, e.motion.x, e.motion.y);
+                if (h >= 0) a->eol_pick_hover = h;
+                break;
+            }
+            case SDL_MOUSEBUTTONDOWN:
+                if (e.button.button == SDL_BUTTON_LEFT) {
+                    int h = eol_pick_hit_test(a, e.button.x, e.button.y);
+                    if (h < 0) {
+                        /* Click outside the box = cancel. */
+                        a->eol_pick_choice = -1;
+                    } else {
+                        a->eol_pick_choice = (h == 2) ? -1 : h;
+                    }
+                }
+                break;
+            case SDL_KEYDOWN: {
+                SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_ESCAPE) a->eol_pick_choice = -1;
+                else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                    int h = a->eol_pick_hover;
+                    a->eol_pick_choice = (h == 2) ? -1 : h;
+                } else if (k == SDLK_DOWN) {
+                    a->eol_pick_hover = (a->eol_pick_hover + 1) % 3;
+                } else if (k == SDLK_UP) {
+                    a->eol_pick_hover = (a->eol_pick_hover + 2) % 3;
+                }
+                break;
+            }
+            }
+        }
+        app_render(a);
+    }
+    a->eol_pick_active = false;
+    return a->eol_pick_choice;
 }
 
 /* Single-button info dialog. Pass NULL for lab0 → renders as one OK pill. */
@@ -3656,7 +3774,12 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     size_t i = 0;
     while (i < len) {
         if (x == x_start) {
-            while (i < len && data[i] == ' ') i++;
+            /* Trim leading spaces at the start of a visual row — but NOT
+             * for code lines, where leading whitespace is significant
+             * (Python indents, nested braces, etc.). */
+            if (line->kind != LINE_CODE) {
+                while (i < len && data[i] == ' ') i++;
+            }
             if (i >= len) break;
             row_start = i;
         }
@@ -4003,9 +4126,20 @@ static void render_table_run(App* a, size_t i0, size_t i1,
 static int render_preview(App* a, bool draw)
 {
     int y = doc_y_top(a) - a->scroll_y;
+    int win_h = a->win_h;
+    int default_lh = line_step(a, a->font_body);
+
+    /* If the window width changed since the last paint, every cached row
+     * height is potentially stale (wrap re-flowed). Drop them. */
+    if (a->row_cache_wrap_w != a->win_w) {
+        for (size_t i = 0; i < a->doc.line_count; ++i)
+            a->doc.lines[i].cached_h = -1;
+        a->row_cache_wrap_w = a->win_w;
+    }
+
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
     for (size_t i = 0; i < a->doc.line_count; ++i) {
-        const MdLine* l = &a->doc.lines[i];
+        MdLine* l = &a->doc.lines[i];
         if (l->kind == LINE_TABLE_HEAD || l->kind == LINE_TABLE_ROW) {
             size_t end = i + 1;
             while (end < a->doc.line_count) {
@@ -4013,11 +4147,34 @@ static int render_preview(App* a, bool draw)
                 if (k != LINE_TABLE_HEAD && k != LINE_TABLE_ROW) break;
                 end++;
             }
+            int y_before = y;
             render_table_run(a, i, end, &y, draw);
+            /* Distribute the table's height across its rows so off-screen
+             * skips work for tables on subsequent renders. */
+            int per = ((y - y_before) > 0)
+                      ? (y - y_before) / (int)(end - i)
+                      : default_lh;
+            for (size_t k = i; k < end; ++k) a->doc.lines[k].cached_h = per;
             i = end - 1;
             continue;
         }
+
+        /* Fast skip: if the line is entirely off-screen, advance y without
+         * doing the per-line layout. We use a generous estimate when the
+         * cache is cold so we don't accidentally cull a tall line that
+         * pokes into view. */
+        int cached = l->cached_h;
+        int est_h  = cached > 0 ? cached : default_lh * 8;
+        bool roughly_visible = (y + est_h > 0) && (y < win_h);
+
+        if (!roughly_visible) {
+            y += cached > 0 ? cached : default_lh;
+            continue;
+        }
+
+        int y_before = y;
         render_line(a, l, &y, draw);
+        l->cached_h = y - y_before;
     }
     return y + a->scroll_y - doc_y_top(a);
 }
@@ -4538,6 +4695,17 @@ static int render_editor(App* a)
     int  max_w   = 0;     /* widest visual row this pass — drives hscroll */
     int  scroll_x = wrap_on ? 0 : a->scroll_x;
 
+    /* Bulk-invalidate the per-line row cache if anything that affects line
+     * height has changed since the last render (window resize, wrap toggle,
+     * font reload). After this, b->line_rows entries are either valid or -1. */
+    if (wrap_w  != a->row_cache_wrap_w   ||
+        wrap_on != (int)a->row_cache_wrap_on)
+    {
+        buffer_invalidate_row_cache(b);
+        a->row_cache_wrap_w  = wrap_w;
+        a->row_cache_wrap_on = wrap_on != 0;
+    }
+
     SDL_Rect clip = { xL, chrome_bar_h(a), doc_x_right(a) - xL,
                       a->win_h - status_bar_h(a) - chrome_bar_h(a) };
     SDL_RenderSetClipRect(a->renderer, &clip);
@@ -4562,8 +4730,26 @@ static int render_editor(App* a)
         bool line_is_fence = is_fence_line(b->data + ls, llen);
         bool draw_in_fence = in_fence || line_is_fence;
 
-        /* Compute wrap break offsets for this line (relative to ls).
-         * In no-wrap mode this returns 0 — single visual row spans whole line. */
+        /* Skip the expensive wrap-measurement entirely when the line is
+         * obviously off-screen. Use the cached row count to estimate the
+         * line's pixel height; fall back to a generous guess (so we don't
+         * accidentally cull a tall wrapped line that pokes into view). */
+        int cached_rows = b->line_rows[li];
+        int est_rows    = cached_rows > 0 ? cached_rows : 8;
+        int est_h       = est_rows * lh;
+        bool roughly_visible = (y + est_h > 0) && (y < a->win_h);
+
+        if (!roughly_visible) {
+            int n_rows = cached_rows > 0 ? cached_rows : 1;
+            int dh     = n_rows * lh;
+            y       += dh;
+            total_h += dh;
+            if (line_is_fence) in_fence = !in_fence;
+            continue;
+        }
+
+        /* Visible region: do the full wrap-break + drawing work and refresh
+         * the cache so future frames can fast-skip this line. */
         int* breaks = wrap_buf_for(64);
         int  n_brk  = 0;
         if (wrap_on && llen > 0) {
@@ -4571,6 +4757,7 @@ static int render_editor(App* a)
                                      wrap_w, breaks, g_wrap_cap);
         }
         int n_rows = n_brk + 1;
+        b->line_rows[li] = n_rows;
 
         bool is_h = (lf == a->font_h1 || lf == a->font_h2 || lf == a->font_h3);
         SDL_Color text_c = is_h ? a->fg_heading : a->fg;
@@ -6234,6 +6421,7 @@ static const MenuItem MENU_FILE[] = {
     { "Quit",               "Ctrl+Q",       action_quit },
     { NULL, NULL, NULL }
 };
+static void action_convert_eol   (App* a);
 static const MenuItem MENU_EDIT[] = {
     { "Undo",         "Ctrl+Z", action_undo },
     { "Redo",         "Ctrl+Y", action_redo },
@@ -6244,6 +6432,7 @@ static const MenuItem MENU_EDIT[] = {
     { "Find",         "Ctrl+F", action_find },
     { "Find / Replace","Ctrl+H",action_find_replace },
     { "Vault Search", NULL,     action_vsearch },
+    { "Convert line endings\xe2\x80\xa6", NULL, action_convert_eol },
     { NULL, NULL, NULL }
 };
 static const MenuItem MENU_VIEW[] = {
@@ -6425,7 +6614,7 @@ static CtxAction ctx_action_at_row(const App* app, int row)
 static int ctx_visible_count(const App* a)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return ED_COUNT;
-    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 1;
+    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 2;
     if (a->ctx_menu_kind == CTX_KIND_MENU)    return menu_count(a->ctx_menu_target);
     return ctx_sidebar_visible_count(a);
 }
@@ -6437,7 +6626,9 @@ static const char* ctx_label_at(const App* a, int row)
         return ED_LABELS[row];
     }
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
-        return (row == 0) ? "Copy" : "";
+        if (row == 0) return "Copy";
+        if (row == 1) return "Go to source";
+        return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
@@ -6458,7 +6649,9 @@ static const char* ctx_shortcut_at(const App* a, int row)
         return ED_SHORTCUTS[row];
     }
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
-        return (row == 0) ? "Ctrl+C" : "";
+        if (row == 0) return "Ctrl+C";
+        if (row == 1) return "Ctrl+E";
+        return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
@@ -6542,7 +6735,7 @@ static void ctx_menu_open_editor(App* a, int x, int y)
     if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
 }
 
-static void ctx_menu_open_preview(App* a, int x, int y)
+static void ctx_menu_open_preview(App* a, int x, int y, size_t doc_off)
 {
     a->ctx_menu_active = true;
     a->ctx_menu_kind   = CTX_KIND_PREVIEW;
@@ -6550,6 +6743,7 @@ static void ctx_menu_open_preview(App* a, int x, int y)
     a->ctx_menu_y      = y;
     a->ctx_menu_target = -1;
     a->ctx_menu_hover  = 0;
+    a->ctx_menu_preview_doc_off = doc_off;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
     int rh = ctx_menu_row_h(a);
@@ -7144,6 +7338,7 @@ static void ed_menu_invoke(App* a, EditorAction act)
 
 /* Defined in the clipboard section much further down. */
 static void preview_copy(App* a);
+static void preview_go_to_source(App* a);
 
 /* Single dispatch from a row click, switches on the active menu kind. */
 static void ctx_menu_invoke_row(App* a, int row)
@@ -7156,6 +7351,7 @@ static void ctx_menu_invoke_row(App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
         ctx_menu_close(a);
         if (row == 0) preview_copy(a);
+        else if (row == 1) preview_go_to_source(a);
         return;
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
@@ -7417,6 +7613,17 @@ typedef enum {
     SET_RESET,          /* delete settings.lua, factory defaults */
     SET_COUNT,
 } SettingsRow;
+
+/* Rows where the only meaningful gesture is Enter — clicking the chevron
+ * area, scrolling the wheel, or pressing Left/Right must NOT trigger the
+ * action because there's no value to cycle. Without this guard, scrolling
+ * past the Keybindings row in the settings overlay accidentally opens
+ * the keybind overlay, which is a startling UX moment. */
+static bool settings_is_enter_only_row(SettingsRow r)
+{
+    return r == SET_KEYBINDINGS || r == SET_COLORS ||
+           r == SET_CONVERT_LF  || r == SET_RESET;
+}
 
 static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Theme",
@@ -8234,6 +8441,10 @@ static int wrap_text(App* a, Font* f, const char* text,
 static void render_settings(App* a)
 {
     if (!a->settings_active) return;
+    /* Hide while a sub-overlay (keybind/picker) is up so they don't render
+     * stacked. Settings state is preserved so closing the sub-overlay
+     * brings us right back. */
+    if (a->keybind_active || a->picker_active) return;
 
     overlay_backdrop(a);
 
@@ -8378,7 +8589,10 @@ static void picker_open(App* a)
     a->picker_hover    = -1;
     a->picker_channel  = 0;
     a->picker_scroll   = 0;
-    a->settings_active = false;     /* close settings while in picker */
+    /* Same logic as keybind_open: keep settings_active so its save/discard
+     * prompt fires when the user Escs out of the picker. The picker close
+     * persists colors immediately as before — settings_close still runs
+     * its own diff for the rest of the cfg. */
     a->keybind_active  = false;
 }
 
@@ -10092,13 +10306,34 @@ static void keybind_open(App* a)
     a->keybind_hover     = -1;
     a->keybind_capturing = false;
     a->keybind_scroll    = 0;
-    a->settings_active   = false;     /* close settings while in keybinds */
+    /* Intentionally NOT clearing settings_active. If the user opened
+     * keybind via Settings → Keybindings, settings stays "live" but
+     * hidden (render_settings checks for sub-overlays); when they Esc
+     * out of keybind, settings is on screen again and Esc → settings_close
+     * fires the save/discard prompt that includes any keybind changes
+     * made during this trip. */
 }
 
 static void keybind_close(App* a)
 {
     a->keybind_active    = false;
     a->keybind_capturing = false;
+}
+
+static int kbind_row_h(const App* a);
+
+/* How many wrapped lines the bottom hint takes — used by every box_h
+ * computation so the layout matches what render_keybind actually draws. */
+static int keybind_hint_lines(const App* a)
+{
+    int rh = kbind_row_h(a);
+    int box_w = KBIND_BOX_W;
+    const char* hint = a->keybind_capturing
+        ? "Press a key combo to bind, or Esc to cancel"
+        : "Enter / Click to capture  -  Del to clear  -  Esc to close";
+    int n = wrap_text((App*)a, a->font_ide, hint, 0, 0,
+                      box_w - 32, rh, (SDL_Color){0,0,0,0}, false);
+    return n < 1 ? 1 : n;
 }
 
 static int kbind_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
@@ -10165,9 +10400,10 @@ static int keybind_scrollbar_geom(const App* a,
     int rows_top  = box_y + rh + 12;
 
     keybind_layout_build(a, rows_top - a->keybind_scroll);
-    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll + rh + 12;
+    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll
+              + rh * keybind_hint_lines(a) + 12;
     if (box_h > max_box_h) box_h = max_box_h;
-    int rows_bot  = box_y + box_h - rh - 8;
+    int rows_bot  = box_y + box_h - rh * keybind_hint_lines(a) - 8;
     int visible_h = rows_bot - rows_top;
     if (g_kbind_content_h <= visible_h || visible_h <= 20) return 0;
 
@@ -10201,9 +10437,10 @@ static void keybind_ensure_selected_visible(App* a)
 
     /* Build with scroll applied so y values are screen coords. */
     keybind_layout_build(a, rows_top - a->keybind_scroll);
-    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll + rh + 12;
+    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll
+              + rh * keybind_hint_lines(a) + 12;
     if (box_h > max_box_h) box_h = max_box_h;
-    int rows_bot = box_y + box_h - rh - 8;
+    int rows_bot = box_y + box_h - rh * keybind_hint_lines(a) - 8;
 
     int sel_y = -1;
     int sel_h = rh;
@@ -10234,10 +10471,11 @@ static int keybind_hit_test(const App* a, int mx, int my)
     int rows_top = box_y + rh + 12 - a->keybind_scroll;
     keybind_layout_build(a, rows_top);
 
-    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll + rh + 12;
+    int box_h = rh + 12 + g_kbind_content_h + a->keybind_scroll
+              + rh * keybind_hint_lines(a) + 12;
     if (box_h > max_box_h) box_h = max_box_h;
     int visible_top = box_y + rh + 12;
-    int visible_bot = box_y + box_h - rh - 8;
+    int visible_bot = box_y + box_h - rh * keybind_hint_lines(a) - 8;
 
     if (mx < box_x + 8 || mx >= box_x + box_w - 8) return -1;
     if (my < visible_top || my >= visible_bot) return -1;
@@ -10268,9 +10506,11 @@ static void render_keybind(App* a)
     int rows_top = box_y + rh + 12 - a->keybind_scroll;
     keybind_layout_build(a, rows_top);
 
-    /* Box height: title + (max content) + hint. Cap to window. */
+    /* Box height: title + (max content) + hint (possibly wrapped to N
+     * lines on narrow windows). Cap to window. */
+    int hint_lines_pre = keybind_hint_lines(a);
     int desired_h = rh + 12 + g_kbind_content_h + a->keybind_scroll
-                    + rh + 12;
+                    + rh * hint_lines_pre + 12;
     int box_h = desired_h < max_box_h ? desired_h : max_box_h;
 
     SDL_Rect box = { box_x, box_y, box_w, box_h };
@@ -10288,7 +10528,7 @@ static void render_keybind(App* a)
 
     /* Clip rows to the box interior. */
     int visible_top = box_y + rh + 12;
-    int visible_bot = box_y + box_h - rh - 8;
+    int visible_bot = box_y + box_h - rh * hint_lines_pre - 8;
     SDL_Rect clip = { box_x + 4, visible_top - 4,
                       box_w - 8, visible_bot - visible_top + 4 };
     SDL_RenderSetClipRect(a->renderer, &clip);
@@ -10377,14 +10617,21 @@ static void render_keybind(App* a)
                                    a->sb_drag == SB_KEYBIND);
     }
 
-    /* Hint at the bottom. */
+    /* Hint at the bottom — wrap_text so it folds onto a second row when
+     * the box is narrower than the full single-line string. The keybind
+     * box already reserves the bottom slot via `+ rh + 12` in box_h,
+     * good enough for one line; if the wrap produces 2 lines they sit
+     * just above the bottom edge instead of below. */
     const char* hint = a->keybind_capturing
         ? "Press a key combo to bind, or Esc to cancel"
         : "Enter / Click to capture  -  Del to clear  -  Esc to close";
-    font_draw_line(a->font_ide, hint, strlen(hint),
-                   box_x + 16,
-                   box_y + box_h - 8 - rh + font_ascent(a->font_ide),
-                   a->fg_muted);
+    int hint_lines = wrap_text(a, a->font_ide, hint, 0, 0,
+                               box_w - 32, rh,
+                               (SDL_Color){0,0,0,0}, false);
+    if (hint_lines < 1) hint_lines = 1;
+    int hint_top = box_y + box_h - 8 - rh * hint_lines;
+    wrap_text(a, a->font_ide, hint,
+              box_x + 16, hint_top, box_w - 32, rh, a->fg_muted, true);
 }
 
 /* Whitespace-separated word count of `data[0..len)`. Cheap O(N); recomputed
@@ -10571,6 +10818,8 @@ static int SDLCALL resize_event_watch(void* userdata, SDL_Event* e)
     return 1;     /* keep event in queue for the main loop too */
 }
 
+static int buf_detect_line_endings(const Buffer* b);     /* defined below */
+
 static void render_status(App* a)
 {
     int sh = status_bar_h(a);
@@ -10656,6 +10905,17 @@ static void render_status(App* a)
         rx -= pw;
         font_draw_line(a->font_ide, pos, strlen(pos), rx, by, accent_muted);
         rx -= 18;     /* gap before next item */
+    }
+
+    /* Line-ending indicator (LF / CRLF). Reflects what the buffer
+     * currently holds — i.e. what would be on disk if saved with the
+     * Preserve policy. Empty buffers default to LF. */
+    {
+        const char* eol = buf_detect_line_endings(&a->buf) == 2 ? "CRLF" : "LF";
+        int ew = font_measure(a->font_ide, eol, strlen(eol));
+        rx -= ew;
+        font_draw_line(a->font_ide, eol, strlen(eol), rx, by, accent_muted);
+        rx -= 18;
     }
 
     /* Word count (further left of the position chip). */
@@ -10836,6 +11096,7 @@ static void app_render(App* a)
     render_tinput_modal(a);
     render_rename_popup(a);
     render_confirm_modal(a);
+    render_eol_picker(a);
 
     SDL_RenderPresent(a->renderer);
 }
@@ -11099,6 +11360,115 @@ static void preview_copy(App* a)
     tmp[hi - lo] = 0;
     SDL_SetClipboardText(tmp);
     free(tmp);
+}
+
+/* Plain memmem (GNU extension; not portable, so spell it out). */
+static const char* mem_search(const char* hay, size_t hay_n,
+                              const char* needle, size_t needle_n)
+{
+    if (needle_n == 0) return hay;
+    if (needle_n > hay_n) return NULL;
+    for (size_t i = 0; i + needle_n <= hay_n; ++i) {
+        if (memcmp(hay + i, needle, needle_n) == 0) return hay + i;
+    }
+    return NULL;
+}
+
+/* Switch from preview to edit mode and try to land the cursor on the
+ * source byte that produced the rendered text under the right-click
+ * point. md4c gives us no source-position metadata for general blocks,
+ * so we lift a short text snippet from doc.data and search the source
+ * buffer for it.
+ *
+ * For repeated content (the snippet appears many times in the source —
+ * common in long docs with boilerplate sections) the FIRST hit isn't
+ * what we want; we estimate the expected source byte from how far down
+ * the click was in the rendered doc and pick the match closest to that
+ * estimate. Falls back to top-of-buffer when nothing matches at all
+ * (e.g. heavily inline-styled lines whose source has *bold* markers
+ * the rendered text doesn't). */
+static void preview_go_to_source(App* a)
+{
+    size_t target_byte = 0;
+
+    size_t doc_off = a->ctx_menu_preview_doc_off;
+    if (doc_off != (size_t)-1 && doc_off <= a->doc.len && a->buf.len > 0) {
+        /* Find which MdLine the click landed in. doc.data is all rendered
+         * lines concatenated with NO separators, so we can't just walk from
+         * doc_off forward — we'd cross into the next line and produce a
+         * snippet that doesn't exist anywhere in the source. */
+        const MdLine* hit_line = NULL;
+        for (size_t i = 0; i < a->doc.line_count; ++i) {
+            const MdLine* l = &a->doc.lines[i];
+            if (l->len == 0) continue;
+            if (doc_off >= l->start && doc_off <= l->start + l->len) {
+                hit_line = l;
+                break;
+            }
+        }
+
+        if (hit_line) {
+            /* Use the LINE'S content as the search anchor (not from the
+             * click byte forward — clicks past end-of-text would otherwise
+             * produce a zero-length snippet). Skip leading whitespace and
+             * stop at the first tab (table cell separator) — those don't
+             * appear in markdown source. */
+            size_t snip_start = hit_line->start;
+            size_t snip_end   = hit_line->start + hit_line->len;
+            if (snip_end - snip_start > 80) snip_end = snip_start + 80;
+            while (snip_start < snip_end &&
+                   (a->doc.data[snip_start] == ' ' ||
+                    a->doc.data[snip_start] == '\t'))
+                snip_start++;
+            for (size_t k = snip_start; k < snip_end; ++k) {
+                if (a->doc.data[k] == '\t' || a->doc.data[k] == '\n') {
+                    snip_end = k;
+                    break;
+                }
+            }
+            size_t need = snip_end - snip_start;
+
+            if (need >= 4) {
+                const char* needle = a->doc.data + snip_start;
+                /* Estimate source byte from this line's render-doc offset. */
+                size_t est = (a->doc.len > 0)
+                    ? (size_t)((double)hit_line->start / (double)a->doc.len
+                               * (double)a->buf.len)
+                    : 0;
+
+                const char* p     = a->buf.data;
+                const char* end   = a->buf.data + a->buf.len;
+                const char* prev  = NULL;
+                const char* best  = NULL;
+                while (p < end) {
+                    const char* hit = mem_search(p, (size_t)(end - p),
+                                                 needle, need);
+                    if (!hit) break;
+                    size_t hit_off = (size_t)(hit - a->buf.data);
+                    if (hit_off >= est) {
+                        /* First hit at or past `est`. The closest match is
+                         * either this one or the previous one — pick
+                         * whichever is nearer in absolute distance. */
+                        size_t d_this = hit_off - est;
+                        size_t d_prev = prev
+                            ? est - (size_t)(prev - a->buf.data)
+                            : (size_t)-1;
+                        best = (d_this <= d_prev) ? hit : prev;
+                        break;
+                    }
+                    prev = hit;
+                    p = hit + 1;
+                }
+                if (!best) best = prev;
+                if (best) target_byte = (size_t)(best - a->buf.data);
+            }
+        }
+    }
+
+    if (!a->edit_mode) enter_edit_mode(a);
+    buffer_set_cursor(&a->buf, target_byte, false);
+    ensure_cursor_visible(a);
+    a->ctx_menu_preview_doc_off = (size_t)-1;
 }
 
 static void edit_cut(App* a)
@@ -13226,6 +13596,74 @@ static void format_align_cell(int width, int kind, char* out, size_t cap)
     out[pos] = 0;
 }
 
+static void action_convert_eol(App* a)
+{
+    int choice = eol_picker_modal(a);
+    if (choice < 0) return;     /* cancel */
+    Buffer* b = &a->buf;
+
+    /* Quick check: if the buffer already uses the target EOL exclusively,
+     * tell the user and bail — no point dirtying the file for a no-op. */
+    int target = (choice == 0) ? 1 : 2;     /* 1 = LF, 2 = CRLF */
+    bool has_cr = false, has_bare_lf = false;
+    for (size_t i = 0; i < b->len; ++i) {
+        if (b->data[i] == '\r') has_cr = true;
+        if (b->data[i] == '\n' && (i == 0 || b->data[i - 1] != '\r'))
+            has_bare_lf = true;
+    }
+    bool already_lf   = !has_cr && has_bare_lf;
+    bool already_crlf = !has_bare_lf && has_cr;
+    if ((target == 1 && already_lf) ||
+        (target == 2 && already_crlf) ||
+        b->len == 0)
+    {
+        app_notify(a, target == 1 ? "already LF" : "already CRLF");
+        return;
+    }
+
+    /* Build the converted text in a scratch buffer. CRLF can grow the
+     * input by up to 1 byte per \n, so allocate worst-case len*2+1.
+     * Also walk a parallel cursor index so we can restore the caret
+     * to the same logical position after the replace. */
+    size_t old_cur = b->cursor;
+    char*  out = malloc(b->len * 2 + 1);
+    if (!out) { app_notify(a, "out of memory"); return; }
+    size_t op = 0;
+    size_t new_cur = 0;
+    for (size_t i = 0; i < b->len; ++i) {
+        if (i == old_cur) new_cur = op;
+        char c = b->data[i];
+        if (target == 1) {
+            if (c == '\r') continue;     /* drop */
+            out[op++] = c;
+        } else {
+            if (c == '\n' && (i == 0 || b->data[i - 1] != '\r'))
+                out[op++] = '\r';
+            out[op++] = c;
+        }
+    }
+    if (old_cur >= b->len) new_cur = op;
+    out[op] = 0;
+
+    /* Replace buffer contents in one undo group. select_all + delete +
+     * insert = 1 logical undo step thanks to the surrounding breaks. */
+    buffer_undo_break(b);
+    buffer_select_all(b);
+    buffer_delete_selection(b);
+    buffer_insert(b, out, op);
+    buffer_undo_break(b);
+    free(out);
+
+    if (new_cur > b->len) new_cur = b->len;
+    b->cursor     = new_cur;
+    b->sel_anchor = -1;
+    b->dirty      = true;
+    update_window_title(a);
+    if (a->edit_mode) ensure_cursor_visible(a);
+    app_notify(a, target == 1 ? "converted to LF (unsaved)"
+                              : "converted to CRLF (unsaved)");
+}
+
 static void action_align_table(App* a)
 {
     if (!a->edit_mode) {
@@ -13492,6 +13930,7 @@ static const ActionEntry ACTIONS[] = {
     { "daily_note",      "Navigation", action_daily           },
     { "export_html",     "File",       action_export_html     },
     { "align_table",     "Edit",       action_align_table     },
+    { "convert_eol",     "Edit",       action_convert_eol     },
 
     { "toggle_edit",     "View",       action_toggle_edit     },
     { "toggle_sidebar",  "View",       action_toggle_sidebar  },
@@ -14459,8 +14898,11 @@ static void app_event(App* a, const SDL_Event* e)
                 break;
             }
             /* Settings overlay: click chevrons to adjust, click row to select,
-             * click outside to close (auto-save). */
-            if (a->settings_active && e->button.button == SDL_BUTTON_LEFT) {
+             * click outside to close (auto-save). Skipped while a sub-overlay
+             * is layered on top — that overlay owns the click. */
+            if (a->settings_active && !a->keybind_active && !a->picker_active &&
+                e->button.button == SDL_BUTTON_LEFT)
+            {
                 bool inside = false;
                 char part = 'B';
                 int r = settings_hit_test(a, e->button.x, e->button.y,
@@ -14468,8 +14910,10 @@ static void app_event(App* a, const SDL_Event* e)
                 if (!inside) { settings_close(a); break; }
                 if (r >= 0) {
                     a->settings_selected = r;
-                    if      (part == 'L') settings_adjust(a, (SettingsRow)r, -1);
-                    else if (part == 'R') settings_adjust(a, (SettingsRow)r, +1);
+                    if (!settings_is_enter_only_row((SettingsRow)r)) {
+                        if      (part == 'L') settings_adjust(a, (SettingsRow)r, -1);
+                        else if (part == 'R') settings_adjust(a, (SettingsRow)r, +1);
+                    }
                 }
                 break;
             }
@@ -14486,11 +14930,14 @@ static void app_event(App* a, const SDL_Event* e)
                     ctx_menu_open_editor(a, e->button.x, e->button.y);
                 } else if (!a->edit_mode &&
                            e->button.x >= doc_x_left(a) &&
-                           e->button.x <  doc_x_right(a) &&
-                           a->preview_sel_start >= 0 &&
-                           a->preview_sel_end != (size_t)a->preview_sel_start) {
-                    /* Preview-mode right-click on a selection → Copy menu. */
-                    ctx_menu_open_preview(a, e->button.x, e->button.y);
+                           e->button.x <  doc_x_right(a)) {
+                    /* Preview-mode right-click anywhere in the doc area opens
+                     * Copy / Go-to-source. Capture the byte under the cursor
+                     * so "Go to source" can hunt the matching text in the
+                     * source buffer. */
+                    size_t doc_off = preview_position_at(a, e->button.x,
+                                                            e->button.y);
+                    ctx_menu_open_preview(a, e->button.x, e->button.y, doc_off);
                 } else {
                     ctx_menu_close(a);
                 }
@@ -14719,14 +15166,17 @@ static void app_event(App* a, const SDL_Event* e)
         case SDL_MOUSEWHEEL: {
             int mx, my;
             SDL_GetMouseState(&mx, &my);
-            /* Settings: wheel adjusts the selected row (or row under cursor). */
-            if (a->settings_active) {
+            /* Settings: wheel adjusts the selected row (or row under cursor).
+             * Skipped while a sub-overlay (keybind / picker) is layered over
+             * settings — the wheel belongs to that overlay, not us. */
+            if (a->settings_active && !a->keybind_active && !a->picker_active) {
                 int r = settings_hit_test(a, mx, my, NULL, NULL);
                 if (r < 0) r = a->settings_selected;
                 if (r >= 0 && r < SET_COUNT) {
                     a->settings_selected = r;
-                    settings_adjust(a, (SettingsRow)r,
-                                    e->wheel.y > 0 ? +1 : -1);
+                    if (!settings_is_enter_only_row((SettingsRow)r))
+                        settings_adjust(a, (SettingsRow)r,
+                                        e->wheel.y > 0 ? +1 : -1);
                 }
                 break;
             }
@@ -15373,8 +15823,10 @@ static void app_event(App* a, const SDL_Event* e)
                 break;     /* swallow everything else */
             }
 
-            /* Settings overlay swallows nav keys while open. */
-            if (a->settings_active) {
+            /* Settings overlay swallows nav keys while open. Skipped while
+             * a sub-overlay (keybind/picker) is layered — those have
+             * their own keypress handlers above this point. */
+            if (a->settings_active && !a->keybind_active && !a->picker_active) {
                 if (k == SDLK_ESCAPE) { settings_close(a); break; }
                 if (k == SDLK_DOWN) {
                     a->settings_selected = (a->settings_selected + 1) % SET_COUNT;
@@ -15386,13 +15838,17 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
                 if (k == SDLK_LEFT) {
-                    settings_adjust(a,
-                        (SettingsRow)a->settings_selected, -1);
+                    if (!settings_is_enter_only_row(
+                            (SettingsRow)a->settings_selected))
+                        settings_adjust(a,
+                            (SettingsRow)a->settings_selected, -1);
                     break;
                 }
                 if (k == SDLK_RIGHT) {
-                    settings_adjust(a,
-                        (SettingsRow)a->settings_selected, +1);
+                    if (!settings_is_enter_only_row(
+                            (SettingsRow)a->settings_selected))
+                        settings_adjust(a,
+                            (SettingsRow)a->settings_selected, +1);
                     break;
                 }
                 if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {

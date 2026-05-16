@@ -46,6 +46,11 @@ typedef struct {
      * that was passed to md_doc_parse) of the char between the brackets,
      * i.e. the ' ' or 'x' that the click handler must toggle. 0 otherwise. */
     size_t   task_mark_off;
+    /* Cached pixel height after the renderer measured this line. -1 means
+     * "not yet computed". Lets render_preview skip off-screen lines without
+     * paying the per-line layout cost on every frame. The renderer is also
+     * responsible for invalidating this when wrap width or fonts change. */
+    int      cached_h;
 } MdLine;
 
 /* `[[note-name]]` Obsidian-style wiki link found in the text. The full byte
