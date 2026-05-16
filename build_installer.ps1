@@ -1,12 +1,28 @@
 $ErrorActionPreference = "Stop"
 
-$version  = "0.71.0"
-$builder  = "D:\Workhammer\DeployPaladin\release\builder\DeployPaladin.Builder.exe"
-$base     = "D:\Workhammer\DeployPaladin\release\installer\DeployPaladin.exe"
-$payload  = "D:\Workhammer\Downsee"
-$output   = "D:\Workhammer\Downsee\Downsee_Installer_$version.exe"
+$version = "0.72.0"
+$forge   = "D:\Workhammer\Forge\forge.exe"
+$project = "D:\Workhammer\Downsee"
+$outDir  = "D:\Workhammer\Downsee\dist"
+$output  = Join-Path $outDir "Downsee-Setup-$version.exe"
 
-& $builder --payload $payload --base $base --output $output
-if ($LASTEXITCODE -ne 0) { throw "Builder failed with exit code $LASTEXITCODE" }
+if (-not (Test-Path $forge)) {
+    Write-Host "forge.exe not found; building it from D:\Workhammer\Forge..."
+    Push-Location "D:\Workhammer\Forge"
+    try {
+        & go build -tags "desktop,production" -ldflags "-H windowsgui -s -w" -o forge.exe ./cmd/forge
+        if ($LASTEXITCODE -ne 0) { throw "go build forge.exe failed ($LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
+}
+
+Push-Location $project
+try {
+    & $forge build --out $outDir
+    if ($LASTEXITCODE -ne 0) { throw "forge build failed with exit code $LASTEXITCODE" }
+} finally {
+    Pop-Location
+}
 
 Write-Host "Built: $output"

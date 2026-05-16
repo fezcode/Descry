@@ -33,7 +33,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.71.0"
+#define DOWNSEE_VERSION "0.72.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22

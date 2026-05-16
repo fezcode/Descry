@@ -1,0 +1,153 @@
+[app]
+name    = "Downsee"
+version = "0.72.0"
+id      = "com.fezcode.downsee"
+icon    = "resources/downsee.ico"
+
+[meta]
+publisher = "Fezcode"
+
+[ui]
+theme = "mica"
+
+[install]
+default_dir = "${PROGRAMFILES}/Downsee"
+
+[uninstall]
+keep = []
+
+[[steps]]
+type  = "welcome"
+title = "Downsee 0.72.0"
+body  = "This wizard will install Downsee 0.72.0 on your computer.\n\nClick Next to continue."
+
+[[steps]]
+type  = "license"
+title = "License Agreement"
+body  = "Please review the license terms below before continuing the installation."
+file  = "LICENSE.txt"
+
+[[steps]]
+type  = "folder"
+title = "Select Folder"
+body  = "Choose where to install Downsee 0.72.0."
+
+[[steps]]
+type  = "shortcuts"
+title = "Select Optional Tasks"
+body  = "Check the items you would like the installer to perform."
+
+[[steps]]
+type  = "install"
+title = "Installing..."
+body  = "Copying files to your system."
+
+[[steps]]
+type  = "finish"
+title = "Installation Complete"
+body  = "Downsee has been installed successfully.\n\nClick Finish to close."
+
+# Application binaries and DLL dependencies
+[[files]]
+src = "build/downsee.exe"
+dst = "${INSTALLDIR}/downsee.exe"
+
+[[files]]
+src = "build/SDL2.dll"
+dst = "${INSTALLDIR}/SDL2.dll"
+
+[[files]]
+src = "build/libbrotlicommon.dll"
+dst = "${INSTALLDIR}/libbrotlicommon.dll"
+
+[[files]]
+src = "build/libbrotlidec.dll"
+dst = "${INSTALLDIR}/libbrotlidec.dll"
+
+[[files]]
+src = "build/libbz2-1.dll"
+dst = "${INSTALLDIR}/libbz2-1.dll"
+
+[[files]]
+src = "build/libfreetype-6.dll"
+dst = "${INSTALLDIR}/libfreetype-6.dll"
+
+[[files]]
+src = "build/libgcc_s_seh-1.dll"
+dst = "${INSTALLDIR}/libgcc_s_seh-1.dll"
+
+[[files]]
+src = "build/libglib-2.0-0.dll"
+dst = "${INSTALLDIR}/libglib-2.0-0.dll"
+
+[[files]]
+src = "build/libgraphite2.dll"
+dst = "${INSTALLDIR}/libgraphite2.dll"
+
+[[files]]
+src = "build/libharfbuzz-0.dll"
+dst = "${INSTALLDIR}/libharfbuzz-0.dll"
+
+[[files]]
+src = "build/libiconv-2.dll"
+dst = "${INSTALLDIR}/libiconv-2.dll"
+
+[[files]]
+src = "build/libintl-8.dll"
+dst = "${INSTALLDIR}/libintl-8.dll"
+
+[[files]]
+src = "build/libjpeg-8.dll"
+dst = "${INSTALLDIR}/libjpeg-8.dll"
+
+[[files]]
+src = "build/libpcre2-8-0.dll"
+dst = "${INSTALLDIR}/libpcre2-8-0.dll"
+
+[[files]]
+src = "build/libpng16-16.dll"
+dst = "${INSTALLDIR}/libpng16-16.dll"
+
+[[files]]
+src = "build/libstdc++-6.dll"
+dst = "${INSTALLDIR}/libstdc++-6.dll"
+
+[[files]]
+src = "build/libwinpthread-1.dll"
+dst = "${INSTALLDIR}/libwinpthread-1.dll"
+
+[[files]]
+src = "build/zlib1.dll"
+dst = "${INSTALLDIR}/zlib1.dll"
+
+# Desktop and Start Menu shortcuts
+[[shortcuts]]
+target   = "${INSTALLDIR}/downsee.exe"
+location = "${DESKTOP}/Downsee.lnk"
+name     = "Downsee"
+icon     = "${INSTALLDIR}/downsee.exe"
+label    = "Create Desktop Shortcut"
+optional = true
+default  = true
+
+[[shortcuts]]
+target   = "${INSTALLDIR}/downsee.exe"
+location = "${STARTMENU}/Fezcode/Downsee.lnk"
+name     = "Downsee"
+icon     = "${INSTALLDIR}/downsee.exe"
+label    = "Create Start Menu Entry"
+optional = true
+default  = true
+
+# Registry entries
+[[registry]]
+hive  = "HKCU"
+key   = "Software\\Fezcode\\Downsee"
+value = "InstallDir"
+data  = "${INSTALLDIR}"
+
+[[registry]]
+hive  = "HKCU"
+key   = "Software\\Fezcode\\Downsee"
+value = "Version"
+data  = "0.72.0"
