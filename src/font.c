@@ -34,6 +34,8 @@ struct Font {
     FontStyle     style;
     GlyphSlot*    cache[GLYPH_BUCKETS];
     Font*         fallback;
+    unsigned int  gi_backtick;   /* glyph index for U+0060 (backtick) */
+    hb_position_t bt_advance;    /* its natural advance, cached on load */
 };
 
 /* ---------- UTF-8 codepoint decode ------------------------------------- */
@@ -182,6 +184,17 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
 
     f->hb_font = hb_ft_font_create_referenced(f->ft_face);
     f->hb_buf  = hb_buffer_create();
+
+    /* Cache the backtick glyph index and its natural advance so shape_run
+     * can restore a zero advance if the font/shaper combines it as a diacritic. */
+    f->gi_backtick = FT_Get_Char_Index(f->ft_face, 0x0060);
+    f->bt_advance  = 0;
+    if (f->gi_backtick &&
+        FT_Load_Glyph(f->ft_face, f->gi_backtick, FT_LOAD_TARGET_LIGHT) == 0)
+    {
+        f->bt_advance = (hb_position_t)f->ft_face->glyph->advance.x;
+    }
+
     return f;
 }
 
@@ -227,6 +240,16 @@ static int shape_run(Font* f, const char* utf8, size_t len,
     unsigned int n = 0;
     hb_glyph_info_t*     infos = hb_buffer_get_glyph_infos(f->hb_buf, &n);
     hb_glyph_position_t* poss  = hb_buffer_get_glyph_positions(f->hb_buf, &n);
+
+    /* Some fonts (or GPOS rules) give U+0060 (backtick) zero advance so it
+     * combines diacritically onto the next glyph.  Restore its natural advance
+     * so it never overlaps with the following character. */
+    if (f->gi_backtick && f->bt_advance > 0) {
+        for (unsigned int k = 0; k < n; ++k) {
+            if (infos[k].codepoint == f->gi_backtick && poss[k].x_advance == 0)
+                poss[k].x_advance = f->bt_advance;
+        }
+    }
 
     int pen_x = x;
     int pen_y = y_baseline;
