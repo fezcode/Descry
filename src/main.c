@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 #include "buffer.h"
 #include "font.h"
 #include "icons.h"
@@ -33,7 +33,7 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.72.0"
+#define DOWNSEE_VERSION "0.73.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -50,7 +50,7 @@ static void user_kbinds_load_from_cfg(LuaHost* h);
  * pick a contrasting box bg). */
 static int theme_is_light(const App* a)
 {
-    /* Average of bg RGB > 128 → light. */
+    /* Average of bg RGB > 128 â†’ light. */
     return (a->bg.r + a->bg.g + a->bg.b) / 3 > 128;
 }
 
@@ -67,7 +67,7 @@ static SDL_Color overlay_bg(const App* a)
     return (SDL_Color){ (Uint8)r, (Uint8)g, (Uint8)b, 250 };
 }
 
-/* Dim everything behind an overlay. Single black slab at low alpha — the
+/* Dim everything behind an overlay. Single black slab at low alpha â€” the
  * SDL renderer composites it with the underlying frame. */
 static void overlay_backdrop(App* a)
 {
@@ -76,7 +76,7 @@ static void overlay_backdrop(App* a)
     SDL_RenderFillRect(a->renderer, &bd);
 }
 
-/* Cubic ease-out: smooth out the tail end of a 0→1 progress value so
+/* Cubic ease-out: smooth out the tail end of a 0â†’1 progress value so
  * motion feels like it settles rather than just stopping. Used by
  * render_chrome and other animated UI; full definition near app_render. */
 static float ease_out_cubic(float t);
@@ -100,7 +100,7 @@ static LRESULT CALLBACK downsee_wndproc(HWND hwnd, UINT msg,
 #endif
 
 /* Baseline y for vertically-centering text in a row of height row_h.
- * Use this anywhere a text-in-a-row is rendered — leaves no top/bottom
+ * Use this anywhere a text-in-a-row is rendered â€” leaves no top/bottom
  * imbalance when the row is taller than the glyph extent. Equivalent to:
  *   baseline = row_y + (row_h - line_height)/2 + ascent
  * Without this, callers default to row_y + ascent (top-aligned). */
@@ -113,7 +113,7 @@ static int row_text_baseline(Font* f, int row_y, int row_h)
  * rasterizes a rounded-rect SVG at 3x oversample and bilinear-downscales
  * for AA corners. The current SDL draw color is read and used as the
  * tint, so existing callers that do `SetRenderDrawColor` then `fill_rrect`
- * keep working unchanged — they just get smooth corners now. Cache
+ * keep working unchanged â€” they just get smooth corners now. Cache
  * grows by one entry per distinct (w, h, radius). */
 static void fill_rrect(SDL_Renderer* r, SDL_Rect rect, int radius)
 {
@@ -191,7 +191,7 @@ typedef struct {
 } Theme;
 
 static const Theme g_themes[] = {
-    /* 0: Editorial Dark — the new default. Warm grays + single copper-amber
+    /* 0: Editorial Dark â€” the new default. Warm grays + single copper-amber
      * accent. Reads like a magazine spread. */
     { "Editorial Dark",
         { 28,  26,  24, 255}, {230, 224, 212, 255}, {250, 245, 232, 255},
@@ -201,7 +201,7 @@ static const Theme g_themes[] = {
         { 18,  16,  14, 255}, {145, 138, 125, 255},
         {110,  80,  50, 180}, {240, 200, 140, 255},
     },
-    /* 1: Default Dark — the original palette, kept for users who liked it. */
+    /* 1: Default Dark â€” the original palette, kept for users who liked it. */
     { "Default Dark",
         { 24,  24,  28, 255}, {220, 220, 230, 255}, {245, 245, 255, 255},
         {110, 180, 200, 255}, {110, 170, 230, 255},
@@ -210,7 +210,7 @@ static const Theme g_themes[] = {
         { 16,  16,  20, 255}, {160, 165, 175, 255},
         { 55,  85, 130, 180}, {240, 240, 250, 255},
     },
-    /* 1: Light — easy on a bright office. */
+    /* 1: Light â€” easy on a bright office. */
     { "Light",
         {248, 248, 246, 255}, { 30,  30,  34, 255}, { 10,  10,  14, 255},
         { 60, 100, 130, 255}, { 30, 100, 170, 255},
@@ -246,7 +246,7 @@ static const Theme g_themes[] = {
         { 24,  24,  24, 255}, {168, 153, 132, 255},
         { 80,  73,  69, 180}, {251, 241, 199, 255},
     },
-    /* 6: Rose Pine Moon — warm but cool — soft rosy violets. */
+    /* 6: Rose Pine Moon â€” warm but cool â€” soft rosy violets. */
     { "Rose Pine Moon",
         { 35,  33,  54, 255}, {224, 222, 244, 255}, {232, 230, 247, 255},
         {235, 188, 186, 255}, {196, 167, 231, 255},
@@ -312,13 +312,13 @@ static int file_exists(const char* path)
 static void font_choices_init(void)
 {
     static const struct { const char* name; const char* path; } known[] = {
-        /* Monospace — best for editor */
+        /* Monospace â€” best for editor */
         {"Consolas",         "C:/Windows/Fonts/consola.ttf"},
         {"Cascadia Code",    "C:/Windows/Fonts/CascadiaCode.ttf"},
         {"Cascadia Mono",    "C:/Windows/Fonts/CascadiaMono.ttf"},
         {"Lucida Console",   "C:/Windows/Fonts/lucon.ttf"},
         {"Courier New",      "C:/Windows/Fonts/cour.ttf"},
-        /* Proportional — readable for body text */
+        /* Proportional â€” readable for body text */
         {"Segoe UI",         "C:/Windows/Fonts/segoeui.ttf"},
         {"Calibri",          "C:/Windows/Fonts/calibri.ttf"},
         {"Verdana",          "C:/Windows/Fonts/verdana.ttf"},
@@ -326,7 +326,7 @@ static void font_choices_init(void)
         {"Arial",            "C:/Windows/Fonts/arial.ttf"},
         {"Times New Roman",  "C:/Windows/Fonts/times.ttf"},
         {"Georgia",          "C:/Windows/Fonts/georgia.ttf"},
-        /* Drop bundled fonts in data/fonts/ — they're picked up here too. */
+        /* Drop bundled fonts in data/fonts/ â€” they're picked up here too. */
         {"Bundled: Inter",        "data/fonts/Inter-Regular.ttf"},
         {"Bundled: JetBrains",    "data/fonts/JetBrainsMono-Regular.ttf"},
         {"Bundled: SourceCodePro","data/fonts/SourceCodePro-Regular.ttf"},
@@ -600,7 +600,7 @@ static void on_lua_notify(void* userdata, const char* msg)
     a->notification_until = SDL_GetTicks() + 3500;
 }
 
-/* Forward decl — info_modal pumps SDL events like confirm_action does. */
+/* Forward decl â€” info_modal pumps SDL events like confirm_action does. */
 static void info_modal(App* a, const char* title, const char* msg);
 static void on_lua_dialog(void* userdata,
                           const char* title, const char* msg)
@@ -989,9 +989,9 @@ static int confirm_msg_line_count(const App* a)
 }
 
 /* Confirm-modal layout helpers. Buttons: 0 = Discard, 1 = Cancel (default).
- * Vertical layout (top → bottom): pad / title row / gap / msg row(s) /
+ * Vertical layout (top â†’ bottom): pad / title row / gap / msg row(s) /
  * large gap / hint row / small gap / button row / pad. Message can be
- * multi-line — height grows to fit. */
+ * multi-line â€” height grows to fit. */
 static SDL_Rect confirm_box_rect(const App* a)
 {
     int sz_y  = font_line_height(a->font_ide);
@@ -1076,7 +1076,7 @@ static void render_confirm_modal(App* a)
     font_draw_line(a->font_ide, a->confirm_title, strlen(a->confirm_title),
                    box.x + 20, title_top + font_ascent(a->font_ide),
                    a->fg_link);
-    /* Message — split on '\n' so the About dialog (and any future
+    /* Message â€” split on '\n' so the About dialog (and any future
      * multi-paragraph prompt) renders each line. */
     {
         const char* p = a->confirm_msg;
@@ -1093,13 +1093,13 @@ static void render_confirm_modal(App* a)
         }
     }
 
-    /* lab0 empty means "no left button" — used by info_modal for a single
+    /* lab0 empty means "no left button" â€” used by info_modal for a single
      * OK dialog. Anything non-empty renders. */
     const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
     const char* lab1 = a->confirm_btn1_label[0]
                        ? a->confirm_btn1_label : "Cancel";
 
-    /* Btn0 — neutral fill, hover brightens. Pill-shaped. */
+    /* Btn0 â€” neutral fill, hover brightens. Pill-shaped. */
     if (lab0) {
         bool hover = (a->confirm_hover == 0);
         SDL_Rect r = { b0_x, btn_y, w0, btn_h };
@@ -1113,7 +1113,7 @@ static void render_confirm_modal(App* a)
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
-    /* Btn1 — default action, accent fill. */
+    /* Btn1 â€” default action, accent fill. */
     {
         bool hover = (a->confirm_hover == 1);
         SDL_Rect r = { b1_x, btn_y, w1, btn_h };
@@ -1201,7 +1201,7 @@ static bool confirm_discard(App* a)
         "You have unsaved changes. Discard them?", "Discard", "Cancel");
 }
 
-/* ---- Line-ending picker (Edit > Convert line endings…) ----------------- */
+/* ---- Line-ending picker (Edit > Convert line endingsâ€¦) ----------------- */
 
 static SDL_Rect eol_pick_box_rect(const App* a)
 {
@@ -1315,7 +1315,7 @@ static int eol_picker_modal(App* a)
     return a->eol_pick_choice;
 }
 
-/* Single-button info dialog. Pass NULL for lab0 → renders as one OK pill. */
+/* Single-button info dialog. Pass NULL for lab0 â†’ renders as one OK pill. */
 static void info_modal(App* a, const char* title, const char* msg)
 {
     (void)confirm_action(a, title, msg, NULL, "OK");
@@ -1461,7 +1461,7 @@ static bool tinput_is_root(const char* dir)
     return false;
 }
 
-/* "::COMPUTER::" sentinel — when tinput_dir holds this, the file list
+/* "::COMPUTER::" sentinel â€” when tinput_dir holds this, the file list
  * shows available drives (Windows) or filesystem roots (POSIX) instead
  * of a regular directory listing. Picked when navigating up from the
  * root of a drive, or when the user clears the path bar. */
@@ -1658,7 +1658,7 @@ static void tinput_navigate(App* a, const char* leaf)
         return;
     }
     char next[512];
-    /* If we're in COMPUTER view, leaf is a full drive path like "C:/" —
+    /* If we're in COMPUTER view, leaf is a full drive path like "C:/" â€”
      * use it directly instead of joining onto the sentinel. */
     if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0) {
         snprintf(next, sizeof next, "%s", leaf);
@@ -1772,7 +1772,7 @@ static int input_word_right(const char* buf, int len, int cursor)
  * Ctrl+Backspace/Delete word delete, Home/End.
  *
  * Takes scancode in addition to keycode so clipboard shortcuts work on
- * non-QWERTY layouts (Turkish-F, Dvorak, Colemak…) where the physical
+ * non-QWERTY layouts (Turkish-F, Dvorak, Colemakâ€¦) where the physical
  * V key produces a different keysym than SDLK_v. We promote the
  * physical scancode to the canonical Ctrl+letter keysym for the
  * clipboard family before any keysym branch runs. */
@@ -1812,7 +1812,7 @@ static bool input_handle_keydown(InputField* f, SDL_Keycode k, SDL_Scancode sc,
     if (ctrl && k == SDLK_v) {
         char* clip = SDL_GetClipboardText();
         if (clip) {
-            /* Single-line field — strip CR/LF on paste. */
+            /* Single-line field â€” strip CR/LF on paste. */
             char filt[1024];
             int nf = 0;
             for (int i = 0; clip[i] && nf < (int)sizeof filt - 1; ++i) {
@@ -1833,7 +1833,7 @@ static bool input_handle_keydown(InputField* f, SDL_Keycode k, SDL_Scancode sc,
             if (*f->sel_anchor < 0) *f->sel_anchor = *f->cursor;
         } else {
             /* Plain Left/Right when a selection exists collapses the
-             * caret to the corresponding edge — standard text-field UX. */
+             * caret to the corresponding edge â€” standard text-field UX. */
             if (input_has_sel(f) && !ctrl &&
                 (k == SDLK_LEFT || k == SDLK_RIGHT))
             {
@@ -1924,7 +1924,7 @@ static void render_tinput_modal(App* a)
                    a->fg_link);
 
     /* Input field. In save/rename mode this is the filename. In dir-pick
-     * mode it doubles as a path bar — typing + Enter navigates; the
+     * mode it doubles as a path bar â€” typing + Enter navigates; the
      * border turns red when the entered path doesn't exist. */
     int in_y = box.y + 20 + sz_y + 8;
     int in_h = sz_y + 16;
@@ -1972,7 +1972,7 @@ static void render_tinput_modal(App* a)
     int hint_h    = sz_y + 6;
 
     /* Currently-shown path label below the input ("in /some/path" or
-     * "Computer" when on the drive view). Red when path errored —
+     * "Computer" when on the drive view). Red when path errored â€”
      * quotes the path the user actually tried, not the one we fell
      * back to. */
     int dir_y = in_r.y + in_r.h + 8;
@@ -2005,7 +2005,7 @@ static void render_tinput_modal(App* a)
     fill_rrect(a->renderer, list_r, 6);
     SDL_RenderSetClipRect(a->renderer, &list_r);
     int y = list_top - a->tinput_files_scroll;
-    /* Bigger icons — the previous font_ascent value rendered the SVG so
+    /* Bigger icons â€” the previous font_ascent value rendered the SVG so
      * small that the folder/file shapes looked like dashes. */
     int ic_sz = sz_y - 2;
     for (int i = 0; i < a->tinput_files_count; ++i, y += rh) {
@@ -2059,7 +2059,7 @@ static void render_tinput_modal(App* a)
                                a->sb_drag == SB_TINPUT);
     }
 
-    /* Inline right-click context menu — Rename + Delete. Rendered last
+    /* Inline right-click context menu â€” Rename + Delete. Rendered last
      * inside the modal so it floats above the file list. */
     if (a->tinput_ctx_active) {
         int rh_ctx = sz_y + 8;
@@ -2107,7 +2107,7 @@ static void render_tinput_modal(App* a)
     int b0_x  = b1_x - w_cn - 12;
     int b_nf_x = box.x + 16;
     /* "New Folder" lives on the left, only in dir-pick mode, and only
-     * when we're inside a real folder — the COMPUTER pseudo-dir has no
+     * when we're inside a real folder â€” the COMPUTER pseudo-dir has no
      * place to put a new folder. */
     bool show_new_folder = pick &&
         strcmp(a->tinput_dir, COMPUTER_SENTINEL) != 0 &&
@@ -2169,7 +2169,7 @@ static void render_tinput_modal(App* a)
 /* Small overlay dialog shown on top of the file picker. Has its own input
  * field + OK/Cancel buttons so the picker's path bar isn't disturbed
  * while a rename is in flight. Pumps its own SDL events synchronously
- * (see app_rename_popup) — the picker's loop resumes on OK/Cancel. */
+ * (see app_rename_popup) â€” the picker's loop resumes on OK/Cancel. */
 
 static SDL_Rect renpop_box_rect(const App* a)
 {
@@ -2325,7 +2325,7 @@ static void render_rename_popup(App* a)
 /* Modal rename popup. Pre-fills the input with `oldname`. Pumps SDL
  * events until OK or Cancel. On OK, copies the new name into `out` and
  * returns true. Validation (non-empty, no path separators) is enforced
- * here — invalid commits flash the red border and stay open. */
+ * here â€” invalid commits flash the red border and stay open. */
 static bool app_rename_popup(App* a, const char* oldname,
                              char* out, size_t out_cap)
 {
@@ -2444,7 +2444,7 @@ static bool app_rename_popup(App* a, const char* oldname,
 
 /* Synchronous text-input modal with optional directory listing. If `dir`
  * is non-NULL/non-empty, the modal scans it once on open and shows a
- * scrollable file list below the input — click a row to fill the input.
+ * scrollable file list below the input â€” click a row to fill the input.
  * Pumps SDL events until OK or Cancel. Returns true on OK; result is in
  * a->tinput_text. */
 static bool app_text_modal(App* a, const char* title, const char* default_text,
@@ -2526,7 +2526,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                  * option for now: Rename). Anywhere else dismisses an
                  * already-open menu. Handled before the LEFT case so a
                  * left-click on the menu can pick the option. */
-                case SDL_USEREVENT:    /* unused — placeholder slot */
+                case SDL_USEREVENT:    /* unused â€” placeholder slot */
                     break;
                 case SDL_MOUSEWHEEL: {
                     int rh = tinput_list_row_h(a);
@@ -2618,7 +2618,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                             {
                                 /* Delete with a confirm prompt. Re-enters
                                  * confirm_action's pump nested inside the
-                                 * picker — both modals draw, the inner
+                                 * picker â€” both modals draw, the inner
                                  * grabs events, original picker resumes
                                  * after the choice. */
                                 char victim[1024];
@@ -2702,7 +2702,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 break;
                             }
                         }
-                        /* "New Folder" button — creates "Downsee Vault" by
+                        /* "New Folder" button â€” creates "Downsee Vault" by
                          * default (or the typed name if the path bar holds
                          * a leaf name). On success, navigates into the new
                          * folder AND drops into rename mode so the user
@@ -2807,7 +2807,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                         if (frow >= 0) {
                             const char* nm = a->tinput_files[frow];
                             bool dbl = (e.button.clicks >= 2);
-                            /* `..` is special — single click navigates up
+                            /* `..` is special â€” single click navigates up
                              * since there's nothing to "select". Other
                              * folders: single click highlights, double
                              * click enters. */
@@ -2876,7 +2876,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                         if (a->tinput_pick_dir) {
                             /* If the typed path differs from the current
                              * dir, treat Enter as a navigate. Existing
-                             * folder → switch view; missing → red error.
+                             * folder â†’ switch view; missing â†’ red error.
                              * If they match, treat as commit but refuse
                              * the COMPUTER sentinel / non-existent paths. */
                             if (a->tinput_len > 0 &&
@@ -2991,7 +2991,7 @@ static int app_init(App* a, const char* note_path_arg)
     lua_host_on_dialog(on_lua_dialog, a);
 
     /* Settings live in ONE file next to the exe: settings.lua. On first
-     * run (file missing) we write a defaults stub WITHOUT vault_path —
+     * run (file missing) we write a defaults stub WITHOUT vault_path â€”
      * the user picks the vault below and we save it back. Plugins live
      * in a `plugins/` folder next to the exe by default; the user can
      * point elsewhere via plugin_path. */
@@ -3001,7 +3001,7 @@ static int app_init(App* a, const char* note_path_arg)
         if (f) {
             fprintf(f,
                 "-- Downsee settings (auto-generated on first run).\n"
-                "-- Edit by hand or via Settings (Ctrl+,) — values written\n"
+                "-- Edit by hand or via Settings (Ctrl+,) â€” values written\n"
                 "-- by the settings page will overwrite this file.\n"
                 "return {\n"
                 "    -- vault_path is filled in after you pick a folder.\n"
@@ -3085,7 +3085,7 @@ static int app_init(App* a, const char* note_path_arg)
     if (a->settings_font_idx      < 0) a->settings_font_idx      = 0;
     if (a->settings_font_idx_ide  < 0) a->settings_font_idx_ide  = 0;
     if (a->settings_font_idx_mono < 0) a->settings_font_idx_mono = 0;
-    /* Empty default — first-run check below uses NULL/empty to know
+    /* Empty default â€” first-run check below uses NULL/empty to know
      * we need to prompt the user for a vault folder. We also scrub
      * any sentinel / non-directory value that may have been written
      * to settings.lua by an older buggy build so we don't try to
@@ -3132,7 +3132,7 @@ static int app_init(App* a, const char* note_path_arg)
     a->win_h = win_h;
 
     /* Best-quality texture scaling: SVG icons rasterize at 3x oversample
-     * then bilinear-downscale to render size — without this hint the
+     * then bilinear-downscale to render size â€” without this hint the
      * downscale uses nearest-neighbor and the icons look chunky. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
 
@@ -3149,9 +3149,9 @@ static int app_init(App* a, const char* note_path_arg)
      *  1. Add WS_THICKFRAME back (BORDERLESS strips it; without it Windows
      *     refuses aero snap, Win+arrow shortcuts, drag-to-edge snap).
      *  2. Subclass WindowProc to intercept:
-     *      - WM_NCCALCSIZE   → return 0, keeps client area = full window
+     *      - WM_NCCALCSIZE   â†’ return 0, keeps client area = full window
      *                          (otherwise WS_THICKFRAME carves out borders)
-     *      - WM_GETMINMAXINFO → constrain maximize size to monitor work
+     *      - WM_GETMINMAXINFO â†’ constrain maximize size to monitor work
      *                          area so the maximized window doesn't cover
      *                          the taskbar.
      *  3. SetWindowPos with SWP_FRAMECHANGED to push the new style live. */
@@ -3178,11 +3178,11 @@ static int app_init(App* a, const char* note_path_arg)
     if (!a->renderer) { fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError()); return -1; }
     SDL_SetRenderDrawBlendMode(a->renderer, SDL_BLENDMODE_BLEND);
     /* Event watch that lets the resize badge actually render while the
-     * user drags an edge — on Windows the main loop is blocked inside
+     * user drags an edge â€” on Windows the main loop is blocked inside
      * Defwindowproc during the drag, but our watch fires synchronously
      * whenever SDL pushes a SIZE_CHANGED into the queue. */
     SDL_AddEventWatch(resize_event_watch, a);
-    /* Sync win_w/win_h with the window's real size — borderless+highdpi can
+    /* Sync win_w/win_h with the window's real size â€” borderless+highdpi can
      * give us something different than the requested size at create time. */
     SDL_GetWindowSize(a->window, &a->win_w, &a->win_h);
     fprintf(stderr, "downsee: window size %dx%d\n", a->win_w, a->win_h);
@@ -3194,7 +3194,7 @@ static int app_init(App* a, const char* note_path_arg)
     a->tb_btn_hover = -1;
     a->menu_hover   = -1;
     /* Register hit-test so Windows knows what's drag area vs resize edges
-     * vs normal content. SDL_HITTEST_DRAGGABLE → HTCAPTION → aero snap and
+     * vs normal content. SDL_HITTEST_DRAGGABLE â†’ HTCAPTION â†’ aero snap and
      * Win+arrow shortcuts work for free. */
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
 
@@ -3207,7 +3207,7 @@ static int app_init(App* a, const char* note_path_arg)
     if (vault_path && vault_path[0]) {
         /* If the saved vault doesn't exist (deleted, drive unplugged,
          * settings.lua got corrupted), don't silently scan an empty
-         * vault — flag it so we re-prompt the user below. */
+         * vault â€” flag it so we re-prompt the user below. */
         bool is_abs = (vault_path[0] == '/' || vault_path[0] == '\\' ||
                        (strlen(vault_path) >= 2 && vault_path[1] == ':'));
         if (!path_dir_exists(vault_path)) {
@@ -3216,7 +3216,7 @@ static int app_init(App* a, const char* note_path_arg)
                     "downsee: saved vault '%s' is gone\n", vault_path);
                 vault_missing = true;
             } else {
-                /* Relative path — try resolving against the exe's base
+                /* Relative path â€” try resolving against the exe's base
                  * dir before giving up. Launching by full path from a
                  * different cwd is the common cause of a relative miss. */
                 char* base = SDL_GetBasePath();
@@ -3248,13 +3248,13 @@ static int app_init(App* a, const char* note_path_arg)
 
     /* First-run / missing-vault flow. settings.lua had no vault_path,
      * OR the saved one no longer exists on disk (deleted, drive
-     * unplugged, etc.) — either way we re-prompt and persist. */
+     * unplugged, etc.) â€” either way we re-prompt and persist. */
     if (!vault_path || !vault_path[0] || vault_missing) {
         /* Immediately wipe the bad vault_path from settings.lua so the
          * corruption can't reappear on next launch. vault.dir is still
          * NULL/empty here (vault_init sets it that way and we never
          * scanned), so settings_persist will write the file WITHOUT a
-         * vault_path line — the rest of the user's config (theme,
+         * vault_path line â€” the rest of the user's config (theme,
          * fonts, recents) is preserved. */
         if (vault_missing) settings_persist(a);
         a->running = true;     /* confirm_action's pump checks this */
@@ -3298,7 +3298,7 @@ static int app_init(App* a, const char* note_path_arg)
             }
         }
     } else if (vault_path && vault_path[0]) {
-        /* Successful boot with a saved vault path — record it as recent
+        /* Successful boot with a saved vault path â€” record it as recent
          * even on first encounter so the user can quickly switch back
          * after sampling other folders. */
         recent_dirs_push(a, a->vault.dir ? a->vault.dir : vault_path);
@@ -3405,11 +3405,11 @@ static void save_collapse_state(App* a)
     fclose(fp);
 }
 
-/* Forward decl — persist_vault_path is a tiny wrapper around the
+/* Forward decl â€” persist_vault_path is a tiny wrapper around the
  * full settings_persist defined later in the file. */
 static void persist_vault_path(App* a);
 
-/* Linear opacity fade over ~220ms. Cheapest "goodbye" — the OS
+/* Linear opacity fade over ~220ms. Cheapest "goodbye" â€” the OS
  * compositor handles the per-pixel work, we just ramp the alpha. */
 static void app_close_anim_fade(App* a)
 {
@@ -3440,7 +3440,7 @@ static void app_close_anim_dissolve(App* a)
     if (W <= 0 || H <= 0) return;
 
     /* 1. Snapshot the current frame. SDL_RenderReadPixels is the
-     *    portable way to grab the back buffer. RGBA32 → texture. */
+     *    portable way to grab the back buffer. RGBA32 â†’ texture. */
     SDL_Surface* snap_surf = SDL_CreateRGBSurfaceWithFormat(
         0, W, H, 32, SDL_PIXELFORMAT_RGBA32);
     if (!snap_surf) return;
@@ -3478,7 +3478,7 @@ static void app_close_anim_dissolve(App* a)
         Uint32 elapsed = SDL_GetTicks() - t0;
         if (elapsed >= (Uint32)duration_ms) break;
         float t = (float)elapsed / (float)duration_ms;
-        /* Ease-in-cubic — slow start, fast finish. The opening looks
+        /* Ease-in-cubic â€” slow start, fast finish. The opening looks
          * like the screen is "deciding" to fall apart, then collapses. */
         float e = t * t * t;
         int revealed = (int)(e * (float)n_cells);
@@ -3515,7 +3515,7 @@ static void app_close_anim_dissolve(App* a)
 
 /* Dispatch on cfg_close_anim. Adding a new animation kind = a new value
  * + a new branch here. Window/renderer must still be alive when this
- * runs — call before any teardown. */
+ * runs â€” call before any teardown. */
 static void app_run_close_animation(App* a)
 {
     if (!a->window || !a->renderer) return;
@@ -3731,8 +3731,8 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     ROW_CHROME(y);
 
     static const char BULLET[]  = "\xe2\x80\xa2  ";
-    static const char CHK_OPEN[] = "\xe2\x98\x90  ";    /* ☐ */
-    static const char CHK_DONE[] = "\xe2\x98\x91  ";    /* ☑ */
+    static const char CHK_OPEN[] = "\xe2\x98\x90  ";    /* â˜ */
+    static const char CHK_DONE[] = "\xe2\x98\x91  ";    /* â˜‘ */
     if (line->kind == LINE_LIST) {
         if (draw) font_draw_line(a->font_body, BULLET, sizeof BULLET - 1,
                                  x_start - INDENT_PX, y + font_ascent(base),
@@ -3774,7 +3774,7 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     size_t i = 0;
     while (i < len) {
         if (x == x_start) {
-            /* Trim leading spaces at the start of a visual row — but NOT
+            /* Trim leading spaces at the start of a visual row â€” but NOT
              * for code lines, where leading whitespace is significant
              * (Python indents, nested braces, etc.). */
             if (line->kind != LINE_CODE) {
@@ -3933,7 +3933,7 @@ static void render_preview_selection(App* a)
 
 /* Draw the frontmatter properties pill at the top of preview. Returns the
  * total y-advance (0 if no pill was drawn). When `draw` is false, only the
- * height is computed — used by the scroll math. */
+ * height is computed â€” used by the scroll math. */
 static int render_frontmatter_pill(App* a, int x_left, int y_top, bool draw)
 {
     if (!a->fm_present) return 0;
@@ -4199,14 +4199,15 @@ static Font* edit_line_font(const App* a, const char* s, size_t len)
     return a->font_body;
 }
 
-/* Forward decl — definition lives further down with the auto-pair helpers. */
+/* Forward decl â€” definition lives further down with the auto-pair helpers. */
 static int is_word_char(unsigned char c);
 
 /* Per-byte inline style flags for edit-mode body lines. */
-#define ES_BOLD    (1u << 0)
-#define ES_ITALIC  (1u << 1)
-#define ES_CODE    (1u << 2)
-#define ES_TAG     (1u << 3)     /* #tag — colored like a link */
+#define ES_BOLD       (1u << 0)
+#define ES_ITALIC     (1u << 1)
+#define ES_CODE       (1u << 2)
+#define ES_TAG        (1u << 3)  /* #tag â€” colored like a link */
+#define ES_CODE_DELIM (1u << 4)  /* backtick delimiter: body font, muted color */
 
 /* Is this line a ``` fence marker? Optional leading whitespace, then 3+
  * backticks. Anything after the backticks (e.g. ```c) is still a fence. */
@@ -4229,13 +4230,13 @@ static void compute_edit_styles(const char* s, size_t n, unsigned char* st)
     size_t i = 0;
     while (i < n) {
         if (code) {
-            st[i] = ES_CODE;
-            if (s[i] == '`') code = 0;
+            if (s[i] == '`') { st[i] = ES_CODE_DELIM; code = 0; }
+            else              { st[i] = ES_CODE; }
             i++; continue;
         }
         if (s[i] == '`') {
             code = 1;
-            st[i] = ES_CODE;
+            st[i] = ES_CODE_DELIM;
             i++; continue;
         }
         if (i + 1 < n && s[i] == '*' && s[i+1] == '*') {
@@ -4277,7 +4278,7 @@ static void compute_edit_styles(const char* s, size_t n, unsigned char* st)
         i++;
     }
 
-    /* Overlay: task-list checkbox markers. `^[ws]*[-*+] \[([ xX])\]` →
+    /* Overlay: task-list checkbox markers. `^[ws]*[-*+] \[([ xX])\]` â†’
      * style the three bracketed chars as ES_TAG so they pop. */
     size_t p = 0;
     while (p < n && (s[p] == ' ' || s[p] == '\t')) p++;
@@ -4300,6 +4301,7 @@ static void compute_edit_styles(const char* s, size_t n, unsigned char* st)
  * at the heading size, so they reuse `base` for non-code styles. */
 static Font* pick_edit_inline_font_for(const App* a, Font* base, unsigned char s)
 {
+    if (s & ES_CODE_DELIM) return base;
     if (s & ES_CODE) return a->font_code;
     int b = (s & ES_BOLD) != 0, i = (s & ES_ITALIC) != 0;
     if (base == a->font_body || base == a->font_body_bold ||
@@ -4393,7 +4395,7 @@ static size_t edit_wiki_link_at(const Buffer* b, size_t pos,
     return n;
 }
 
-/* Forward decl — defined later. */
+/* Forward decl â€” defined later. */
 static int strieq(const char* x, const char* y);
 
 /* Resolve a wiki-link target to a vault item path (case-insensitive basename
@@ -4564,8 +4566,9 @@ static int edit_line_draw(const App* a, const char* data, size_t len,
         while (j < len && st[j] == s) j++;
         Font* f = pick_edit_inline_font_for(a, base, s);
         SDL_Color c = color;
-        if      (s & ES_CODE) c = a->fg_muted;
-        else if (s & ES_TAG)  c = a->fg_link;
+        if      (s & ES_CODE)       c = a->fg_muted;
+        else if (s & ES_CODE_DELIM) c = a->fg_muted;
+        else if (s & ES_TAG)        c = a->fg_link;
         font_draw_line(f, data + i, j - i, x, y_baseline, c);
         x += font_measure(f, data + i, j - i);
         i = j;
@@ -4614,7 +4617,7 @@ static int edit_wrap_breaks(const App* a, const char* data, size_t len,
                             int* out, int max_out)
 {
     if (wrap_w <= 0 || max_out <= 0 || len == 0) return 0;
-    /* Quick out: whole line fits — no wrap needed. */
+    /* Quick out: whole line fits â€” no wrap needed. */
     if (edit_line_x_at(a, data, len, len, base, in_fence) <= wrap_w) return 0;
 
     int    n = 0;
@@ -4635,7 +4638,7 @@ static int edit_wrap_breaks(const App* a, const char* data, size_t len,
             if (x <= wrap_w) {
                 last_word_fit = j;
                 has_word_fit  = true;
-                if (j >= len) return n;       /* rest fits — done */
+                if (j >= len) return n;       /* rest fits â€” done */
                 i = j;
                 continue;
             }
@@ -4692,7 +4695,7 @@ static int render_editor(App* a)
     Buffer* b = &a->buf;
     int  wrap_on = a->cfg_edit_wrap ? 1 : 0;
     int  wrap_w  = edit_wrap_width(a);
-    int  max_w   = 0;     /* widest visual row this pass — drives hscroll */
+    int  max_w   = 0;     /* widest visual row this pass â€” drives hscroll */
     int  scroll_x = wrap_on ? 0 : a->scroll_x;
 
     /* Bulk-invalidate the per-line row cache if anything that affects line
@@ -4835,13 +4838,13 @@ static int render_editor(App* a)
 
 /* ----------------------------- chrome ----------------------------------- */
 
-/* Most icons render via SVG (icons.c — settings, find, sidebar, outline,
+/* Most icons render via SVG (icons.c â€” settings, find, sidebar, outline,
  * folder, file, caret). The two procedurally-drawn helpers below survive
  * because they're parameterized in ways the icon module doesn't yet
  * handle: chevron takes a direction (left/right) for settings adjusters,
  * fill_tri is reused by other primitives. */
 
-#if 0   /* superseded by icon_draw(ICON_SETTINGS, ...) — kept for reference. */
+#if 0   /* superseded by icon_draw(ICON_SETTINGS, ...) â€” kept for reference. */
 static void draw_icon_settings(SDL_Renderer* r, int x, int y, int sz, SDL_Color c)
 {
     SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
@@ -4875,7 +4878,7 @@ static void draw_icon_settings(SDL_Renderer* r, int x, int y, int sz, SDL_Color 
     }
 }
 
-/* Outline / list icon — four evenly spaced rails, each indented at a
+/* Outline / list icon â€” four evenly spaced rails, each indented at a
  * progressively deeper bullet column to suggest hierarchy. Bullet dots in
  * front of each rail anchor the eye and read as a tree. */
 static void draw_icon_outline(SDL_Renderer* r, int x, int y, int sz, SDL_Color c)
@@ -4888,7 +4891,7 @@ static void draw_icon_outline(SDL_Renderer* r, int x, int y, int sz, SDL_Color c
     int gap    = (sz - 2 * pad - rows * rail_h) / (rows - 1);
     int dot_d  = 2;
     int dot_x  = x + pad;
-    /* Per-row indents: 0, 1, 1, 0 — looks like a branch and a return. */
+    /* Per-row indents: 0, 1, 1, 0 â€” looks like a branch and a return. */
     int indents[4] = { 0, 4, 4, 0 };
     for (int i = 0; i < rows; ++i) {
         int ly = y + pad + i * (rail_h + gap);
@@ -4900,7 +4903,7 @@ static void draw_icon_outline(SDL_Renderer* r, int x, int y, int sz, SDL_Color c
     }
 }
 
-/* Sidebar / panel icon — outlined rounded rect with a filled left or right
+/* Sidebar / panel icon â€” outlined rounded rect with a filled left or right
  * third indicating which side has the panel. The internal divider is a
  * 1px line so it reads cleanly even at small sizes. */
 static void draw_icon_sidebar(SDL_Renderer* r, int x, int y, int sz,
@@ -4919,14 +4922,14 @@ static void draw_icon_sidebar(SDL_Renderer* r, int x, int y, int sz,
         SDL_Rect side = { box_x, box_y, side_w, box_h };
         SDL_RenderFillRect(r, &side);
     } else {
-        /* Closed: just the divider line — the document area stays empty so
+        /* Closed: just the divider line â€” the document area stays empty so
          * the icon visually says "panel hidden". */
         SDL_RenderDrawLine(r, box_x + side_w, box_y,
                               box_x + side_w, box_y + box_h - 1);
     }
 }
 
-/* Magnifier — bigger circle, double-stroked, with a slightly wider handle
+/* Magnifier â€” bigger circle, double-stroked, with a slightly wider handle
  * extending to the bottom-right corner. The lens reads as a real lens at
  * normal sizes, not just dots. */
 static void draw_icon_find(SDL_Renderer* r, int x, int y, int sz, SDL_Color c)
@@ -4975,7 +4978,7 @@ static void draw_icon_caret(SDL_Renderer* r, int x, int y, int sz,
     SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
     int pad = sz / 4;
     if (expanded) {
-        /* ▼ */
+        /* â–¼ */
         int top_y  = y + pad + 1;
         int bot_y  = y + sz - pad - 1;
         int left_x = x + pad;
@@ -4983,7 +4986,7 @@ static void draw_icon_caret(SDL_Renderer* r, int x, int y, int sz,
         int mid_x  = x + sz / 2;
         fill_tri(r, left_x, top_y, right_x, top_y, mid_x, bot_y);
     } else {
-        /* ▶ */
+        /* â–¶ */
         int left_x = x + pad + 1;
         int right_x = x + sz - pad - 1;
         int top_y  = y + pad;
@@ -5105,7 +5108,7 @@ static void titlebar_button_invoke(App* a, int btn)
 #if defined(_WIN32)
         {
             /* SDL_MinimizeWindow on a borderless+thickframe window can be
-             * inconsistent — go through Win32 directly. */
+             * inconsistent â€” go through Win32 directly. */
             SDL_SysWMinfo wmi; SDL_VERSION(&wmi.version);
             if (SDL_GetWindowWMInfo(a->window, &wmi))
                 ShowWindow(wmi.info.win.window, SW_MINIMIZE);
@@ -5295,7 +5298,7 @@ static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
  * fixes the right-to-left layout in render_chrome (rightmost first). */
 enum ChromeButton {
     CB_NONE      = -1,
-    CB_SETTINGS  = 0,    /* gear icon — opens settings overlay */
+    CB_SETTINGS  = 0,    /* gear icon â€” opens settings overlay */
     CB_MODE      = 1,    /* PREVIEW / EDIT pill */
     CB_OUTLINE   = 2,    /* toggle outline panel */
     CB_SIDEBAR   = 3,    /* toggle sidebar */
@@ -5323,7 +5326,7 @@ static void cmdp_open            (App* a);
 
 /* Hit-test the chrome bar. Returns one of the CB_* enum values, or
  * CB_NONE. The buttons live in the right edge of the chrome bar; the
- * leftmost area is the breadcrumb (vault › note title), not clickable. */
+ * leftmost area is the breadcrumb (vault â€º note title), not clickable. */
 static int chrome_hit_test(const App* a, int mx, int my)
 {
     /* Title bar area is its own zone (drag + window controls), not part
@@ -5392,7 +5395,7 @@ static void render_chrome(App* a)
     /* Title bar contents (menu items, drag area, min/max/close). */
     render_titlebar(a, TBH);
 
-    /* Breadcrumb: vault › title. Each segment is its own clickable hit-rect
+    /* Breadcrumb: vault â€º title. Each segment is its own clickable hit-rect
      * with an animated hover color cross-fade. Vertical centering is within
      * the chrome ROW (below the title bar), not the full chrome height. */
     int text_h = font_ascent(a->font_ide) + font_descent(a->font_ide);
@@ -5423,7 +5426,7 @@ static void render_chrome(App* a)
         }
         font_draw_line(a->font_ide, vault, strlen(vault), bx, by, vc);
         bx += vw + 6;
-        font_draw_line(a->font_ide, "\xe2\x80\xba", 3,    /* › */
+        font_draw_line(a->font_ide, "\xe2\x80\xba", 3,    /* â€º */
                        bx, by, a->fg_muted);
         bx += font_measure(a->font_ide, "\xe2\x80\xba", 3) + 6;
     }
@@ -5443,7 +5446,7 @@ static void render_chrome(App* a)
     font_draw_line(a->font_ide, title, strlen(title), bx, by, tc);
     if (a->buf.dirty) {
         bx += tw + 6;
-        font_draw_line(a->font_ide, "\xe2\x80\xa2", 3,    /* • */
+        font_draw_line(a->font_ide, "\xe2\x80\xa2", 3,    /* â€¢ */
                        bx, by, a->fg_link);
     }
     #undef CRUMB_COLOR
@@ -5592,7 +5595,7 @@ static int sidebar_folder_file_count(const App* a, int folder_idx)
         if (it->is_dir) continue;
         if (strncmp(it->path, f->path, plen) != 0) continue;
         if (it->path[plen] != '/' && it->path[plen] != '\\') continue;
-        /* Direct child only — no further '/' in the suffix. */
+        /* Direct child only â€” no further '/' in the suffix. */
         const char* sub = it->path + plen + 1;
         if (strchr(sub, '/') != NULL || strchr(sub, '\\') != NULL) continue;
         count++;
@@ -5692,7 +5695,7 @@ static void render_sidebar(App* a)
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 60);
     SDL_RenderFillRect(a->renderer, &divider);
 
-    /* Vault name header — folder icon + name. The icon disambiguates the
+    /* Vault name header â€” folder icon + name. The icon disambiguates the
      * header from the items below (otherwise it just looks like row #1 with
      * no caret). */
     int header_y = chrome_bar_h(a) + 10;
@@ -5746,7 +5749,7 @@ static void render_sidebar(App* a)
                        a->fg_muted);
     }
 
-    /* Color for tree guide lines — very faint muted. */
+    /* Color for tree guide lines â€” very faint muted. */
     SDL_Color guide_c = a->fg_muted;
     guide_c.a = 50;
 
@@ -5801,7 +5804,7 @@ static void render_sidebar(App* a)
             }
         }
 
-        /* Layout: caret (folders only) → icon → text. */
+        /* Layout: caret (folders only) â†’ icon â†’ text. */
         int x_indent = SIDEBAR_PAD_X + depth * SIDEBAR_INDENT_STEP;
         int icon_y   = item_y + (item_h - SIDEBAR_ICON_SZ) / 2;
         int x_caret  = x_indent;
@@ -5840,7 +5843,7 @@ static void render_sidebar(App* a)
                                baseline, a->fg_muted);
             }
         } else if (is_sel && a->buf.dirty) {
-            const char* dot = "\xe2\x80\xa2";    /* • */
+            const char* dot = "\xe2\x80\xa2";    /* â€¢ */
             int dw = font_measure(a->font_ide, dot, 3);
             font_draw_line(a->font_ide, dot, 3,
                            a->sidebar_w - SIDEBAR_PAD_X - dw,
@@ -5988,7 +5991,7 @@ static void sb_inner_track_h(const SDL_Rect* track, SDL_Rect* inner)
     }
 }
 
-/* Pure clamp — call before reading scroll_x or computing thumb position. */
+/* Pure clamp â€” call before reading scroll_x or computing thumb position. */
 static void clamp_scroll_x(App* a)
 {
     int vw = doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X;
@@ -6238,7 +6241,7 @@ static bool overlay_scrollbar_handle_click(App* a,
 
 /* ----------------------------- backlink updates ------------------------- */
 
-/* Portable case-insensitive byte compare for ASCII bytes only — good enough
+/* Portable case-insensitive byte compare for ASCII bytes only â€” good enough
  * for filenames and Markdown identifiers we control. */
 static int icmp_n(const char* a, const char* b, size_t n)
 {
@@ -6331,7 +6334,7 @@ static size_t basename_no_md(const char* path, char* out, size_t cap)
     return n;
 }
 
-/* Walk every .md in the vault, rewriting `[[old_basename]]` → `[[new_basename]]`.
+/* Walk every .md in the vault, rewriting `[[old_basename]]` â†’ `[[new_basename]]`.
  * Returns the number of FILES touched. Reloads the open buffer if it was
  * one of the touched files. */
 static int update_backlinks_in_vault(App* a,
@@ -6456,7 +6459,7 @@ static const MenuItem MENU_HELP[] = {
 static const MenuItem* MENU_TABLES[4] = {
     MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_HELP
 };
-/* Static accessors used by the menu rendering — the static menu tables
+/* Static accessors used by the menu rendering â€” the static menu tables
  * don't carry an App pointer, so dynamic content (recent vaults) is
  * fetched off the singleton wndproc App pointer. */
 static int app_recent_dirs_count(void)
@@ -6509,15 +6512,17 @@ typedef enum {
     CTX_DELETE,
     CTX_NEW_FILE,
     CTX_NEW_DIR,
+    CTX_REVEAL,
     CTX_COUNT,
 } CtxAction;
 
 static const char* CTX_LABELS[CTX_COUNT] = {
     "Open",
-    "Rename…",
+    "Renameâ€¦",
     "Delete",
-    "New file here…",
-    "New folder here…",
+    "New file hereâ€¦",
+    "New folder hereâ€¦",
+    "Show in Explorer",
 };
 
 /* Editor formatting menu actions, ordered as they appear in the popup.
@@ -6578,16 +6583,16 @@ static int ctx_action_applies(const App* app, CtxAction a)
 {
     int idx = app->ctx_menu_target;
     if (idx < 0) {                                 /* empty-area menu */
-        return a == CTX_NEW_FILE || a == CTX_NEW_DIR;
+        return a == CTX_NEW_FILE || a == CTX_NEW_DIR || a == CTX_REVEAL;
     }
     const VaultItem* it = &app->vault.items[idx];
     if (it->is_dir) {
         return a == CTX_NEW_FILE || a == CTX_NEW_DIR
-            || a == CTX_RENAME || a == CTX_DELETE;
+            || a == CTX_RENAME || a == CTX_DELETE || a == CTX_REVEAL;
     }
     /* file */
     return a == CTX_OPEN || a == CTX_RENAME || a == CTX_DELETE
-        || a == CTX_NEW_FILE || a == CTX_NEW_DIR;
+        || a == CTX_NEW_FILE || a == CTX_NEW_DIR || a == CTX_REVEAL;
 }
 
 static int ctx_sidebar_visible_count(const App* app)
@@ -6862,7 +6867,7 @@ static void submenu_invoke_row(App* a, int row)
     /* Reject up-front if the directory is gone (removable drive ejected,
      * folder deleted, network share offline). Without this check vault_scan
      * silently returns 0 items, leaving the user staring at an empty
-     * sidebar with no clue why. Don't drop the recent entry — the user
+     * sidebar with no clue why. Don't drop the recent entry â€” the user
      * may reconnect the drive and want to retry. */
     if (!path_dir_exists(snap)) {
         char msg[300];
@@ -6927,7 +6932,7 @@ static void render_context_menu(App* a)
                 a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
                 a->bg_sidebar_hover.b, (Uint8)(220 * rt * et));
             fill_rrect(a->renderer, hr, 4);
-            /* Accent stripe on the left edge — grows top-to-bottom feel. */
+            /* Accent stripe on the left edge â€” grows top-to-bottom feel. */
             SDL_Rect bar = { box.x + 2, y + 2, 2, rh - 4 };
             SDL_SetRenderDrawColor(a->renderer,
                 a->fg_link.r, a->fg_link.g, a->fg_link.b,
@@ -6951,7 +6956,7 @@ static void render_context_menu(App* a)
                            box.x + w - sw - 12,
                            y + font_ascent(a->font_ide) + 3, sc);
         } else if (ctx_is_recent_submenu_row(a, r)) {
-            /* Submenu chevron on the right edge — same color cross-fade
+            /* Submenu chevron on the right edge â€” same color cross-fade
              * as the label so it tints with hover. */
             const char* chev = ">";
             int cw_ = font_measure(a->font_ide, chev, strlen(chev));
@@ -7215,7 +7220,7 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             break;
         }
         case CTX_NEW_DIR: {
-            /* Same target-dir resolution as CTX_NEW_FILE — folder of
+            /* Same target-dir resolution as CTX_NEW_FILE â€” folder of
              * the right-clicked entry, or vault root for empty area. */
             char dir[1024] = {0};
             if (it) {
@@ -7249,6 +7254,33 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             } else {
                 fprintf(stderr, "mkdir failed: %s\n", picked);
             }
+            break;
+        }
+        case CTX_REVEAL: {
+            char target[1024] = {0};
+            if (it) {
+                snprintf(target, sizeof target, "%s", it->path);
+            } else if (a->vault.dir) {
+                snprintf(target, sizeof target, "%s", a->vault.dir);
+            }
+            if (!target[0]) break;
+#ifdef _WIN32
+            for (int k = 0; target[k]; k++)
+                if (target[k] == '/') target[k] = '\\';
+            if (it && !it->is_dir) {
+                char args[1100];
+                snprintf(args, sizeof args, "/select,\"%s\"", target);
+                ShellExecuteA(NULL, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
+            } else {
+                ShellExecuteA(NULL, "explore", target, NULL, NULL, SW_SHOWNORMAL);
+            }
+#else
+            {
+                char cmd[1100];
+                snprintf(cmd, sizeof cmd, "xdg-open \"%s\"", target);
+                system(cmd);
+            }
+#endif
             break;
         }
         default: break;
@@ -7365,7 +7397,7 @@ static void ctx_menu_invoke_row(App* a, int row)
             if (fn) fn(a);
             return;
         }
-        /* "Recent vaults" submenu row — clicking it just toggles the
+        /* "Recent vaults" submenu row â€” clicking it just toggles the
          * inner popup; it doesn't close the parent menu. The submenu
          * also opens automatically on hover (see MOUSEMOTION). */
         if (idx == 0 && row == sn && app_recent_dirs_count() > 0) {
@@ -7383,9 +7415,9 @@ static void ctx_menu_invoke_row(App* a, int row)
 #define DND_DRAG_THRESHOLD_PX 5
 
 /* Identify the drop target folder for cursor (mx, my). Returns:
- *   >= 0 — vault.items index of a folder
- *   -1   — vault root (cursor in sidebar, above any item)
- *   -2   — no valid target (outside sidebar) */
+ *   >= 0 â€” vault.items index of a folder
+ *   -1   â€” vault root (cursor in sidebar, above any item)
+ *   -2   â€” no valid target (outside sidebar) */
 static int dnd_find_drop_target(const App* a, int mx, int my)
 {
     if (!a->sidebar_open || mx < 0 || mx >= a->sidebar_w) return -2;
@@ -7393,7 +7425,7 @@ static int dnd_find_drop_target(const App* a, int mx, int my)
     if (idx < 0) return -1;     /* above items in sidebar = root */
     const VaultItem* it = &a->vault.items[idx];
     if (it->is_dir) return idx;
-    /* File hovered → drop into its parent folder. Find that parent's
+    /* File hovered â†’ drop into its parent folder. Find that parent's
      * vault index by stripping the basename and matching. */
     char dir[1024];
     dirname_of(it->path, dir, sizeof dir);
@@ -7514,7 +7546,7 @@ static void render_dnd_ghost(App* a)
 
 /* The help overlay was merged into the keybindings overlay (F1 + Ctrl+K
  * both open it). The static HELP_ROWS reference table lived here and is
- * gone — every shortcut is now derivable from ACTIONS + current_keystr_for. */
+ * gone â€” every shortcut is now derivable from ACTIONS + current_keystr_for. */
 
 /* ----------------------------- user keybindings ------------------------- */
 
@@ -7581,7 +7613,7 @@ static void user_kbinds_load_from_cfg(LuaHost* h)
 
 /* ----------------------------- settings page ---------------------------- */
 
-/* Forward decls — definitions live in the picker / keybindings sections below. */
+/* Forward decls â€” definitions live in the picker / keybindings sections below. */
 static void keybind_open (App* a);
 static void picker_open  (App* a);
 static int  save_note_with_eol(App* a, const char* path);
@@ -7605,7 +7637,7 @@ typedef enum {
     SET_LINE_SPACING,   /* extra pixels between rendered lines */
     SET_LINE_ENDINGS,   /* preserve / LF / CRLF */
     SET_EDIT_WRAP,      /* on/off: soft-wrap long lines in edit mode */
-    SET_CLOSE_ANIM,     /* off / fade — animation when the window closes */
+    SET_CLOSE_ANIM,     /* off / fade â€” animation when the window closes */
     SET_SIDEBAR_W,
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
     SET_COLORS,         /* opens the color picker overlay */
@@ -7614,7 +7646,7 @@ typedef enum {
     SET_COUNT,
 } SettingsRow;
 
-/* Rows where the only meaningful gesture is Enter — clicking the chevron
+/* Rows where the only meaningful gesture is Enter â€” clicking the chevron
  * area, scrolling the wheel, or pressing Left/Right must NOT trigger the
  * action because there's no value to cycle. Without this guard, scrolling
  * past the Keybindings row in the settings overlay accidentally opens
@@ -7793,14 +7825,14 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             break;
         }
         case SET_EDIT_WRAP: {
-            (void)dir;     /* binary toggle — direction doesn't matter */
+            (void)dir;     /* binary toggle â€” direction doesn't matter */
             a->cfg_edit_wrap = !a->cfg_edit_wrap;
             a->scroll_x = 0;
             if (a->edit_mode) ensure_cursor_visible(a);
             break;
         }
         case SET_CLOSE_ANIM: {
-            /* Off (0) / Fade (1) / Dissolve (2) — cycle either direction. */
+            /* Off (0) / Fade (1) / Dissolve (2) â€” cycle either direction. */
             int n = 3;
             a->cfg_close_anim = (a->cfg_close_anim + dir + n) % n;
             break;
@@ -7937,7 +7969,7 @@ static void settings_pick_custom_font(App* a, SettingsRow row)
     free(picked);
 }
 
-/* Write a Lua string literal — handles `"` and `\` escapes (Windows paths). */
+/* Write a Lua string literal â€” handles `"` and `\` escapes (Windows paths). */
 static void fputs_lua_string(FILE* f, const char* s)
 {
     fputc('"', f);
@@ -7992,14 +8024,14 @@ static void recent_dirs_load(App* a)
     if (n > max) n = max;
     for (int i = 0; i < n; ++i) {
         const char* s = lua_host_cfg_array_string(a->lua, "recent_dirs", i + 1);
-        /* Skip empty strings and the COMPUTER sentinel — neither is a real
+        /* Skip empty strings and the COMPUTER sentinel â€” neither is a real
          * directory and we never want to surface either to the user. */
         if (!s || !*s) continue;
         if (strcmp(s, "::COMPUTER::") == 0) continue;
         snprintf(a->recent_dirs[a->recent_dirs_count],
                  sizeof a->recent_dirs[0], "%s", s);
         path_to_forward(a->recent_dirs[a->recent_dirs_count]);
-        /* De-dup against entries already loaded — if the stored list
+        /* De-dup against entries already loaded â€” if the stored list
          * contained mixed-slash duplicates, normalization turns them into
          * exact matches and we'd otherwise show the same path twice. */
         bool dup = false;
@@ -8047,7 +8079,7 @@ static int settings_persist(App* a)
         fputs_lua_string(f, a->vault.dir);
         fprintf(f, ",\n");
     }
-    /* Recent vault directories — most-recent first, capped at 5. */
+    /* Recent vault directories â€” most-recent first, capped at 5. */
     if (a->recent_dirs_count > 0) {
         fprintf(f, "    recent_dirs    = {\n");
         for (int i = 0; i < a->recent_dirs_count; ++i) {
@@ -8156,7 +8188,7 @@ static void settings_snapshot_capture(const App* a)
     s->valid          = true;
 }
 
-/* Helper: append "label: A → B\n" to msg if old/new differ. Truncation-
+/* Helper: append "label: A â†’ B\n" to msg if old/new differ. Truncation-
  * safe: if there's no room left, the line is dropped silently. */
 static void diff_str(char* msg, size_t cap,
                      const char* label, const char* a, const char* b)
@@ -8241,7 +8273,7 @@ static void settings_snapshot_restore(App* a)
     if (!s->valid) return;
     /* memcpy because snapshot fields and cfg fields are both 260 bytes;
      * snprintf with "%s" trips -Wformat-truncation because gcc can't
-     * prove the source ≤ destination. Direct copy + null-terminate. */
+     * prove the source â‰¤ destination. Direct copy + null-terminate. */
     memcpy(a->cfg_font_path,      s->font_path,      sizeof s->font_path);
     memcpy(a->cfg_font_path_ide,  s->font_path_ide,  sizeof s->font_path_ide);
     memcpy(a->cfg_font_path_mono, s->font_path_mono, sizeof s->font_path_mono);
@@ -8274,7 +8306,7 @@ static void settings_close(App* a)
     char diff[400] = {0};
     settings_build_diff(a, diff, sizeof diff);
     if (diff[0] == 0) {
-        /* Nothing changed — silent close, no need to nag. */
+        /* Nothing changed â€” silent close, no need to nag. */
         g_settings_snap.valid = false;
         return;
     }
@@ -8295,7 +8327,7 @@ static void settings_close(App* a)
     g_settings_snap.valid = false;
 }
 
-/* Settings layout — dynamic, derived from font metrics so the panel
+/* Settings layout â€” dynamic, derived from font metrics so the panel
  * doesn't break at larger font sizes (where labels overran the value
  * column at fixed pixel offsets). */
 #define SETTINGS_BOX_Y    80
@@ -8312,7 +8344,7 @@ static int settings_label_w(const App* a)
     return wmax;
 }
 
-/* Forward decl — settings_value_str writes into `out`. */
+/* Forward decl â€” settings_value_str writes into `out`. */
 static void settings_value_str(const App* a, SettingsRow r, char* out, size_t cap);
 
 /* Width of the widest VALUE string, so the box never clips long font
@@ -8353,9 +8385,9 @@ static int settings_box_x     (const App* a) { return (a->win_w - settings_box_w
 /* Hit-test the settings overlay: which row (and what part) is at (mx, my)?
  * Returns:
  *   row    >= 0  if cursor is inside a row; -1 if outside the rows
- *   *part        — 'L' for the left chevron / left half, 'R' for the right
+ *   *part        â€” 'L' for the left chevron / left half, 'R' for the right
  *                  chevron / right half, 'B' for the row body (label/value).
- *   inside_box   — set to true if the cursor is inside the box (so the
+ *   inside_box   â€” set to true if the cursor is inside the box (so the
  *                  caller knows whether a click should close the overlay). */
 static int settings_hit_test(const App* a, int mx, int my,
                              char* part, bool* inside_box)
@@ -8418,7 +8450,7 @@ static int wrap_text(App* a, Font* f, const char* text,
                 if (last_break > line_start) {
                     i = last_break;
                 } else {
-                    /* Single oversize token — emit alone and move on. */
+                    /* Single oversize token â€” emit alone and move on. */
                     i = j; last_break = j;
                 }
                 break;
@@ -8501,7 +8533,7 @@ static void render_settings(App* a)
                        box_x + 16, y + font_ascent(a->font_ide) + 2,
                        label_c);
 
-        /* Value column. Chevrons drawn procedurally so they always render —
+        /* Value column. Chevrons drawn procedurally so they always render â€”
          * but only for rows where left/right does anything. "(Enter)" rows
          * (Keybindings, Colors, Convert, Reset) don't have a value to cycle
          * through, so showing chevrons would be misleading. */
@@ -8523,7 +8555,7 @@ static void render_settings(App* a)
         y += row_h;
     }
 
-    /* Hint line(s) — pre-measured above so box_h already reserved enough
+    /* Hint line(s) â€” pre-measured above so box_h already reserved enough
      * vertical room. wrap_text handles single-line and multi-line cases. */
     y += 4;
     wrap_text(a, a->font_ide, hint,
@@ -8591,7 +8623,7 @@ static void picker_open(App* a)
     a->picker_scroll   = 0;
     /* Same logic as keybind_open: keep settings_active so its save/discard
      * prompt fires when the user Escs out of the picker. The picker close
-     * persists colors immediately as before — settings_close still runs
+     * persists colors immediately as before â€” settings_close still runs
      * its own diff for the rest of the cfg. */
     a->keybind_active  = false;
 }
@@ -8778,7 +8810,7 @@ static void render_picker(App* a)
 
 /* ----------------------------- outline (TOC) ---------------------------- */
 
-/* Forward decls — definitions live further down in the file, but both the
+/* Forward decls â€” definitions live further down in the file, but both the
  * outline and vault-search overlays activate hits by switching into edit
  * mode and scrolling the cursor into view. */
 static void enter_edit_mode      (App* a);
@@ -9026,7 +9058,7 @@ static void render_outline_panel(App* a)
 {
     if (!a->outline_pinned) return;
 
-    /* Live-rebuild every frame: cheap (~1 µs per 100 lines) and means the
+    /* Live-rebuild every frame: cheap (~1 Âµs per 100 lines) and means the
      * panel reflects edits instantly without us tracking buffer changes. */
     outline_collect(a);
     int cursor_idx = outline_index_of_cursor(a);
@@ -9134,7 +9166,7 @@ static void action_outline_pin(App* a)
 #define VSEARCH_BOX_Y       60
 #define VSEARCH_PREVIEW_X  130     /* x of the preview text within a hit row */
 
-/* Forward decl — load_note is at the top of the file already, this just
+/* Forward decl â€” load_note is at the top of the file already, this just
  * keeps the call site readable. enter_edit_mode / ensure_cursor_visible
  * are forward-declared at the top of the outline section above. */
 static int  load_note(App* a, const char* path);
@@ -9308,7 +9340,7 @@ static void vsearch_open(App* a)
     a->vsearch_active   = true;
     a->vsearch_hover    = -1;
     a->vsearch_scroll   = 0;
-    /* Don't clobber a previous query — let the user re-run by Enter. */
+    /* Don't clobber a previous query â€” let the user re-run by Enter. */
     if (!SDL_IsTextInputActive()) SDL_StartTextInput();
 }
 
@@ -9485,7 +9517,7 @@ static void render_vsearch(App* a)
 
         if (h->line_no == 0) {
             /* File header: filename in heading color, no selection. */
-            font_draw_line(a->font_ide, "\xe2\x96\xb8", 3,    /* ▸ */
+            font_draw_line(a->font_ide, "\xe2\x96\xb8", 3,    /* â–¸ */
                            box_x + 12, row_text_baseline(a->font_ide, ry, rh),
                            a->fg_muted);
             font_draw_line(a->font_ide, h->preview, strlen(h->preview),
@@ -10044,7 +10076,7 @@ static void render_tags(App* a)
         overlay_scrollbar_draw(a, &sb_track, &sb_thumb,
                                a->sb_drag == SB_TAGS);
 
-    /* Render the hint wrapped — pre-measured above; place its top so
+    /* Render the hint wrapped â€” pre-measured above; place its top so
      * the LAST line sits at the original baseline. */
     int hint_top = box_y + box_h - 8 - rh * hint_lines;
     wrap_text(a, a->font_ide, hint,
@@ -10148,7 +10180,7 @@ static char* tpl_expand(const char* src, size_t src_len, const char* title)
 static void tpl_open(App* a)
 {
     if (templates_collect(a) == 0) {
-        /* No templates → fall back to the plain new-file behavior. */
+        /* No templates â†’ fall back to the plain new-file behavior. */
         if (!confirm_discard(a)) return;
         free(a->note_path);
         a->note_path = strdup("(unsaved)");
@@ -10281,7 +10313,7 @@ static void render_template_picker(App* a)
 #define KBIND_BOX_W   620
 #define KBIND_BOX_Y    60
 
-/* Forward decls — defined in the actions section. */
+/* Forward decls â€” defined in the actions section. */
 static int         ACTIONS_count(void);
 static const char* ACTIONS_name(int i);
 static const char* ACTIONS_category(int i);
@@ -10290,7 +10322,7 @@ static int         action_is_shadowed(const char* action);
 static const char* action_shadower   (const char* action);
 
 /* Find the keystr currently bound to `action`: prefer user override, else
- * the first DEFAULT_KEYS entry mapping any keystr → this action that
+ * the first DEFAULT_KEYS entry mapping any keystr â†’ this action that
  * hasn't been re-bound by the user. Returns empty string if unbound. */
 static const char* current_keystr_for(const char* action)
 {
@@ -10307,9 +10339,9 @@ static void keybind_open(App* a)
     a->keybind_capturing = false;
     a->keybind_scroll    = 0;
     /* Intentionally NOT clearing settings_active. If the user opened
-     * keybind via Settings → Keybindings, settings stays "live" but
+     * keybind via Settings â†’ Keybindings, settings stays "live" but
      * hidden (render_settings checks for sub-overlays); when they Esc
-     * out of keybind, settings is on screen again and Esc → settings_close
+     * out of keybind, settings is on screen again and Esc â†’ settings_close
      * fires the save/discard prompt that includes any keybind changes
      * made during this trip. */
 }
@@ -10322,7 +10354,7 @@ static void keybind_close(App* a)
 
 static int kbind_row_h(const App* a);
 
-/* How many wrapped lines the bottom hint takes — used by every box_h
+/* How many wrapped lines the bottom hint takes â€” used by every box_h
  * computation so the layout matches what render_keybind actually draws. */
 static int keybind_hint_lines(const App* a)
 {
@@ -10541,7 +10573,7 @@ static void render_keybind(App* a)
         if (row->y + row->h < visible_top || row->y > visible_bot) continue;
 
         if (row->action_idx < 0) {
-            /* Category header — small caps style label + thin underline. */
+            /* Category header â€” small caps style label + thin underline. */
             font_draw_line(a->font_ide,
                 row->header_text, strlen(row->header_text),
                 box_x + 16, row->y + font_ascent(a->font_ide) + 4,
@@ -10574,7 +10606,7 @@ static void render_keybind(App* a)
 
         /* Warning glyph in front of the label for shadowed rows. */
         if (shadowed) {
-            font_draw_line(a->font_ide, "\xe2\x9a\xa0", 3,    /* ⚠ */
+            font_draw_line(a->font_ide, "\xe2\x9a\xa0", 3,    /* âš  */
                            box_x + 12,
                            row->y + font_ascent(a->font_ide) + 2,
                            warn_c);
@@ -10607,8 +10639,8 @@ static void render_keybind(App* a)
     }
     SDL_RenderSetClipRect(a->renderer, NULL);
 
-    /* Scrollbar — interactive: 10px-wide track on the right edge,
-     * draggable thumb, ▲/▼ step buttons. Geom is shared with the event
+    /* Scrollbar â€” interactive: 10px-wide track on the right edge,
+     * draggable thumb, â–²/â–¼ step buttons. Geom is shared with the event
      * handlers via keybind_scrollbar_geom. */
     {
         SDL_Rect track, thumb;
@@ -10617,7 +10649,7 @@ static void render_keybind(App* a)
                                    a->sb_drag == SB_KEYBIND);
     }
 
-    /* Hint at the bottom — wrap_text so it folds onto a second row when
+    /* Hint at the bottom â€” wrap_text so it folds onto a second row when
      * the box is narrower than the full single-line string. The keybind
      * box already reserves the bottom slot via `+ rh + 12` in box_h,
      * good enough for one line; if the wrap produces 2 lines they sit
@@ -10678,7 +10710,7 @@ static void render_resize_badge(App* a)
     float alpha_f = remain > 250 ? 1.0f : (remain / 250.0f);
     Uint8 alpha   = (Uint8)(alpha_f * 255.0f);
 
-    /* (1) Outline of the new window bounds — drawn as four thin filled
+    /* (1) Outline of the new window bounds â€” drawn as four thin filled
      * strips so it stays sharp at any DPI without needing AA. */
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_link.r, a->fg_link.g, a->fg_link.b,
@@ -10726,7 +10758,7 @@ static void render_resize_badge(App* a)
 }
 
 /* Floating tooltip that follows the cursor when over a link in preview.
- * The text is filled in by the MOUSEMOTION handler — this just renders
+ * The text is filled in by the MOUSEMOTION handler â€” this just renders
  * the pill. Color signals state: muted for resolved links, red-ish for
  * broken wiki targets so the user sees the dead-end before clicking. */
 static void render_link_tooltip(App* a)
@@ -10798,7 +10830,7 @@ static void render_link_tooltip(App* a)
 }
 
 /* Event watch: fires synchronously when SDL pushes a window event. On
- * Windows this is the ONLY way to react during the modal resize drag —
+ * Windows this is the ONLY way to react during the modal resize drag â€”
  * the main loop is stuck inside DefWindowProc, but the WndProc still
  * calls into SDL which pushes events, and our watch sees them. */
 static int SDLCALL resize_event_watch(void* userdata, SDL_Event* e)
@@ -10845,7 +10877,7 @@ static void render_status(App* a)
         return;
     }
 
-    /* Build the left-side status string and draw it as plain muted text —
+    /* Build the left-side status string and draw it as plain muted text â€”
      * no badges, no chips. The accent on the mode prefix and word count is
      * what carries the visual weight. The Ln/Col indicator lives on the
      * right (rendered below) so it's visible in both modes. */
@@ -10893,7 +10925,7 @@ static void render_status(App* a)
     };
     int rx = a->win_w - 12;
 
-    /* Position indicator: Ln X / N · Col Y */
+    /* Position indicator: Ln X / N Â· Col Y */
     {
         size_t line, col;
         buffer_cursor_pos(&a->buf, &line, &col);
@@ -10908,7 +10940,7 @@ static void render_status(App* a)
     }
 
     /* Line-ending indicator (LF / CRLF). Reflects what the buffer
-     * currently holds — i.e. what would be on disk if saved with the
+     * currently holds â€” i.e. what would be on disk if saved with the
      * Preserve policy. Empty buffers default to LF. */
     {
         const char* eol = buf_detect_line_endings(&a->buf) == 2 ? "CRLF" : "LF";
@@ -10955,7 +10987,7 @@ static void keybind_open         (App* a);
 static void keybind_close        (App* a);
 
 /* Lerp `cur` toward `target` by an exponential rate (per-second). dt is the
- * frame time in seconds. Returns the new value. With rate ≈ 14 the half-life
+ * frame time in seconds. Returns the new value. With rate â‰ˆ 14 the half-life
  * is ~50ms which feels snappy without being snap. */
 static float anim_step(float cur, float target, float dt, float rate)
 {
@@ -10965,7 +10997,7 @@ static float anim_step(float cur, float target, float dt, float rate)
     return cur + (target - cur) * k;
 }
 
-/* Cubic ease-out: smooth out the tail end of a 0→1 progress value so motion
+/* Cubic ease-out: smooth out the tail end of a 0â†’1 progress value so motion
  * feels like it settles rather than just stopping. */
 static float ease_out_cubic(float t)
 {
@@ -11029,7 +11061,7 @@ static void app_animate(App* a)
             if (fabsf(a->ctx_menu_row_t[r] - t) > 0.005f) moving = true;
         }
     }
-    /* Recent-vaults submenu animation — same shape as the parent. */
+    /* Recent-vaults submenu animation â€” same shape as the parent. */
     {
         float target = a->ctx_submenu_active ? 1.0f : 0.0f;
         a->ctx_submenu_open_t =
@@ -11091,7 +11123,7 @@ static void app_render(App* a)
     render_link_tooltip(a);
     /* tinput modal first, then rename popup, confirm modal LAST. Order
      * matters when one is nested inside the other (e.g. Delete-confirm
-     * or Rename popup fired from inside the folder picker) — whichever
+     * or Rename popup fired from inside the folder picker) â€” whichever
      * renders later wins the click. */
     render_tinput_modal(a);
     render_rename_popup(a);
@@ -11380,7 +11412,7 @@ static const char* mem_search(const char* hay, size_t hay_n,
  * so we lift a short text snippet from doc.data and search the source
  * buffer for it.
  *
- * For repeated content (the snippet appears many times in the source —
+ * For repeated content (the snippet appears many times in the source â€”
  * common in long docs with boilerplate sections) the FIRST hit isn't
  * what we want; we estimate the expected source byte from how far down
  * the click was in the rendered doc and pick the match closest to that
@@ -11395,7 +11427,7 @@ static void preview_go_to_source(App* a)
     if (doc_off != (size_t)-1 && doc_off <= a->doc.len && a->buf.len > 0) {
         /* Find which MdLine the click landed in. doc.data is all rendered
          * lines concatenated with NO separators, so we can't just walk from
-         * doc_off forward — we'd cross into the next line and produce a
+         * doc_off forward â€” we'd cross into the next line and produce a
          * snippet that doesn't exist anywhere in the source. */
         const MdLine* hit_line = NULL;
         for (size_t i = 0; i < a->doc.line_count; ++i) {
@@ -11409,9 +11441,9 @@ static void preview_go_to_source(App* a)
 
         if (hit_line) {
             /* Use the LINE'S content as the search anchor (not from the
-             * click byte forward — clicks past end-of-text would otherwise
+             * click byte forward â€” clicks past end-of-text would otherwise
              * produce a zero-length snippet). Skip leading whitespace and
-             * stop at the first tab (table cell separator) — those don't
+             * stop at the first tab (table cell separator) â€” those don't
              * appear in markdown source. */
             size_t snip_start = hit_line->start;
             size_t snip_end   = hit_line->start + hit_line->len;
@@ -11447,7 +11479,7 @@ static void preview_go_to_source(App* a)
                     size_t hit_off = (size_t)(hit - a->buf.data);
                     if (hit_off >= est) {
                         /* First hit at or past `est`. The closest match is
-                         * either this one or the previous one — pick
+                         * either this one or the previous one â€” pick
                          * whichever is nearer in absolute distance. */
                         size_t d_this = hit_off - est;
                         size_t d_prev = prev
@@ -11624,7 +11656,7 @@ static void switcher_rebuild(App* a)
                                       a->switcher_cap * sizeof(int));
     }
     a->switcher_count = 0;
-    /* Empty query → show recents first (MRU order), then any other vault
+    /* Empty query â†’ show recents first (MRU order), then any other vault
      * file that isn't already in the recent list. Keeps the picker useful
      * the moment it opens, without forcing the user to type. */
     if (a->switcher_qlen == 0 && a->recent_count > 0) {
@@ -11985,7 +12017,7 @@ static void cmdp_invoke_index(App* a, int idx)
     if (idx < 0 || idx >= a->cmdp_count) return;
     int ei = a->cmdp_matches[idx];
     if (ei < 0 || ei >= a->cmdp_entry_count) return;
-    struct CmdEntry e = a->cmdp_entries[ei];      /* snapshot — close clears state */
+    struct CmdEntry e = a->cmdp_entries[ei];      /* snapshot â€” close clears state */
     cmdp_close(a);
     if (e.is_plugin) {
         if (lua_host_invoke_action(a->lua, e.name) != 0) {
@@ -12281,7 +12313,7 @@ static void plugins_action_reload(App* a)
 }
 
 /* Truncate `in` to fit `max_w` pixels, writing result to `out`. If the
- * full string doesn't fit, the START is replaced with "…" so the
+ * full string doesn't fit, the START is replaced with "â€¦" so the
  * file's basename (the useful part) stays visible. */
 static void path_fit_left(Font* f, const char* in, int max_w,
                           char* out, size_t cap)
@@ -12295,7 +12327,7 @@ static void path_fit_left(Font* f, const char* in, int max_w,
     int ell_w = font_measure(f, ell, strlen(ell));
     int budget = max_w - ell_w;
     if (budget < 0) budget = 0;
-    /* Walk from the END backward — keep as many trailing bytes as fit. */
+    /* Walk from the END backward â€” keep as many trailing bytes as fit. */
     size_t keep = 0;
     int    w    = 0;
     for (size_t i = n; i > 0; ) {
@@ -12325,7 +12357,7 @@ static void render_plugins(App* a)
 
     /* ----- Header row ----- */
     int header_baseline = box.y + 14 + font_ascent(a->font_ide);
-    /* Reload button — rightmost of the header. */
+    /* Reload button â€” rightmost of the header. */
     int btn_h = sz_y + 10;
     int btn_w = 110;
     int btn_x = box.x + box.w - btn_w - 16;
@@ -12344,7 +12376,7 @@ static void render_plugins(App* a)
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        tc);
     }
-    /* "X loaded" — sits just left of the button. */
+    /* "X loaded" â€” sits just left of the button. */
     char info[64];
     snprintf(info, sizeof info, "%d loaded", a->plugins_count);
     int iw = font_measure(a->font_ide, info, strlen(info));
@@ -12370,7 +12402,7 @@ static void render_plugins(App* a)
     int rh = plugins_row_h(a);
 
     if (a->plugins_count == 0) {
-        const char* empty = "no plugins loaded — drop a *.lua file in data/plugins/";
+        const char* empty = "no plugins loaded â€” drop a *.lua file in data/plugins/";
         font_draw_line(a->font_ide, empty, strlen(empty),
                        box.x + 20, y + font_ascent(a->font_ide),
                        a->fg_muted);
@@ -12513,7 +12545,7 @@ static void edit_cursor_screen_pos(const App* a, int* out_x, int* out_y)
                 }
                 y += lh;
             }
-            /* Defensive: didn't find — point at end of last row. */
+            /* Defensive: didn't find â€” point at end of last row. */
             if (out_x) *out_x = xL + MARGIN_X - scroll_x;
             if (out_y) *out_y = y;
             return;
@@ -12899,11 +12931,11 @@ typedef enum {
     SEARCH_HIT_CHIP_AA     = 3,
     SEARCH_HIT_CHIP_W      = 4,
     SEARCH_HIT_TOGGLE      = 5,
-    SEARCH_HIT_BTN_REPL    = 6,   /* Replace one — only in mode 2 */
+    SEARCH_HIT_BTN_REPL    = 6,   /* Replace one â€” only in mode 2 */
     SEARCH_HIT_BTN_REPL_ALL= 7,
 } SearchHit;
 
-/* Map an x offset (relative to the start of the text — i.e. 0 = right at
+/* Map an x offset (relative to the start of the text â€” i.e. 0 = right at
  * the first glyph) to a UTF-8-safe byte index in `s`. Used to drop the
  * search caret where the user clicked. */
 static size_t text_byte_at_x(Font* f, const char* s, size_t n, int x_in_text)
@@ -13052,7 +13084,7 @@ static void render_search_overlay(App* a)
     SDL_RenderFillRect(a->renderer, &bot);
 
     /* Chevron: toggles between find (1) and find+replace (2). The icon
-     * rotates from ▶ (collapsed, mode=1) to ▼ (expanded, mode=2). */
+     * rotates from â–¶ (collapsed, mode=1) to â–¼ (expanded, mode=2). */
     SDL_Rect tog = {0, 0, 0, 0};
     search_geometry(a, NULL, NULL, NULL, NULL, &tog, NULL, NULL);
     {
@@ -13088,7 +13120,7 @@ static void render_search_overlay(App* a)
     int input_w = (xR - 16) - input_x - chips_total;
     if (input_w < 200) input_w = 200;
 
-    /* Input pill — the search field. Outline + accent if regex error. */
+    /* Input pill â€” the search field. Outline + accent if regex error. */
     SDL_Rect input_rect = { input_x, input_y, input_w, input_h };
     bool find_focused = !a->search_focus_replace;
     SDL_SetRenderDrawColor(a->renderer,
@@ -13120,7 +13152,7 @@ static void render_search_overlay(App* a)
         font_draw_line(a->font_ide, ph, strlen(ph),
                        text_x, text_y, a->fg_muted);
     }
-    /* Caret in the find field — only when this field is focused, otherwise
+    /* Caret in the find field â€” only when this field is focused, otherwise
      * the user has no idea where their next keystroke will land. */
     if (!a->search_focus_replace) {
         size_t cur = a->search_qcursor;
@@ -13132,7 +13164,7 @@ static void render_search_overlay(App* a)
         SDL_RenderFillRect(a->renderer, &caret);
     }
 
-    /* Counter (or regex error) — right side INSIDE the pill. */
+    /* Counter (or regex error) â€” right side INSIDE the pill. */
     char info[96];
     if (a->search_regex && a->search_re_err[0])
         snprintf(info, sizeof info, "%s", a->search_re_err);
@@ -13198,7 +13230,7 @@ static void render_search_overlay(App* a)
         rb.a = a->search_focus_replace ? 200 : 100;
         SDL_SetRenderDrawColor(a->renderer, rb.r, rb.g, rb.b, rb.a);
         draw_rrect(a->renderer, ri, input_h / 2);
-        const char* lab = "→";
+        const char* lab = "â†’";
         font_draw_line(a->font_ide, lab, strlen(lab),
                        input_x + 12,
                        input_y2 + (input_h - sz_y) / 2
@@ -13231,7 +13263,7 @@ static void render_search_overlay(App* a)
         }
 
         /* Replace / Replace All buttons. Pill-shaped, accent-filled. No
-         * `draw_rrect` border — that path is Bresenham (not AA) and looks
+         * `draw_rrect` border â€” that path is Bresenham (not AA) and looks
          * jagged against the analytically AA'd fill. Hover/enabled state
          * is conveyed by alpha + accent tint instead of a stroke. */
         SDL_Rect br, bra;
@@ -13240,7 +13272,7 @@ static void render_search_overlay(App* a)
         for (int i = 0; i < 2; ++i) {
             const SDL_Rect r = (i == 0) ? br : bra;
             const char*    L = (i == 0) ? "Replace" : "Replace all";
-            /* Right button (Replace All) is the strong action — accent
+            /* Right button (Replace All) is the strong action â€” accent
              * fill. Left button (Replace one) is the soft action. */
             bool primary = (i == 1);
             SDL_Color fill_c;
@@ -13434,7 +13466,7 @@ static void action_toggle_wrap   (App* a) {
     a->cfg_edit_wrap = !a->cfg_edit_wrap;
     a->scroll_x = 0;
     /* Recompute scroll so the cursor stays visible after the wrap mode
-     * change — without this, toggling on a long line could leave the
+     * change â€” without this, toggling on a long line could leave the
      * caret off-screen and the user thinks nothing happened. */
     if (a->edit_mode) ensure_cursor_visible(a);
     settings_persist(a);
@@ -13603,7 +13635,7 @@ static void action_convert_eol(App* a)
     Buffer* b = &a->buf;
 
     /* Quick check: if the buffer already uses the target EOL exclusively,
-     * tell the user and bail — no point dirtying the file for a no-op. */
+     * tell the user and bail â€” no point dirtying the file for a no-op. */
     int target = (choice == 0) ? 1 : 2;     /* 1 = LF, 2 = CRLF */
     bool has_cr = false, has_bare_lf = false;
     for (size_t i = 0; i < b->len; ++i) {
@@ -13804,7 +13836,7 @@ static void html_chunk_cb(const char* chunk, unsigned int n, void* ud)
     fwrite(chunk, 1, n, f);
 }
 
-/* Render the current buffer to HTML next to the source: `note.md` →
+/* Render the current buffer to HTML next to the source: `note.md` â†’
  * `note.html`. Wraps the body in a minimal <html><body> shell so the
  * file opens cleanly in a browser. Notifies the user with the result. */
 static void action_export_html(App* a)
@@ -14041,7 +14073,7 @@ static const char* ACTIONS_category(int i)
 }
 
 /* True when every DEFAULT_KEYS keystr that maps to this action has been
- * re-bound by the user to a different action — leaving the action with no
+ * re-bound by the user to a different action â€” leaving the action with no
  * default fallback. Used to flag silently-shadowed actions in the overlay. */
 static int action_is_shadowed(const char* action)
 {
@@ -14072,7 +14104,7 @@ static const char* action_shadower(const char* action)
     return NULL;
 }
 
-/* "ctrl+shift+s" — modifier order is ctrl, shift, alt. Key name is from
+/* "ctrl+shift+s" â€” modifier order is ctrl, shift, alt. Key name is from
  * SDL_GetKeyName lowercased, spaces converted to underscores. */
 static void build_keystr(SDL_Keycode k, int mod, char* out, size_t outlen)
 {
@@ -14128,7 +14160,7 @@ static void app_event(App* a, const SDL_Event* e)
                 if (row >= 0) a->switcher_selected = row;
             }
             if (a->cmdp_active) {
-                /* Hover is its own state — never moves cmdp_selected on
+                /* Hover is its own state â€” never moves cmdp_selected on
                  * mouse motion, so the list doesn't auto-pan when you
                  * move the cursor. Keyboard (arrows) and wheel move scroll;
                  * click invokes the hovered row. */
@@ -14190,7 +14222,7 @@ static void app_event(App* a, const SDL_Event* e)
                     ? submenu_row_at(a, e->motion.x, e->motion.y)
                     : -1;
                 /* Don't change parent hover when the cursor is inside the
-                 * submenu — keeps the recent-vaults row highlighted while
+                 * submenu â€” keeps the recent-vaults row highlighted while
                  * the user picks an entry. */
                 if (sub_row < 0) a->ctx_menu_hover = parent_row;
                 a->ctx_submenu_hover = sub_row;
@@ -14448,7 +14480,7 @@ static void app_event(App* a, const SDL_Event* e)
                 break;
             }
 
-            /* Sidebar DnD: arm → active when motion exceeds threshold; once
+            /* Sidebar DnD: arm â†’ active when motion exceeds threshold; once
              * active, track cursor and update drop target. */
             if ((a->dnd_armed || a->dnd_active) &&
                 (e->motion.state & SDL_BUTTON_LMASK)) {
@@ -14501,7 +14533,7 @@ static void app_event(App* a, const SDL_Event* e)
             if (e->button.button == SDL_BUTTON_LEFT) {
                 /* DnD finalize: if we ended up dragging, do the move; if it
                  * was a click (armed but never crossed threshold), defer to
-                 * the loaded behavior — load the file. */
+                 * the loaded behavior â€” load the file. */
                 if (a->dnd_active) {
                     if (a->dnd_drop_target != -2) {
                         if (confirm_discard(a)) dnd_finish_move(a);
@@ -14542,15 +14574,15 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
             }
-            /* Quick switcher (Open dialog): click row → open it; click
-             * outside the box → dismiss. */
+            /* Quick switcher (Open dialog): click row â†’ open it; click
+             * outside the box â†’ dismiss. */
             if (a->switcher_active && e->button.button == SDL_BUTTON_LEFT) {
                 int row = switcher_row_at(a, e->button.x, e->button.y);
                 if (row >= 0) {
                     a->switcher_selected = row;
                     switcher_select(a);
                 } else {
-                    /* Outside the box → close. */
+                    /* Outside the box â†’ close. */
                     int box_w = 560;
                     int box_x = (a->win_w - box_w) / 2;
                     int box_y = 90;
@@ -14579,7 +14611,7 @@ static void app_event(App* a, const SDL_Event* e)
             }
             /* Command palette: scrollbar > row click > click-outside-to-close. */
             if (a->cmdp_active && e->button.button == SDL_BUTTON_LEFT) {
-                /* Scrollbar takes priority — arrows step, thumb starts a
+                /* Scrollbar takes priority â€” arrows step, thumb starts a
                  * drag, inner track jumps. */
                 SDL_Rect track, thumb;
                 cmdp_geom(a, NULL, NULL, &track, &thumb);
@@ -14788,7 +14820,7 @@ static void app_event(App* a, const SDL_Event* e)
                 if (hit == SEARCH_HIT_INPUT || hit == SEARCH_HIT_REPLACE) {
                     /* Focus the field, then drop the caret where the click
                      * landed. We re-fetch geometry to know where the text
-                     * begins (after the icon / "→" prefix). */
+                     * begins (after the icon / "â†’" prefix). */
                     SDL_Rect input, replace;
                     search_geometry(a, NULL, &input, &replace,
                                     NULL, NULL, NULL, NULL);
@@ -14798,7 +14830,7 @@ static void app_event(App* a, const SDL_Event* e)
                     int icon_sz = (input.h - 6);  /* matches render */
                     int text_x;
                     if (a->search_focus_replace) {
-                        const char* lab = "→";
+                        const char* lab = "â†’";
                         text_x = replace.x + 12
                                + font_measure(f, lab, strlen(lab)) + 8;
                     } else {
@@ -14816,7 +14848,7 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
                 if (!search_bar_contains(a, e->button.x, e->button.y)) {
-                    /* Clicked anywhere outside the bar — close so the
+                    /* Clicked anywhere outside the bar â€” close so the
                      * editor / preview gets focus back. */
                     search_close(a);
                     /* Fall through so this click also acts on the editor
@@ -14899,7 +14931,7 @@ static void app_event(App* a, const SDL_Event* e)
             }
             /* Settings overlay: click chevrons to adjust, click row to select,
              * click outside to close (auto-save). Skipped while a sub-overlay
-             * is layered on top — that overlay owns the click. */
+             * is layered on top â€” that overlay owns the click. */
             if (a->settings_active && !a->keybind_active && !a->picker_active &&
                 e->button.button == SDL_BUTTON_LEFT)
             {
@@ -14973,7 +15005,7 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
                 /* Document scrollbar: grab thumb to drag, click track to jump,
-                 * click ▲/▼ to step by one line. */
+                 * click â–²/â–¼ to step by one line. */
                 {
                     SDL_Rect track, thumb;
                     if (doc_scrollbar_geom(a, &track, &thumb) &&
@@ -15048,7 +15080,7 @@ static void app_event(App* a, const SDL_Event* e)
                     bump_blink(a);
                 } else if (!a->edit_mode &&
                            e->button.x >= doc_x_left(a)) {
-                    /* Frontmatter chip click → vault-search for that tag.
+                    /* Frontmatter chip click â†’ vault-search for that tag.
                      * Hit-tested first because chips sit above the doc text. */
                     int chip_clicked = 0;
                     for (int ci = 0; ci < a->fm_chip_count; ++ci) {
@@ -15083,7 +15115,7 @@ static void app_event(App* a, const SDL_Event* e)
                             e->button.y < h->rect.y ||
                             e->button.y >= h->rect.y + h->rect.h) continue;
                         if (h->kind == HIT_TASK) {
-                            /* Toggle the byte: ' ' ↔ 'x' (preserve 'X'). */
+                            /* Toggle the byte: ' ' â†” 'x' (preserve 'X'). */
                             size_t off = h->byte_start;
                             if (off < a->buf.len) {
                                 char* p = &a->buf.data[off];
@@ -15168,7 +15200,7 @@ static void app_event(App* a, const SDL_Event* e)
             SDL_GetMouseState(&mx, &my);
             /* Settings: wheel adjusts the selected row (or row under cursor).
              * Skipped while a sub-overlay (keybind / picker) is layered over
-             * settings — the wheel belongs to that overlay, not us. */
+             * settings â€” the wheel belongs to that overlay, not us. */
             if (a->settings_active && !a->keybind_active && !a->picker_active) {
                 int r = settings_hit_test(a, mx, my, NULL, NULL);
                 if (r < 0) r = a->settings_selected;
@@ -15241,7 +15273,7 @@ static void app_event(App* a, const SDL_Event* e)
                 if (a->tpl_scroll < 0) a->tpl_scroll = 0;
                 break;
             }
-            /* Color picker: wheel adjusts the focused channel by ±5 (or ±1
+            /* Color picker: wheel adjusts the focused channel by Â±5 (or Â±1
              * with Shift held), and snaps focus to the row under the
              * cursor first so the user can scroll on a different row
              * without first clicking it. */
@@ -15348,7 +15380,7 @@ static void app_event(App* a, const SDL_Event* e)
                     char  closer = pair_closer_for(c);
                     /* 1) Skip-over: typing `)` / `]` / `}` / `"` / `'` / `` ` ``
                      *    when that exact char is already to the right of the
-                     *    cursor — common case after auto-pair: type `(`, type
+                     *    cursor â€” common case after auto-pair: type `(`, type
                      *    body, type `)` to confirm. */
                     if (is_pair_closer_char(c) && next == c) {
                         a->buf.cursor++;
@@ -15357,7 +15389,7 @@ static void app_event(App* a, const SDL_Event* e)
                     }
                     /* 2) Auto-pair: typing an opener inserts the closer and
                      *    leaves the cursor between them. Skipped if the next
-                     *    char is alphanumeric (avoid breaking `foo(` → `foo()`
+                     *    char is alphanumeric (avoid breaking `foo(` â†’ `foo()`
                      *    when the user actually wants to call as `foo(arg`).
                      *    Symmetric pairs (`"`, `'`, `` ` ``) also skip if the
                      *    previous char is a word char (closing a quote
@@ -15367,7 +15399,7 @@ static void app_event(App* a, const SDL_Event* e)
                         char prev = (a->buf.cursor > 0)
                                     ? a->buf.data[a->buf.cursor - 1] : 0;
                         if (symmetric && is_word_char((unsigned char)prev)) {
-                            /* Likely closing/owning a word, e.g. `don't` —
+                            /* Likely closing/owning a word, e.g. `don't` â€”
                              * fall through to plain insert. */
                         } else {
                             char pair[2] = { c, closer };
@@ -15399,7 +15431,7 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 else if (a->wc_active) {
                     /* Cursor moved past the auto-paired `]]` boundary, or the
-                     * user typed something that broke the link — e.g. a `]`,
+                     * user typed something that broke the link â€” e.g. a `]`,
                      * a newline, or moved before the anchor. Otherwise just
                      * refresh the filter from buf[anchor..cursor]. */
                     if (a->buf.cursor < a->wc_anchor) wc_close(a);
@@ -15690,7 +15722,7 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 if (k == SDLK_BACKSPACE) {
                     /* If the cursor is right at the anchor, backspacing would
-                     * eat the second `[` — close the popover and let the
+                     * eat the second `[` â€” close the popover and let the
                      * normal backspace path run, which will also delete the
                      * auto-paired `]` (well, only the `[`; we leave that as
                      * existing buffer behavior). */
@@ -15707,7 +15739,7 @@ static void app_event(App* a, const SDL_Event* e)
                     }
                 }
                 /* Arrow keys other than Up/Down (Left/Right) and any other
-                 * navigation in edit mode → close popover, let key fall
+                 * navigation in edit mode â†’ close popover, let key fall
                  * through. */
                 if (k == SDLK_LEFT || k == SDLK_RIGHT ||
                     k == SDLK_HOME || k == SDLK_END   ||
@@ -15744,7 +15776,7 @@ static void app_event(App* a, const SDL_Event* e)
                     a->picker_channel = (a->picker_channel + 1) % 4;
                     break;
                 }
-                /* Adjust: +/- adjust by 5; Shift+ for ±1; PageUp/Down also ±25. */
+                /* Adjust: +/- adjust by 5; Shift+ for Â±1; PageUp/Down also Â±25. */
                 if (k == SDLK_PLUS  || k == SDLK_EQUALS ||
                     k == SDLK_KP_PLUS) {
                     picker_adjust(a, (mod & KMOD_SHIFT) ? 1 : 5);
@@ -15824,7 +15856,7 @@ static void app_event(App* a, const SDL_Event* e)
             }
 
             /* Settings overlay swallows nav keys while open. Skipped while
-             * a sub-overlay (keybind/picker) is layered — those have
+             * a sub-overlay (keybind/picker) is layered â€” those have
              * their own keypress handlers above this point. */
             if (a->settings_active && !a->keybind_active && !a->picker_active) {
                 if (k == SDLK_ESCAPE) { settings_close(a); break; }
@@ -15890,7 +15922,7 @@ static void app_event(App* a, const SDL_Event* e)
             }
 
             /* Esc dismisses any open overlay/menu, exits edit mode, or
-             * is a no-op in preview. Quitting the app is Ctrl+Q only —
+             * is a no-op in preview. Quitting the app is Ctrl+Q only â€”
              * Esc never closes the window. */
             if (k == SDLK_ESCAPE) {
                 if (a->ctx_menu_active)  { ctx_menu_close(a); break; }
@@ -16050,7 +16082,7 @@ static void app_event(App* a, const SDL_Event* e)
 
 int main(int argc, char** argv)
 {
-    /* Windows GUI-subsystem apps have no stderr — pipe it to a log file so
+    /* Windows GUI-subsystem apps have no stderr â€” pipe it to a log file so
      * fprintf(stderr,...) diagnostics survive. Unbuffered so each line hits
      * disk immediately even on a hard kill. */
     if (!freopen("downsee.log", "w", stderr)) { /* nowhere to report */ }
@@ -16073,3 +16105,4 @@ int main(int argc, char** argv)
     app_shutdown(&app);
     return 0;
 }
+
