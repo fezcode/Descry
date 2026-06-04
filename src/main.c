@@ -1315,6 +1315,56 @@ static bool confirm_discard(App* a)
         "You have unsaved changes. Discard them?", "Discard", "Cancel");
 }
 
+/* Close tab i. If it's the active tab and dirty, confirm first; if it's a
+ * non-active dirty tab, surface it and confirm. Activates a neighbor, or
+ * leaves an empty welcome buffer when the last tab closes. */
+static void close_tab(App* a, int i)
+{
+    if (i < 0 || i >= a->tabs.count) return;
+
+    if (i == a->tabs.active) {
+        if (!confirm_discard(a)) return;          /* checks live a->buf.dirty */
+    } else if (a->tabs.items[i].buf.dirty) {
+        /* Surface the dirty tab so the user decides on it explicitly. */
+        switch_to_tab(a, i);
+        if (!confirm_discard(a)) return;
+        i = a->tabs.active;
+    }
+
+    bool closed_active = (i == a->tabs.active);
+    int  next = tablist_remove(&a->tabs, i);      /* -1 if list now empty */
+
+    if (!closed_active) {
+        if (a->tabs.active > i) a->tabs.active--;  /* array shifted down */
+        return;
+    }
+
+    if (next < 0) {
+        /* No tabs left: reset to an empty welcome buffer. */
+        a->tabs.active = -1;
+        free(a->note_path);
+        a->note_path = strdup("(welcome)");
+        buffer_free(&a->buf);
+        buffer_init(&a->buf);
+        a->edit_mode = false;
+        a->viewing_image = false;
+        a->scroll_y = a->scroll_x = 0;
+        a->doc_height_px = a->doc_width_px = 0;
+        reparse_preview(a);
+        update_window_title(a);
+        a->vault.selected = -1;
+        return;
+    }
+
+    /* Activate the neighbor. The buffer in the live fields belonged to the
+     * just-removed tab and is now orphaned — free it before switch_to_tab
+     * loads the neighbor in. */
+    buffer_free(&a->buf);
+    buffer_init(&a->buf);
+    a->tabs.active = -1;                            /* force switch_to_tab */
+    switch_to_tab(a, next);
+}
+
 /* ---- Line-ending picker (Edit > Convert line endings…) ----------------- */
 
 static SDL_Rect eol_pick_box_rect(const App* a)
@@ -16255,6 +16305,10 @@ static void app_event(App* a, const SDL_Event* e)
             if (ctrl && k >= SDLK_1 && k <= SDLK_9) {
                 int want = (k == SDLK_9) ? a->tabs.count - 1 : (k - SDLK_1);
                 if (want >= 0 && want < a->tabs.count) switch_to_tab(a, want);
+                break;
+            }
+            if (ctrl && k == SDLK_w) {
+                if (a->tabs.active >= 0) close_tab(a, a->tabs.active);
                 break;
             }
 
