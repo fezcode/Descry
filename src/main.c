@@ -15042,17 +15042,24 @@ static void app_event(App* a, const SDL_Event* e)
             /* Edit-mode drag-extend. */
             if (a->mouse_selecting && a->edit_mode &&
                 (e->motion.state & SDL_BUTTON_LMASK)) {
+                int rp_save = a->render_pane;
+                if (a->split_preview) a->render_pane = PANE_LEFT;
                 size_t pos = edit_position_at(a, e->motion.x, e->motion.y);
+                a->render_pane = rp_save;
                 a->buf.cursor = pos;
                 if (a->buf.cursor > a->buf.len) a->buf.cursor = a->buf.len;
                 bump_blink(a);
             }
 
             /* Preview-mode drag-extend. */
-            if (a->preview_selecting && !a->edit_mode &&
+            if (a->preview_selecting &&
+                (!a->edit_mode || a->split_preview) &&
                 (e->motion.state & SDL_BUTTON_LMASK)) {
+                int rp_save = a->render_pane;
+                if (a->split_preview) a->render_pane = PANE_RIGHT;
                 a->preview_sel_end = preview_position_at(a,
                     e->motion.x, e->motion.y);
+                a->render_pane = rp_save;
             }
             break;
         }
@@ -15603,10 +15610,15 @@ static void app_event(App* a, const SDL_Event* e)
                         a->dnd_drop_target = -1;
                     }
                 } else if (a->edit_mode &&
-                           e->button.x >= doc_x_left(a)) {
+                           e->button.x >= doc_x_left(a) &&
+                           !(a->split_preview &&
+                             e->button.x > split_divider_x(a))) {
                     /* Click in the editor closes any active wiki-complete. */
                     if (a->wc_active) wc_close(a);
+                    int rp_save = a->render_pane;
+                    if (a->split_preview) a->render_pane = PANE_LEFT;
                     size_t pos = edit_position_at(a, e->button.x, e->button.y);
+                    a->render_pane = rp_save;
                     bool ctrlmod = (SDL_GetModState() & KMOD_CTRL) != 0;
                     /* Ctrl+click on a wiki-link follows it; cursor doesn't
                      * move and the click doesn't start a drag-select. */
@@ -15644,8 +15656,10 @@ static void app_event(App* a, const SDL_Event* e)
                         a->mouse_selecting = true;
                     }
                     bump_blink(a);
-                } else if (!a->edit_mode &&
-                           e->button.x >= doc_x_left(a)) {
+                } else if (e->button.x >= doc_x_left(a) &&
+                           (!a->edit_mode ||
+                            (a->split_preview &&
+                             e->button.x > split_divider_x(a)))) {
                     /* Frontmatter chip click → vault-search for that tag.
                      * Hit-tested first because chips sit above the doc text. */
                     int chip_clicked = 0;
@@ -15751,8 +15765,11 @@ static void app_event(App* a, const SDL_Event* e)
                     out_of_hits:
                     if (!handled) {
                         /* Start a preview-mode drag-select. */
+                        int rp_save = a->render_pane;
+                        if (a->split_preview) a->render_pane = PANE_RIGHT;
                         size_t pos = preview_position_at(a, e->button.x,
                                                         e->button.y);
+                        a->render_pane = rp_save;
                         a->preview_sel_start = (long)pos;
                         a->preview_sel_end   = pos;
                         a->preview_selecting = true;
@@ -15872,6 +15889,12 @@ static void app_event(App* a, const SDL_Event* e)
                     if (dx != 0 && (e->wheel.x != 0 ||
                         (SDL_GetModState() & KMOD_SHIFT))) break;
                 }
+            }
+            if (a->split_preview && !a->viewing_image &&
+                mx > split_divider_x(a)) {
+                a->preview_scroll_y -= e->wheel.y * line_px * 3;
+                if (a->preview_scroll_y < 0) a->preview_scroll_y = 0;
+                break;
             }
             a->scroll_y -= e->wheel.y * line_px * 3;
             clamp_scroll(a);
