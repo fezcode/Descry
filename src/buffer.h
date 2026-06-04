@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_BUFFER_H
-#define DOWNSEE_BUFFER_H
+#ifndef DESCRY_BUFFER_H
+#define DESCRY_BUFFER_H
 
 #include <stdbool.h>
 #include <stddef.h>

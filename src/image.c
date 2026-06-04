@@ -348,10 +348,10 @@ static void ensure_cache_dir(char* out, size_t cap)
 {
     const char* t = temp_dir();
 #if defined(_WIN32)
-    snprintf(out, cap, "%s\\downsee_cache", t);
+    snprintf(out, cap, "%s\\descry_cache", t);
     CreateDirectoryA(out, NULL);
 #else
-    snprintf(out, cap, "%s/downsee_cache", t);
+    snprintf(out, cap, "%s/descry_cache", t);
     mkdir(out, 0755);
 #endif
 }
@@ -422,7 +422,7 @@ static int file_exists(const char* p)
 static int download_url(const char* url, const char* out_path)
 {
 #if defined(_WIN32)
-    HINTERNET hi = InternetOpenA("Downsee/1.0", INTERNET_OPEN_TYPE_PRECONFIG,
+    HINTERNET hi = InternetOpenA("Descry/1.0", INTERNET_OPEN_TYPE_PRECONFIG,
                                  NULL, NULL, 0);
     if (!hi) return -1;
 
@@ -522,7 +522,7 @@ ImageCache* image_cache_create(SDL_Renderer* r)
     c->lock       = SDL_CreateMutex();
     c->cond       = SDL_CreateCond();
     c->wake_event = SDL_RegisterEvents(1);   /* (Uint32)-1 if unavailable */
-    c->worker     = SDL_CreateThread(worker_main, "downsee-img", c);
+    c->worker     = SDL_CreateThread(worker_main, "descry-img", c);
     return c;
 }
 

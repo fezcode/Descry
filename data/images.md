@@ -1,6 +1,6 @@
-# Images in Downsee
+# Images in Descry
 
-Downsee renders inline images in preview mode for PNG, JPG/JPEG, GIF,
+Descry renders inline images in preview mode for PNG, JPG/JPEG, GIF,
 WEBP and BMP — both as embeds inside a note and as standalone files
 you click in the sidebar. This note demonstrates the syntax.
 
@@ -38,7 +38,7 @@ local files.
 
 `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp` files in the vault
 appear directly in the left sidebar alongside `.md` notes. Click one
-to open it in preview mode — Downsee synthesizes a tiny markdown
+to open it in preview mode — Descry synthesizes a tiny markdown
 buffer `# filename` + `![](filename)` and renders the image. Save and
 edit are blocked in this mode so a stray keystroke can't corrupt the
 binary.

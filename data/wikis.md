@@ -1,6 +1,6 @@
 # Wiki-link visual test
 
-Downsee now recognizes Obsidian-style **wiki links**. The bytes
+Descry now recognizes Obsidian-style **wiki links**. The bytes
 between (and including) the brackets get the link color so they're
 visually distinct from regular text.
 

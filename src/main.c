@@ -36,7 +36,7 @@
 /* Absolute path of the single log file, resolved per-OS at startup. Shown to
  * the user in Settings ("Log file"). Defaults to a cwd-relative name as a
  * last resort if the per-user data dir can't be resolved. */
-static char g_log_path[1024] = "downsee.log";
+static char g_log_path[1024] = "descry.log";
 
 /* Create `path` and any missing parent directories. Slashes may be '/' or
  * '\\'. Best-effort: silently ignores already-exists. */
@@ -60,11 +60,11 @@ static void mkdir_p(const char* path)
     }
 }
 
-/* Resolve the per-OS, per-user location for downsee.log into g_log_path and
+/* Resolve the per-OS, per-user location for descry.log into g_log_path and
  * make sure its directory exists:
- *   Windows : %LOCALAPPDATA%\Downsee\downsee.log
- *   macOS   : ~/Library/Logs/Downsee/downsee.log
- *   Linux   : $XDG_STATE_HOME/downsee/downsee.log (else ~/.local/state/...)
+ *   Windows : %LOCALAPPDATA%\Descry\descry.log
+ *   macOS   : ~/Library/Logs/Descry/descry.log
+ *   Linux   : $XDG_STATE_HOME/descry/descry.log (else ~/.local/state/...)
  * Falls back to the cwd-relative default if the environment is bare. */
 static void resolve_log_path(void)
 {
@@ -73,27 +73,27 @@ static void resolve_log_path(void)
     const char* base = getenv("LOCALAPPDATA");
     if (!base || !base[0]) base = getenv("APPDATA");
     if (!base || !base[0]) base = getenv("TEMP");
-    if (base && base[0]) snprintf(dir, sizeof dir, "%s\\Downsee", base);
+    if (base && base[0]) snprintf(dir, sizeof dir, "%s\\Descry", base);
 #elif defined(__APPLE__)
     const char* home = getenv("HOME");
-    if (home && home[0]) snprintf(dir, sizeof dir, "%s/Library/Logs/Downsee", home);
+    if (home && home[0]) snprintf(dir, sizeof dir, "%s/Library/Logs/Descry", home);
 #else
     const char* xdg  = getenv("XDG_STATE_HOME");
     const char* home = getenv("HOME");
-    if (xdg && xdg[0])        snprintf(dir, sizeof dir, "%s/downsee", xdg);
-    else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.local/state/downsee", home);
+    if (xdg && xdg[0])        snprintf(dir, sizeof dir, "%s/descry", xdg);
+    else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.local/state/descry", home);
 #endif
     if (dir[0]) {
         mkdir_p(dir);
 #if defined(_WIN32)
-        snprintf(g_log_path, sizeof g_log_path, "%s\\downsee.log", dir);
+        snprintf(g_log_path, sizeof g_log_path, "%s\\descry.log", dir);
 #else
-        snprintf(g_log_path, sizeof g_log_path, "%s/downsee.log", dir);
+        snprintf(g_log_path, sizeof g_log_path, "%s/descry.log", dir);
 #endif
     }
 }
 
-#define DOWNSEE_VERSION "0.74.0"
+#define DESCRY_VERSION "0.74.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -155,7 +155,7 @@ static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
  * Other messages chain to the original WndProc that SDL installed. */
 static WNDPROC g_orig_wndproc    = NULL;
 static App*    g_app_for_wndproc = NULL;
-static LRESULT CALLBACK downsee_wndproc(HWND hwnd, UINT msg,
+static LRESULT CALLBACK descry_wndproc(HWND hwnd, UINT msg,
                                         WPARAM wp, LPARAM lp);
 #endif
 
@@ -402,7 +402,7 @@ static void font_choices_init(void)
                  sizeof g_font_choices[0].path, "%s", known[i].path);
         g_font_choice_count++;
     }
-    fprintf(stderr, "downsee: %d font choices found\n", g_font_choice_count);
+    fprintf(stderr, "descry: %d font choices found\n", g_font_choice_count);
 }
 
 /* Find an index in g_font_choices matching `path`, or -1 if not present. */
@@ -645,12 +645,12 @@ static void update_window_title(App* a)
     /* Prefer frontmatter `title:` when present so the window title matches
      * what the user actually called the note. Falls back to filename. */
     const char* shown = (a->fm_present && a->fm_title[0]) ? a->fm_title : name;
-    snprintf(title, sizeof title, "Downsee " DOWNSEE_VERSION " \xe2\x80\x94 %s%s",
+    snprintf(title, sizeof title, "Descry " DESCRY_VERSION " \xe2\x80\x94 %s%s",
              shown, a->buf.dirty ? " *" : "");
     SDL_SetWindowTitle(a->window, title);
 }
 
-/* Called by the Lua host when a plugin invokes downsee.notify(s). Stores
+/* Called by the Lua host when a plugin invokes descry.notify(s). Stores
  * the message and an expiry time; the status bar shows it until expiry. */
 static void on_lua_notify(void* userdata, const char* msg)
 {
@@ -981,7 +981,7 @@ static int load_note(App* a, const char* path)
         recent_push(a, path);
         recent_save(a);
         update_window_title(a);
-        fprintf(stderr, "downsee: opened image %s\n", path);
+        fprintf(stderr, "descry: opened image %s\n", path);
         return 0;
     }
     a->viewing_image = false;
@@ -1009,7 +1009,7 @@ static int load_note(App* a, const char* path)
     recent_save(a);
 
     update_window_title(a);
-    fprintf(stderr, "downsee: opened %s (%zu lines)\n", path, a->doc.line_count);
+    fprintf(stderr, "descry: opened %s (%zu lines)\n", path, a->doc.line_count);
     return 0;
 }
 
@@ -2762,7 +2762,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 break;
                             }
                         }
-                        /* "New Folder" button — creates "Downsee Vault" by
+                        /* "New Folder" button — creates "Descry Vault" by
                          * default (or the typed name if the path bar holds
                          * a leaf name). On success, navigates into the new
                          * folder AND drops into rename mode so the user
@@ -2780,7 +2780,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                             /* Use typed text only if it's a plain leaf
                              * name (no slashes) AND not the same as the
                              * current path. Otherwise default. */
-                            const char* nm = "Downsee Vault";
+                            const char* nm = "Descry Vault";
                             bool typed_ok = (a->tinput_len > 0);
                             for (int i = 0; i < a->tinput_len && typed_ok; ++i) {
                                 if (a->tinput_text[i] == '/' ||
@@ -3040,7 +3040,7 @@ static int app_init(App* a, const char* note_path_arg)
 #else
             (void)chdir(base);
 #endif
-            fprintf(stderr, "downsee: cwd pinned to %s\n", base);
+            fprintf(stderr, "descry: cwd pinned to %s\n", base);
             SDL_free(base);
         }
     }
@@ -3061,7 +3061,7 @@ static int app_init(App* a, const char* note_path_arg)
         if (f) {
             fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
             fprintf(f,
-                "-- Downsee settings (auto-generated on first run).\n"
+                "-- Descry settings (auto-generated on first run).\n"
                 "-- Edit by hand or via Settings (Ctrl+,) — values written\n"
                 "-- by the settings page will overwrite this file.\n"
                 "return {\n"
@@ -3081,7 +3081,7 @@ static int app_init(App* a, const char* note_path_arg)
                 "    theme        = \"Editorial Dark\",\n"
                 "}\n");
             fclose(f);
-            fprintf(stderr, "downsee: first run -- wrote settings.lua\n");
+            fprintf(stderr, "descry: first run -- wrote settings.lua\n");
             (void)lua_host_load_config(a->lua, "settings.lua");
         }
     }
@@ -3092,7 +3092,7 @@ static int app_init(App* a, const char* note_path_arg)
         const char* pdir = lua_host_cfg_string(a->lua, "plugin_path",
                                                "plugins");
         int n = lua_host_load_plugins(a->lua, pdir);
-        if (n > 0) fprintf(stderr, "downsee: loaded %d plugin(s) from %s\n",
+        if (n > 0) fprintf(stderr, "descry: loaded %d plugin(s) from %s\n",
                            n, pdir);
     }
 
@@ -3199,7 +3199,7 @@ static int app_init(App* a, const char* note_path_arg)
 
     /* Custom decorations: borderless + resizable, with our own title bar
      * (drag, min/max/close, aero snap via SDL_HitTest below). */
-    a->window = SDL_CreateWindow("Downsee " DOWNSEE_VERSION,
+    a->window = SDL_CreateWindow("Descry " DESCRY_VERSION,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
         SDL_WINDOW_BORDERLESS);
@@ -3226,7 +3226,7 @@ static int app_init(App* a, const char* note_path_arg)
             SetWindowLongPtr(hwnd, GWL_STYLE, style);
             g_app_for_wndproc = a;
             g_orig_wndproc = (WNDPROC)SetWindowLongPtr(
-                hwnd, GWLP_WNDPROC, (LONG_PTR)downsee_wndproc);
+                hwnd, GWLP_WNDPROC, (LONG_PTR)descry_wndproc);
             SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
                 SWP_NOZORDER     | SWP_NOACTIVATE);
@@ -3246,7 +3246,7 @@ static int app_init(App* a, const char* note_path_arg)
     /* Sync win_w/win_h with the window's real size — borderless+highdpi can
      * give us something different than the requested size at create time. */
     SDL_GetWindowSize(a->window, &a->win_w, &a->win_h);
-    fprintf(stderr, "downsee: window size %dx%d\n", a->win_w, a->win_h);
+    fprintf(stderr, "descry: window size %dx%d\n", a->win_w, a->win_h);
 
     if (app_reload_fonts(a) != 0) return -1;
     if (icons_init(a->renderer) != 0)
@@ -3274,7 +3274,7 @@ static int app_init(App* a, const char* note_path_arg)
         if (!path_dir_exists(vault_path)) {
             if (is_abs) {
                 fprintf(stderr,
-                    "downsee: saved vault '%s' is gone\n", vault_path);
+                    "descry: saved vault '%s' is gone\n", vault_path);
                 vault_missing = true;
             } else {
                 /* Relative path — try resolving against the exe's base
@@ -3289,7 +3289,7 @@ static int app_init(App* a, const char* note_path_arg)
                     if (path_dir_exists(resolved)) {
                         n = vault_scan(&a->vault, resolved);
                         fprintf(stderr,
-                            "downsee: vault '%s' (%d items, base-relative)\n",
+                            "descry: vault '%s' (%d items, base-relative)\n",
                             resolved, n);
                         resolved_ok = true;
                     }
@@ -3297,13 +3297,13 @@ static int app_init(App* a, const char* note_path_arg)
                 }
                 if (!resolved_ok) {
                     fprintf(stderr,
-                        "downsee: relative vault '%s' not found\n", vault_path);
+                        "descry: relative vault '%s' not found\n", vault_path);
                     vault_missing = true;
                 }
             }
         } else {
             n = vault_scan(&a->vault, vault_path);
-            fprintf(stderr, "downsee: vault '%s' (%d items)\n", vault_path, n);
+            fprintf(stderr, "descry: vault '%s' (%d items)\n", vault_path, n);
         }
     }
 
@@ -3320,7 +3320,7 @@ static int app_init(App* a, const char* note_path_arg)
         if (vault_missing) settings_persist(a);
         a->running = true;     /* confirm_action's pump checks this */
         const char* title = vault_missing
-            ? "Vault folder not found" : "Welcome to Downsee";
+            ? "Vault folder not found" : "Welcome to Descry";
         char msg[400];
         if (vault_missing) {
             /* Truncate from the LEFT with "..." so absurdly mangled
@@ -3352,7 +3352,7 @@ static int app_init(App* a, const char* note_path_arg)
                               dir, sizeof dir))
             {
                 n = vault_scan(&a->vault, dir);
-                fprintf(stderr, "downsee: vault chosen '%s' (%d items)\n",
+                fprintf(stderr, "descry: vault chosen '%s' (%d items)\n",
                         dir, n);
                 recent_dirs_push(a, dir);
                 settings_persist(a);
@@ -3383,7 +3383,7 @@ static int app_init(App* a, const char* note_path_arg)
             ok = true;
         if (!ok) {
             const char* welcome =
-                "# Welcome to Downsee\n\n"
+                "# Welcome to Descry\n\n"
                 "No note loaded. Try one of these:\n\n"
                 "- Press **Ctrl+O** to open a file\n"
                 "- Click an item in the sidebar (Ctrl+B to toggle)\n"
@@ -3419,7 +3419,7 @@ static int app_init(App* a, const char* note_path_arg)
      * directives (currently `@sidebar_w=240`); other lines are paths. */
     {
         char st[1024];
-        snprintf(st, sizeof st, "%s/.downsee.state", vault_path);
+        snprintf(st, sizeof st, "%s/.descry.state", vault_path);
         FILE* fp = fopen(st, "rb");
         if (fp) {
             char line[1024];
@@ -3455,7 +3455,7 @@ static void save_collapse_state(App* a)
 {
     if (!a->vault.dir) return;
     char st[1024];
-    snprintf(st, sizeof st, "%s/.downsee.state", a->vault.dir);
+    snprintf(st, sizeof st, "%s/.descry.state", a->vault.dir);
     FILE* fp = fopen(st, "wb");
     if (!fp) return;
     fprintf(fp, "@sidebar_w=%d\n", a->sidebar_w);
@@ -5259,7 +5259,7 @@ static void render_titlebar(App* a, int TBH)
     {
         const char* title = (a->fm_present && a->fm_title[0])
                             ? a->fm_title
-                            : (a->note_path ? vault_basename(a->note_path) : "Downsee");
+                            : (a->note_path ? vault_basename(a->note_path) : "Descry");
         int tw = font_measure(a->font_ide, title, strlen(title));
         int min_x = x + 16;
         int max_x = right - 3 * TB_BTN_W - 16;
@@ -5304,7 +5304,7 @@ static void render_titlebar(App* a, int TBH)
 }
 
 #if defined(_WIN32)
-static LRESULT CALLBACK downsee_wndproc(HWND hwnd, UINT msg,
+static LRESULT CALLBACK descry_wndproc(HWND hwnd, UINT msg,
                                         WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -5751,6 +5751,33 @@ static bool sidebar_ancestor_continues(const App* a, int row, int anc_depth)
 #define SIDEBAR_INDENT_STEP 16
 #define SIDEBAR_ICON_SZ     16
 
+/* Draw a UTF-8 label left-aligned at (x, baseline) but never wider than
+ * max_w pixels. If it overflows, truncate on a codepoint boundary and append
+ * an ellipsis — keeps sidebar names from spilling past the divider into the
+ * document pane. Names are short, so growing the prefix one codepoint at a
+ * time is cheap and stays trivially UTF-8 safe. */
+static void font_draw_elided(Font* f, const char* text, size_t len,
+                             int x, int baseline, int max_w, SDL_Color c)
+{
+    if (max_w <= 0 || len == 0) return;
+    if (font_measure(f, text, len) <= max_w) {
+        font_draw_line(f, text, len, x, baseline, c);
+        return;
+    }
+    const char* ell   = "\xe2\x80\xa6";          /* … */
+    int         avail = max_w - font_measure(f, ell, 3);
+    size_t cut = 0;
+    while (cut < len) {
+        size_t nxt = cut + 1;
+        while (nxt < len && ((unsigned char)text[nxt] & 0xC0) == 0x80) nxt++;
+        if (avail <= 0 || font_measure(f, text, nxt) > avail) break;
+        cut = nxt;
+    }
+    if (cut) font_draw_line(f, text, cut, x, baseline, c);
+    font_draw_line(f, ell, 3, x + (cut ? font_measure(f, text, cut) : 0),
+                   baseline, c);
+}
+
 static void render_sidebar(App* a)
 {
     if (!a->sidebar_open) return;
@@ -5780,9 +5807,10 @@ static void render_sidebar(App* a)
     int hdr_icon_y  = header_y + 1;
     icon_draw(a->renderer, ICON_FOLDER_OPEN,
               SIDEBAR_PAD_X, hdr_icon_y, hdr_icon_sz, a->fg);
-    font_draw_line(a->font_ide, title, strlen(title),
-                   SIDEBAR_PAD_X + hdr_icon_sz + 8,
-                   header_y + font_ascent(a->font_ide) + 2, a->fg);
+    int hdr_text_x = SIDEBAR_PAD_X + hdr_icon_sz + 8;
+    font_draw_elided(a->font_ide, title, strlen(title),
+                     hdr_text_x, header_y + font_ascent(a->font_ide) + 2,
+                     a->sidebar_w - SIDEBAR_PAD_X - hdr_text_x, a->fg);
     /* Hairline separator under the header so the items section reads as
      * its own region. */
     SDL_Rect hdr_sep = { SIDEBAR_PAD_X, header_y + sidebar_item_height(a) - 4,
@@ -5902,24 +5930,33 @@ static void render_sidebar(App* a)
                       x_icon, icon_y, SIDEBAR_ICON_SZ, icon_c);
         }
 
-        SDL_Color text_c = is_sel ? a->fg
-                         : it->is_dir ? a->fg : a->fg;
-        font_draw_line(a->font_ide, it->name, strlen(it->name),
-                       x_text, baseline, text_c);
-
-        /* Right-edge widget: dirty marker / folder count. */
+        /* Right-edge widget (folder count / dirty dot): measure it first so
+         * the label can elide *before* it instead of painting underneath. */
+        char        cnt[16];
+        int         cnt_len = 0;
+        const char* dot     = NULL;
+        int         right_w = 0;
         if (it->is_dir) {
             int count = sidebar_folder_file_count(a, vi);
             if (count > 0) {
-                char cnt[16];
-                snprintf(cnt, sizeof cnt, "%d", count);
-                int cw = font_measure(a->font_ide, cnt, strlen(cnt));
-                font_draw_line(a->font_ide, cnt, strlen(cnt),
-                               a->sidebar_w - SIDEBAR_PAD_X - cw,
-                               baseline, a->fg_muted);
+                cnt_len = snprintf(cnt, sizeof cnt, "%d", count);
+                right_w = font_measure(a->font_ide, cnt, cnt_len) + 8;
             }
         } else if (is_sel && a->buf.dirty) {
-            const char* dot = "\xe2\x80\xa2";    /* • */
+            dot     = "\xe2\x80\xa2";            /* • */
+            right_w = font_measure(a->font_ide, dot, 3) + 8;
+        }
+
+        int name_max = (a->sidebar_w - SIDEBAR_PAD_X - right_w) - x_text;
+        font_draw_elided(a->font_ide, it->name, strlen(it->name),
+                         x_text, baseline, name_max, a->fg);
+
+        if (cnt_len) {
+            int cw = font_measure(a->font_ide, cnt, cnt_len);
+            font_draw_line(a->font_ide, cnt, cnt_len,
+                           a->sidebar_w - SIDEBAR_PAD_X - cw,
+                           baseline, a->fg_muted);
+        } else if (dot) {
             int dw = font_measure(a->font_ide, dot, 3);
             font_draw_line(a->font_ide, dot, 3,
                            a->sidebar_w - SIDEBAR_PAD_X - dw,
@@ -6529,7 +6566,7 @@ static void action_about         (App* a);
 static const MenuItem MENU_HELP[] = {
     { "Keybindings\xe2\x80\xa6","F1", action_keybindings },
     { "Color Picker\xe2\x80\xa6",NULL,action_colors },
-    { "About Downsee\xe2\x80\xa6",NULL, action_about },
+    { "About Descry\xe2\x80\xa6",NULL, action_about },
     { NULL, NULL, NULL }
 };
 static const MenuItem* MENU_TABLES[4] = {
@@ -8154,7 +8191,7 @@ static int settings_persist(App* a)
     if (!f) return -1;
     fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
     fprintf(f,
-        "-- Downsee settings -- auto-generated.\n"
+        "-- Descry settings -- auto-generated.\n"
         "-- Edit values to override defaults. Re-saving from the\n"
         "-- settings page (Ctrl+,) overwrites this file with the\n"
         "-- known keys; manual additions outside that set survive\n"
@@ -9156,6 +9193,22 @@ static void outline_panel_activate(App* a, int idx)
     if (!a->edit_mode) enter_edit_mode(a);
     ensure_cursor_visible(a);
     bump_blink(a);
+}
+
+/* True when any floating overlay / dropdown that shares the main event loop
+ * is open. (The blocking modal dialogs -- confirm, eol-pick, tinput -- spin
+ * their own poll loops and never reach the main handler, so they're not
+ * listed here.) Used to stop the pinned outline panel from swallowing a
+ * click that belongs to an open popup: clicking the panel should fall
+ * through to that popup's own click-outside-to-close handler instead of
+ * silently navigating the cursor behind it. */
+static bool overlay_floating_active(const App* a)
+{
+    return a->switcher_active || a->cmdp_active     || a->plugins_active ||
+           a->backlinks_active || a->tags_active    || a->vsearch_active ||
+           a->outline_active   || a->tpl_active     || a->picker_active  ||
+           a->keybind_active   || a->settings_active ||
+           a->ctx_menu_active  || a->menu_open >= 0;
 }
 
 static void render_outline_panel(App* a)
@@ -13625,7 +13678,7 @@ static void action_edit_settings(App* a)
     load_note(a, "settings.lua");
 }
 static void action_about     (App* a) {
-    info_modal(a, "About Downsee " DOWNSEE_VERSION,
+    info_modal(a, "About Descry " DESCRY_VERSION,
         "A keyboard-driven markdown editor.\n"
         "Made by fezcode <samil.bulbul@gmail.com>.\n\n"
         "Stack: C11 + SDL2 + FreeType / HarfBuzz fonts,\n"
@@ -14371,7 +14424,7 @@ static void app_event(App* a, const SDL_Event* e)
             if (a->outline_active)
                 a->outline_hover =
                     outline_hit_test(a, e->motion.x, e->motion.y);
-            else if (a->outline_pinned)
+            else if (a->outline_pinned && !overlay_floating_active(a))
                 a->outline_hover =
                     outline_panel_hit_test(a, e->motion.x, e->motion.y);
             else
@@ -14667,8 +14720,12 @@ static void app_event(App* a, const SDL_Event* e)
             break;
 
         case SDL_MOUSEBUTTONDOWN:
-            /* Pinned outline panel: click a row to jump cursor there. */
-            if (a->outline_pinned && e->button.button == SDL_BUTTON_LEFT) {
+            /* Pinned outline panel: click a row to jump cursor there.
+             * Skipped while a floating overlay is open so the click falls
+             * through to that overlay's handler (e.g. closes the command
+             * palette) instead of navigating behind the popup. */
+            if (a->outline_pinned && !overlay_floating_active(a) &&
+                e->button.button == SDL_BUTTON_LEFT) {
                 int row = outline_panel_hit_test(a, e->button.x, e->button.y);
                 if (row >= 0) {
                     outline_panel_activate(a, row);
@@ -16199,7 +16256,7 @@ int main(int argc, char** argv)
     resolve_log_path();
     if (!freopen(g_log_path, "w", stderr)) { /* nowhere to report */ }
     setvbuf(stderr, NULL, _IONBF, 0);
-    fprintf(stderr, "downsee: log opened at %s\n", g_log_path);
+    fprintf(stderr, "descry: log opened at %s\n", g_log_path);
 
     App app = {0};
     const char* note = (argc > 1) ? argv[1] : NULL;

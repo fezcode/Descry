@@ -1,10 +1,10 @@
-"""Generate downsee.ico (and per-size PNGs) from a procedural design.
+"""Generate descry.ico (and per-size PNGs) from a procedural design.
 
 Design: gradient amber->teal rounded-square backdrop, geometric "D"
 in cream with a small relocated dot accent inside the bowl.
 
 Run from repo root:  python resources/make_icon.py
-Outputs:             resources/downsee.ico  +  resources/icon_<N>.png
+Outputs:             resources/descry.ico  +  resources/icon_<N>.png
 """
 
 from __future__ import annotations
@@ -179,7 +179,7 @@ def main() -> None:
         print(f"  wrote {out_png}")
 
     # Multi-size .ico — Pillow takes a base image plus the size list.
-    ico_path = os.path.join(OUT_DIR, "downsee.ico")
+    ico_path = os.path.join(OUT_DIR, "descry.ico")
     base = pngs[-1]  # 256x256
     base.save(
         ico_path,

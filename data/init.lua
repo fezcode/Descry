@@ -1,4 +1,4 @@
--- Downsee config. This file returns a single table; values not present
+-- Descry config. This file returns a single table; values not present
 -- here fall back to the defaults compiled into the binary.
 
 return {

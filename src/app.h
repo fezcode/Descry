@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_APP_H
-#define DOWNSEE_APP_H
+#ifndef DESCRY_APP_H
+#define DESCRY_APP_H
 
 #include <SDL.h>
 #include <stdbool.h>
@@ -545,7 +545,7 @@ typedef struct {
     int      dnd_press_x, dnd_press_y;   /* mouse-down coords; threshold   */
     bool     dnd_armed;              /* mouse pressed; not yet exceeded threshold */
 
-    /* Transient status-bar notification from downsee.notify(). */
+    /* Transient status-bar notification from descry.notify(). */
     char*    notification_msg;
     uint32_t notification_until;     /* SDL_GetTicks deadline */
 

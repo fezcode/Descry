@@ -1,8 +1,8 @@
 ﻿[app]
-name    = "Downsee"
+name    = "Descry"
 version = "0.74.0"
-id      = "com.fezcode.downsee"
-icon    = "resources/downsee.ico"
+id      = "com.fezcode.descry"
+icon    = "resources/descry.ico"
 
 [meta]
 publisher = "Fezcode"
@@ -12,15 +12,15 @@ publisher = "Fezcode"
 theme = "mica"
 
 [install]
-default_dir = "${PROGRAMFILES}/Downsee"
+default_dir = "${PROGRAMFILES}/Descry"
 
 [uninstall]
 keep = []
 
 [[steps]]
 type  = "welcome"
-title = "Downsee 0.74.0"
-body  = "This wizard will install Downsee 0.74.0 on your computer.\n\nClick Next to continue."
+title = "Descry 0.74.0"
+body  = "This wizard will install Descry 0.74.0 on your computer.\n\nClick Next to continue."
 
 [[steps]]
 type  = "license"
@@ -31,7 +31,7 @@ file  = "LICENSE.txt"
 [[steps]]
 type  = "folder"
 title = "Select Folder"
-body  = "Choose where to install Downsee 0.74.0."
+body  = "Choose where to install Descry 0.74.0."
 
 [[steps]]
 type  = "shortcuts"
@@ -46,12 +46,12 @@ body  = "Copying files to your system."
 [[steps]]
 type  = "finish"
 title = "Installation Complete"
-body  = "Downsee has been installed successfully.\n\nClick Finish to close."
+body  = "Descry has been installed successfully.\n\nClick Finish to close."
 
 # Application binaries and DLL dependencies
 [[files]]
-src = "build/downsee.exe"
-dst = "${INSTALLDIR}/downsee.exe"
+src = "build/descry.exe"
+dst = "${INSTALLDIR}/descry.exe"
 
 [[files]]
 src = "build/SDL2.dll"
@@ -123,19 +123,19 @@ dst = "${INSTALLDIR}/zlib1.dll"
 
 # Desktop and Start Menu shortcuts
 [[shortcuts]]
-target   = "${INSTALLDIR}/downsee.exe"
-location = "${DESKTOP}/Downsee.lnk"
-name     = "Downsee"
-icon     = "${INSTALLDIR}/downsee.exe"
+target   = "${INSTALLDIR}/descry.exe"
+location = "${DESKTOP}/Descry.lnk"
+name     = "Descry"
+icon     = "${INSTALLDIR}/descry.exe"
 label    = "Create Desktop Shortcut"
 optional = true
 default  = true
 
 [[shortcuts]]
-target   = "${INSTALLDIR}/downsee.exe"
-location = "${STARTMENU}/Fezcode/Downsee.lnk"
-name     = "Downsee"
-icon     = "${INSTALLDIR}/downsee.exe"
+target   = "${INSTALLDIR}/descry.exe"
+location = "${STARTMENU}/Fezcode/Descry.lnk"
+name     = "Descry"
+icon     = "${INSTALLDIR}/descry.exe"
 label    = "Create Start Menu Entry"
 optional = true
 default  = true
@@ -143,13 +143,13 @@ default  = true
 # Registry entries
 [[registry]]
 hive  = "HKCU"
-key   = "Software\\Fezcode\\Downsee"
+key   = "Software\\Fezcode\\Descry"
 value = "InstallDir"
 data  = "${INSTALLDIR}"
 
 [[registry]]
 hive  = "HKCU"
-key   = "Software\\Fezcode\\Downsee"
+key   = "Software\\Fezcode\\Descry"
 value = "Version"
 data  = "0.74.0"
 

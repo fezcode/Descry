@@ -2,9 +2,9 @@
 
 $version = "0.74.0"
 $forge   = "D:\Workhammer\Forge\build\forge.exe"
-$project = "D:\Workhammer\Downsee"
-$outDir  = "D:\Workhammer\Downsee\dist"
-$output  = Join-Path $outDir "Downsee-Setup-$version.exe"
+$project = "D:\Workhammer\Descry"
+$outDir  = "D:\Workhammer\Descry\dist"
+$output  = Join-Path $outDir "Descry-Setup-$version.exe"
 
 Write-Host "Building forge.exe (windowsgui) from D:\Workhammer\Forge..."
 Push-Location "D:\Workhammer\Forge"

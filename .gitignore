@@ -15,5 +15,5 @@ compile_commands.json
 /bash.exe.stackdump
 
 # Per-vault runtime state (sidebar width, scroll position, etc.).
-.downsee.state
-**/.downsee.state
+.descry.state
+**/.descry.state

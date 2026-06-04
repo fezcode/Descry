@@ -1,6 +1,6 @@
 # Plugins
 
-Downsee can load Lua scripts at startup and expose them as named **actions**
+Descry can load Lua scripts at startup and expose them as named **actions**
 that the user can run from the command palette, bind to a key, or invoke
 from the menus.
 
@@ -15,7 +15,7 @@ glue against `lua_host.c`.
 
 ## Where plugins live
 
-By default Downsee scans `data/plugins/` next to the exe and loads every
+By default Descry scans `data/plugins/` next to the exe and loads every
 `*.lua` file it finds (top level only — no recursion).
 
 Override the directory with `plugin_path` in your `init.lua` or
@@ -23,7 +23,7 @@ Override the directory with `plugin_path` in your `init.lua` or
 
 ```lua
 return {
-    plugin_path = "C:/Users/me/downsee-plugins",
+    plugin_path = "C:/Users/me/descry-plugins",
     -- ... other config keys
 }
 ```
@@ -37,14 +37,14 @@ parse don't break the boot — they're flagged in the **Plugins overlay**
 ## Lifecycle
 
 1. App starts, reads `init.lua` then overlays `settings.lua`.
-2. The `downsee` global is created (`notify`, `dialog`,
+2. The `descry` global is created (`notify`, `dialog`,
    `register_action`).
 3. Every `*.lua` under the plugin dir is `dofile`'d, in directory-listing
    order. Each file's top-level body runs once. Anything you call at the
-   top level (`downsee.notify(...)`) fires *during load*, before the
+   top level (`descry.notify(...)`) fires *during load*, before the
    editor window finishes drawing — these get queued and surface once the
    UI is up.
-4. Actions registered via `downsee.register_action(name, fn)` get added
+4. Actions registered via `descry.register_action(name, fn)` get added
    to the action registry.
 5. The user can later invoke any action via the command palette
    (Ctrl+Shift+P), bind it to a key in `Settings → Keybindings…`, or
@@ -58,18 +58,18 @@ the app exits).
 
 ---
 
-## The `downsee` global
+## The `descry` global
 
 Three functions. That's the whole API.
 
-### `downsee.register_action(name, fn)`
+### `descry.register_action(name, fn)`
 
 Register a named action. `name` must be a string (lowercase, no spaces
 recommended — the keybindings UI shows the raw name). `fn` is a Lua
 function called with no arguments when the action is invoked.
 
 ```lua
-downsee.register_action("uppercase_clipboard", function()
+descry.register_action("uppercase_clipboard", function()
     -- ... your code here
 end)
 ```
@@ -81,28 +81,28 @@ when the user binds a key — your action will show in the command palette
 but won't fire from the keystroke. This is deliberate; tell the user to
 pick a different name if it matters.
 
-### `downsee.notify(message)`
+### `descry.notify(message)`
 
 Push a one-line toast onto the status bar. Use this for transient
 "happened" feedback ("indexed 142 files", "selection cleaned"). Long
 messages get clipped at the right edge — keep it under ~80 chars.
 
 ```lua
-downsee.notify("hello from a plugin")
+descry.notify("hello from a plugin")
 ```
 
 `message` must be a string. The text also gets logged to stderr so
-plugin authors running Downsee from a terminal can see what fired.
+plugin authors running Descry from a terminal can see what fired.
 
-### `downsee.dialog(message)` or `downsee.dialog(title, message)`
+### `descry.dialog(message)` or `descry.dialog(title, message)`
 
 Pop a modal dialog with an OK button. Blocks the user until they
 dismiss. Use this for output that demands attention (errors, results
 worth reading) or when you want to confirm a step.
 
 ```lua
-downsee.dialog("Done")
-downsee.dialog("Reindex", "Scanned 142 files in 0.3s.")
+descry.dialog("Done")
+descry.dialog("Reindex", "Scanned 142 files in 0.3s.")
 ```
 
 There is no Cancel button and no return value — `dialog` is purely a
@@ -144,19 +144,19 @@ local function fake_word_count()
     return 0
 end
 
-downsee.register_action("word_count_toast", function()
-    downsee.notify("words: " .. fake_word_count())
+descry.register_action("word_count_toast", function()
+    descry.notify("words: " .. fake_word_count())
 end)
 
-downsee.register_action("word_count_dialog", function()
-    downsee.dialog("Word count",
+descry.register_action("word_count_dialog", function()
+    descry.dialog("Word count",
         "This document has " .. fake_word_count() .. " words.")
 end)
 
-downsee.notify("[word_count] loaded")
+descry.notify("[word_count] loaded")
 ```
 
-Drop that file in `data/plugins/`, restart Downsee (or hit Reload in
+Drop that file in `data/plugins/`, restart Descry (or hit Reload in
 the Plugins overlay). Both actions show up in the command palette.
 Bind `word_count_toast` to e.g. `ctrl+shift+w` from the keybindings
 overlay (F1) and now Ctrl+Shift+W fires it.
@@ -167,7 +167,7 @@ overlay (F1) and now Ctrl+Shift+W fires it.
 
 Honest list of holes — none of these are fundamental, just unwritten C
 glue. If you need one, the codebase is small enough to add it in
-`src/lua_host.c` against `DOWNSEE_LIB[]`:
+`src/lua_host.c` against `DESCRY_LIB[]`:
 
 - **Buffer access**: no read/write to the current document, no cursor
   position, no selection, no insert/delete.
@@ -179,7 +179,7 @@ glue. If you need one, the codebase is small enough to add it in
 - **Custom UI**: no way to draw a panel, add a sidebar item, or render
   inside the preview pane. `dialog`/`notify` is the entire output
   surface.
-- **Inter-plugin calls**: no `downsee.invoke("other_action")`.
+- **Inter-plugin calls**: no `descry.invoke("other_action")`.
 - **Async / timers**: no `set_timeout`, no background work.
 - **Direct keybind from Lua**: plugins register actions; users bind
   keys. There's no way for a plugin to claim a default keystroke.
@@ -203,11 +203,11 @@ If you need to read a config key from inside an action callback, expose
 it as a top-level `local` at load time:
 
 ```lua
-local my_cfg = (downsee_cfg or {}).my_plugin or {}
+local my_cfg = (descry_cfg or {}).my_plugin or {}
 
-downsee.register_action("greet", function()
+descry.register_action("greet", function()
     local who = my_cfg.greet_target or "world"
-    downsee.notify("hello, " .. who)
+    descry.notify("hello, " .. who)
 end)
 ```
 
@@ -217,12 +217,12 @@ end)
 return {
     -- ... other keys
     my_plugin = {
-        greet_target = "downsee user",
+        greet_target = "descry user",
     },
 }
 ```
 
-(Note: `downsee_cfg` isn't currently exposed as a global. This pattern
+(Note: `descry_cfg` isn't currently exposed as a global. This pattern
 will work once that hook lands; for now use Lua's built-in `require`
 for any plugin-private config.)
 
@@ -230,7 +230,7 @@ for any plugin-private config.)
 
 ## Debugging a plugin
 
-- Run Downsee from a terminal — every `notify`, `dialog`, and load
+- Run Descry from a terminal — every `notify`, `dialog`, and load
   error mirrors to stderr with a `[notify]`, `[dialog]`, or `[plugin]`
   prefix.
 - Lua `print` works and goes to the same stderr.
@@ -247,7 +247,7 @@ for any plugin-private config.)
 For anyone hacking on the plugin system itself:
 
 - `src/lua_host.h` / `src/lua_host.c` — the host (state, plugin
-  registry, the `downsee.*` library, reload).
+  registry, the `descry.*` library, reload).
 - `src/main.c` near `plugins_action_reload` and the Plugins overlay
   rendering — the UI side.
 - `data/plugins/hello.lua` — the bundled example.

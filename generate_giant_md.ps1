@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$out = "D:\Workhammer\Downsee\data\giant.md"
+$out = "D:\Workhammer\Descry\data\giant.md"
 $targetBytes = 1MB
 
 $header = @'
@@ -225,14 +225,14 @@ done
 
 ```json
 {
-    "name": "Downsee",
+    "name": "Descry",
     "version": "0.71.0",
     "features": ["markdown", "lua", "plugins"]
 }
 ```
 
 ```yaml
-name: Downsee
+name: Descry
 version: 0.71.0
 features:
   - markdown
@@ -454,7 +454,7 @@ H~2~O and E = mc^2^ (extension syntax).
 title: Example Document
 date: 2026-05-16
 tags: [markdown, example]
-author: Downsee
+author: Descry
 ---
 ```
 
@@ -470,7 +470,7 @@ author: Downsee
 
 ## Tags
 
-#markdown #reference #example #downsee #kitchen-sink
+#markdown #reference #example #descry #kitchen-sink
 
 ---
 
@@ -499,7 +499,7 @@ $frontMatter = @'
 title: Giant Markdown Reference
 date: 2026-05-16
 tags: [markdown, reference, kitchen-sink, stress-test]
-author: Downsee
+author: Descry
 description: A 100 MB markdown file exercising every markdown feature, used to stress-test the editor.
 ---
 
@@ -514,7 +514,7 @@ while ($fs.Position -lt $targetBytes) {
     $chunkNum++
 
     $bw.Write("`n## Section ${chunkNum}`n`n")
-    $bw.Write("This is iteration **${chunkNum}** of the kitchen-sink content. Generated for stress-testing the Downsee markdown editor with very large documents.`n`n")
+    $bw.Write("This is iteration **${chunkNum}** of the kitchen-sink content. Generated for stress-testing the Descry markdown editor with very large documents.`n`n")
     $bw.Write("> Iteration ${chunkNum} block quote with *emphasis*, **strong**, ~~strikethrough~~, and ``inline code``.`n`n")
 
     # Re-emit the kitchen sink (without re-emitting the TOC)

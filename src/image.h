@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_IMAGE_H
-#define DOWNSEE_IMAGE_H
+#ifndef DESCRY_IMAGE_H
+#define DESCRY_IMAGE_H
 
 #include <SDL.h>
 

@@ -1,4 +1,4 @@
-# Downsee
+# Descry
 
 A markdown editor in **C** that's *almost* an Obsidian clone — small, fast, and with `inline code` that renders properly.
 

@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_LUA_HOST_H
-#define DOWNSEE_LUA_HOST_H
+#ifndef DESCRY_LUA_HOST_H
+#define DESCRY_LUA_HOST_H
 
 typedef struct LuaHost LuaHost;
 
@@ -7,7 +7,7 @@ LuaHost* lua_host_create(void);
 void     lua_host_destroy(LuaHost* h);
 
 /* Run a Lua file and leave its returned table on the registry under the key
- * "downsee.config" so config_get_* below can read from it. */
+ * "descry.config" so config_get_* below can read from it. */
 int lua_host_load_config(LuaHost* h, const char* path);
 
 /* Run a Lua file and merge its returned table over the existing config —
@@ -43,7 +43,7 @@ typedef void (*LuaTableEachCb)(const char* key, const char* value, void* ud);
 int lua_host_each_in_table(LuaHost* h, const char* key,
                            LuaTableEachCb cb, void* ud);
 
-/* Plugin host: register the `downsee` global with notify/register_action,
+/* Plugin host: register the `descry` global with notify/register_action,
  * load every *.lua under the given directory, and invoke a registered Lua
  * action by name. Returns count of plugins loaded, or 0 if dir missing. */
 void lua_host_setup_api    (LuaHost* h);
@@ -75,12 +75,12 @@ int lua_host_each_plugin(LuaHost* h, LuaPluginEachCb cb, void* ud);
  * disappear cleanly. */
 int  lua_host_reload_plugins(LuaHost* h, const char* dir);
 
-/* Register a callback invoked whenever a plugin calls downsee.notify(s).
+/* Register a callback invoked whenever a plugin calls descry.notify(s).
  * Lets the app surface the notification in its UI. Single global slot. */
 typedef void (*LuaNotifyCallback)(void* userdata, const char* msg);
 void lua_host_on_notify(LuaNotifyCallback cb, void* userdata);
 
-/* Register a callback invoked when a plugin calls downsee.dialog(title, msg).
+/* Register a callback invoked when a plugin calls descry.dialog(title, msg).
  * Hosts open a modal dialog with an OK button. */
 typedef void (*LuaDialogCallback)(void* userdata,
                                   const char* title, const char* msg);

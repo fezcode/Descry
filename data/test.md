@@ -1,4 +1,4 @@
-# Downsee Feature Test
+# Descry Feature Test
 
 A manual visual regression test. Scroll through this file and confirm each
 section renders as the description claims. Mismatches are bugs (or known
@@ -99,7 +99,7 @@ A reallylongunbrokenwordthatdoesnotcontainwhitespaceandshouldoverflowtheline rat
 
 ## 7. Unicode coverage (single-font limitation)
 
-Downsee currently uses one font for the whole document. Glyphs the font
+Descry currently uses one font for the whole document. Glyphs the font
 doesn't have render as the FreeType "tofu box" (a hollow rectangle).
 **This is the expected behavior in v0.8 — font fallback is a planned pass.**
 

@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_VAULT_H
-#define DOWNSEE_VAULT_H
+#ifndef DESCRY_VAULT_H
+#define DESCRY_VAULT_H
 
 #include <SDL.h>
 #include <stddef.h>

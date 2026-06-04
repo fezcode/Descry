@@ -9,8 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CFG_KEY     "downsee.config"
-#define ACTIONS_KEY "downsee.actions"
+#define CFG_KEY     "descry.config"
+#define ACTIONS_KEY "descry.actions"
 
 /* Per-plugin record. Built as plugins are loaded so the host can later
  * report "this file registered these actions" without re-walking Lua. */
@@ -313,7 +313,7 @@ static int l_register_action(lua_State* L)
     return 0;
 }
 
-static const luaL_Reg DOWNSEE_LIB[] = {
+static const luaL_Reg DESCRY_LIB[] = {
     { "notify",          l_notify },
     { "dialog",          l_dialog },
     { "register_action", l_register_action },
@@ -322,8 +322,8 @@ static const luaL_Reg DOWNSEE_LIB[] = {
 
 void lua_host_setup_api(LuaHost* h)
 {
-    luaL_newlib(h->L, DOWNSEE_LIB);
-    lua_setglobal(h->L, "downsee");
+    luaL_newlib(h->L, DESCRY_LIB);
+    lua_setglobal(h->L, "descry");
     /* pre-create the actions registry so plugins don't need to */
     lua_newtable(h->L);
     lua_setfield(h->L, LUA_REGISTRYINDEX, ACTIONS_KEY);

@@ -1,10 +1,10 @@
-# Downsee
+# Descry
 
 A keyboard-driven markdown editor in C, SDL2, and Lua. Aims at the
 Obsidian / Lite XL ergonomics — vault sidebar, wiki links, full
 preview rendering, plugin host — without the Electron tax.
 
-![Downsee preview mode](docs/screenshots/preview.png)
+![Descry preview mode](./docs/screenshots/preview.png)
 
 ---
 
@@ -34,8 +34,8 @@ preview rendering, plugin host — without the Electron tax.
   Lua-registered plugin action with a category chip and bound
   shortcut.
 - **Plugin host** — drop `*.lua` in `data/plugins/`, register actions
-  with `downsee.register_action("name", fn)`, surface UI with
-  `downsee.notify` and `downsee.dialog`. Plugins overlay lists every
+  with `descry.register_action("name", fn)`, surface UI with
+  `descry.notify` and `descry.dialog`. Plugins overlay lists every
   loaded file and the actions each registered, with a hot-reload
   button.
 - **In-app modals** for Save / Save As / Rename / New File — no
@@ -86,7 +86,7 @@ preview rendering, plugin host — without the Electron tax.
 | Build            | CMake + Ninja                                    |
 
 No GTK, no Qt, no web view, no JS runtime. The compiled binary is a
-single `downsee.exe` plus its DLL dependencies (SDL2, FreeType,
+single `descry.exe` plus its DLL dependencies (SDL2, FreeType,
 HarfBuzz, libpng, libjpeg).
 
 ---
@@ -99,7 +99,7 @@ HarfBuzz, libpng, libjpeg).
 pacman -S mingw-w64-x86_64-{gcc,cmake,ninja,SDL2,freetype,harfbuzz,libpng,libjpeg-turbo}
 cmake -G Ninja -B build
 ninja -C build
-./build/downsee.exe
+./build/descry.exe
 ```
 
 ### Linux
@@ -108,14 +108,14 @@ ninja -C build
 apt install build-essential cmake ninja-build libsdl2-dev libfreetype-dev libharfbuzz-dev libpng-dev libjpeg-dev
 cmake -G Ninja -B build
 ninja -C build
-./build/downsee
+./build/descry
 ```
 
 On Windows the build pulls every transitive MinGW DLL next to the exe
 via `file(GET_RUNTIME_DEPENDENCIES)` so the build dir is portable —
 zip it and run anywhere without an MSYS2 install. The `data/` folder
 is *not* copied; the exe loads `data/` from its own directory at
-runtime, so put your vault wherever you like and point Downsee at it.
+runtime, so put your vault wherever you like and point Descry at it.
 
 ---
 
@@ -145,11 +145,11 @@ tiny global table:
 
 ```lua
 -- data/plugins/hello.lua
-downsee.register_action("say_hello", function()
-    downsee.dialog("Hello", "Hello from the plugin system!")
+descry.register_action("say_hello", function()
+    descry.dialog("Hello", "Hello from the plugin system!")
 end)
 
-downsee.notify("[hello plugin] loaded")
+descry.notify("[hello plugin] loaded")
 ```
 
 After a reload (Ctrl+Alt+P > Reload, or restart), the action shows up

@@ -1,5 +1,5 @@
-/* Windows resource script — embeds downsee.ico into the exe so Explorer,
+/* Windows resource script — embeds descry.ico into the exe so Explorer,
  * the taskbar, and the Alt+Tab switcher pick it up automatically.
  * Compiled by windres via CMake's RC language (see CMakeLists.txt). */
 
-IDI_ICON1 ICON "downsee.ico"
+IDI_ICON1 ICON "descry.ico"

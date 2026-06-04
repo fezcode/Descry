@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_FONT_H
-#define DOWNSEE_FONT_H
+#ifndef DESCRY_FONT_H
+#define DESCRY_FONT_H
 
 #include <SDL.h>
 #include <stddef.h>

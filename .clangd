@@ -1,4 +1,4 @@
-# clangd config for Downsee.
+# clangd config for Descry.
 #
 # We compile with MSYS2 mingw64 gcc; clangd's default config on Windows can't
 # see MinGW's POSIX headers (<strings.h>, <dirent.h>, strncasecmp, S_ISDIR).

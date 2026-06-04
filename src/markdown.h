@@ -1,5 +1,5 @@
-#ifndef DOWNSEE_MARKDOWN_H
-#define DOWNSEE_MARKDOWN_H
+#ifndef DESCRY_MARKDOWN_H
+#define DESCRY_MARKDOWN_H
 
 #include <stddef.h>
 
