@@ -74,9 +74,10 @@ typedef struct {
      * transiently by app_render so doc_x_left/right confine each pass to one
      * half without any change to the editor/preview render bodies. */
     bool     split_preview;
-    int      preview_scroll_y;   /* right pane's own vertical scroll */
-    float    split_ratio;        /* editor's fraction of the doc width (~0.5) */
-    int      render_pane;        /* PANE_FULL / PANE_LEFT / PANE_RIGHT */
+    int      preview_scroll_y;     /* right pane's own vertical scroll */
+    int      preview_doc_height_px;/* right pane's rendered content height */
+    float    split_ratio;          /* editor's fraction of the doc width (~0.5) */
+    int      render_pane;          /* PANE_FULL / PANE_LEFT / PANE_RIGHT */
 
     /* Open tabs. The ACTIVE tab's live state lives in the a->buf / note_path /
      * scroll / edit_mode / viewing_image fields; tabs.items[tabs.active] is a

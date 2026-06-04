@@ -36,7 +36,8 @@
 /* Absolute path of the single log file, resolved per-OS at startup. Shown to
  * the user in Settings ("Log file"). Defaults to a cwd-relative name as a
  * last resort if the per-user data dir can't be resolved. */
-static char g_log_path[1024] = "descry.log";
+static char g_log_path[1024]      = "descry.log";
+static char g_settings_path[1024] = "settings.lua";
 
 /* Create `path` and any missing parent directories. Slashes may be '/' or
  * '\\'. Best-effort: silently ignores already-exists. */
@@ -87,8 +88,12 @@ static void resolve_log_path(void)
         mkdir_p(dir);
 #if defined(_WIN32)
         snprintf(g_log_path, sizeof g_log_path, "%s\\descry.log", dir);
+        snprintf(g_settings_path, sizeof g_settings_path,
+                 "%s\\settings.lua", dir);
 #else
         snprintf(g_log_path, sizeof g_log_path, "%s/descry.log", dir);
+        snprintf(g_settings_path, sizeof g_settings_path,
+                 "%s/settings.lua", dir);
 #endif
     }
 }
@@ -3194,14 +3199,14 @@ static int app_init(App* a, const char* note_path_arg)
     lua_host_on_notify(on_lua_notify, a);
     lua_host_on_dialog(on_lua_dialog, a);
 
-    /* Settings live in ONE file next to the exe: settings.lua. On first
-     * run (file missing) we write a defaults stub WITHOUT vault_path —
-     * the user picks the vault below and we save it back. Plugins live
-     * in a `plugins/` folder next to the exe by default; the user can
-     * point elsewhere via plugin_path. */
-    bool first_run = (lua_host_load_config(a->lua, "settings.lua") != 0);
+    /* Settings live in ONE file in the per-OS app-data dir (same place as
+     * the log — see resolve_log_path): settings.lua. On first run (file
+     * missing) we write a defaults stub WITHOUT vault_path — the user picks
+     * the vault below and we save it back. Plugins still live in a `plugins/`
+     * folder next to the exe by default; point elsewhere via plugin_path. */
+    bool first_run = (lua_host_load_config(a->lua, g_settings_path) != 0);
     if (first_run) {
-        FILE* f = fopen("settings.lua", "wb");
+        FILE* f = fopen(g_settings_path, "wb");
         if (f) {
             fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
             fprintf(f,
@@ -3225,8 +3230,8 @@ static int app_init(App* a, const char* note_path_arg)
                 "    theme        = \"Editorial Dark\",\n"
                 "}\n");
             fclose(f);
-            fprintf(stderr, "descry: first run -- wrote settings.lua\n");
-            (void)lua_host_load_config(a->lua, "settings.lua");
+            fprintf(stderr, "descry: first run -- wrote %s\n", g_settings_path);
+            (void)lua_host_load_config(a->lua, g_settings_path);
         }
     }
     user_kbinds_load_from_cfg(a->lua);
@@ -8364,7 +8369,7 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
                 a->settings_font_idx_mono = idx;
             }
             need_reload_fonts = true;
-            remove("settings.lua");
+            remove(g_settings_path);
             app_notify(a, "settings reset to defaults");
             break;
         }
@@ -8445,7 +8450,7 @@ static void fputs_lua_string(FILE* f, const char* s)
     fputc('"', f);
 }
 
-/* Persist the current live settings to settings.lua (next to the exe).
+/* Persist the current live settings to settings.lua (in the app-data dir).
  * Loaded at startup; overlay keys win over the built-in defaults. */
 /* Trigger settings_persist after the vault is changed at runtime. Defined
  * here so it sits next to the persistence routine; just forwards. */
@@ -8511,7 +8516,7 @@ static void recent_dirs_load(App* a)
 
 static int settings_persist(App* a)
 {
-    const char* path = "settings.lua";
+    const char* path = g_settings_path;
     FILE* f = fopen(path, "wb");
     if (!f) return -1;
     fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
@@ -11586,7 +11591,7 @@ static void app_render(App* a)
         a->render_pane = PANE_RIGHT;
         int saved_scroll = a->scroll_y;
         a->scroll_y = a->preview_scroll_y;
-        render_preview(a, true);
+        a->preview_doc_height_px = render_preview(a, true);
         render_preview_selection(a);
         a->preview_scroll_y = a->scroll_y;       /* render may have clamped */
         a->scroll_y = saved_scroll;
@@ -14042,7 +14047,7 @@ static void action_colors    (App* a) { picker_open(a);  }
 static void action_edit_settings(App* a)
 {
     if (!confirm_discard(a)) return;
-    load_note(a, "settings.lua");
+    load_note(a, g_settings_path);
 }
 static void action_about     (App* a) {
     info_modal(a, "About Descry " DESCRY_VERSION,
@@ -15931,7 +15936,10 @@ static void app_event(App* a, const SDL_Event* e)
             if (a->split_preview && !a->viewing_image &&
                 mx > split_divider_x(a)) {
                 a->preview_scroll_y -= e->wheel.y * line_px * 3;
-                if (a->preview_scroll_y < 0) a->preview_scroll_y = 0;
+                int pmax = a->preview_doc_height_px - viewport_h(a);
+                if (pmax < 0) pmax = 0;
+                if (a->preview_scroll_y < 0)    a->preview_scroll_y = 0;
+                if (a->preview_scroll_y > pmax) a->preview_scroll_y = pmax;
                 break;
             }
             a->scroll_y -= e->wheel.y * line_px * 3;
