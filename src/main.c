@@ -3365,6 +3365,10 @@ static int app_init(App* a, const char* note_path_arg)
 
     buffer_init(&a->buf);
     tablist_init(&a->tabs);
+    a->tab_hover = -1;
+    a->tab_scroll_x = 0;
+    a->tab_strip_count = 0;
+    a->tab_strip_x0 = a->tab_strip_x1 = 0;
     a->imgcache = image_cache_create(a->renderer);
 
     vault_init(&a->vault);
@@ -5550,6 +5554,10 @@ static void render_titlebar(App* a, int TBH);
 
 /* Render the top chrome bar: bg slab, title bar at the top with menu items
  * + window controls, then the tool row (breadcrumb, mode pill, icons). */
+/* Defined near render_sidebar (below); used by the tab strip here. */
+static void font_draw_elided(Font* f, const char* text, size_t len,
+                             int x, int baseline, int max_w, SDL_Color c);
+
 static void render_chrome(App* a)
 {
     int H   = chrome_bar_h(a);
@@ -5611,26 +5619,79 @@ static void render_chrome(App* a)
                        bx, by, a->fg_muted);
         bx += font_measure(a->font_ide, "\xe2\x80\xba", 3) + 6;
     }
-    const char* title = (a->fm_present && a->fm_title[0])
-                       ? a->fm_title
-                       : (a->note_path ? vault_basename(a->note_path) : "(unsaved)");
-    int tw = font_measure(a->font_ide, title, strlen(title));
-    a->crumb_rect_title = (SDL_Rect){ bx - 4, TBH + 4, tw + 8, CRH - 8 };
-    SDL_Color tc = CRUMB_COLOR(a->fg, a->crumb_hover_t[1]);
-    if (a->crumb_hover_t[1] > 0.01f) {
-        SDL_SetRenderDrawColor(a->renderer,
-            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
-            a->bg_sidebar_hover.b,
-            (Uint8)(160 * ease_out_cubic(a->crumb_hover_t[1])));
-        fill_rrect(a->renderer, a->crumb_rect_title, 4);
-    }
-    font_draw_line(a->font_ide, title, strlen(title), bx, by, tc);
-    if (a->buf.dirty) {
-        bx += tw + 6;
-        font_draw_line(a->font_ide, "\xe2\x80\xa2", 3,    /* • */
-                       bx, by, a->fg_link);
-    }
     #undef CRUMB_COLOR
+
+    /* Tab strip: one chip per open file, filling the chrome row to the right
+     * of the vault crumb. Replaces the old single-title breadcrumb segment —
+     * the active tab carries the filename now. crumb_rect_title stays empty so
+     * the old title-crumb hover/click path is inert. */
+    int btn_sz   = chrome_button_size(a);
+    int strip_x0 = bx;
+    int strip_x1 = a->win_w - 6 * btn_sz - 110 - 8;   /* before the mode pill */
+    if (strip_x1 < strip_x0) strip_x1 = strip_x0;
+    a->tab_strip_x0 = strip_x0;
+    a->tab_strip_x1 = strip_x1;
+
+    SDL_Rect strip_clip = { strip_x0, TBH, strip_x1 - strip_x0, CRH };
+    SDL_RenderSetClipRect(a->renderer, &strip_clip);
+
+    a->tab_strip_count = 0;
+    int tab_top = TBH + 3;
+    int tab_h   = CRH - 6;
+    int sx = strip_x0 - a->tab_scroll_x;
+    int active_x = -1, active_w = 0;
+    for (int i = 0; i < a->tabs.count && i < 64; ++i) {
+        bool is_active = (i == a->tabs.active);
+        const char* path = is_active ? a->note_path : a->tabs.items[i].path;
+        bool dirty       = is_active ? a->buf.dirty  : a->tabs.items[i].buf.dirty;
+        const char* name = path ? vault_basename(path) : "(unsaved)";
+        int nw_full = font_measure(a->font_ide, name, strlen(name));
+        int nw      = nw_full > 160 ? 160 : nw_full;
+        int pad = 10, gap_dirty = dirty ? 12 : 0, close_w = 16;
+        int tw_ = pad + nw + gap_dirty + close_w + 4;
+
+        SDL_Rect tr = { sx, tab_top, tw_, tab_h };
+        bool is_hover = (i == a->tab_hover);
+        if (is_active || is_hover) {
+            SDL_SetRenderDrawColor(a->renderer,
+                a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+                a->bg_sidebar_hover.b, is_active ? 220 : 120);
+            fill_rrect(a->renderer, tr, 5);
+        }
+        int tx = sx + pad;
+        font_draw_elided(a->font_ide, name, strlen(name), tx, by, nw,
+                         is_active ? a->fg : a->fg_muted);
+        tx += nw + 4;
+        if (dirty)
+            font_draw_line(a->font_ide, "\xe2\x80\xa2", 3, tx, by, a->fg_link);
+        SDL_Rect close_r = { sx + tw_ - close_w, tab_top + (tab_h - 14) / 2,
+                             14, 14 };
+        if (is_hover || is_active)
+            font_draw_line(a->font_ide, "\xc3\x97", 2,   /* × */
+                           close_r.x + 3, by, a->fg_muted);
+
+        a->tab_hits[i].rect = tr;
+        a->tab_hits[i].close_rect = close_r;
+        a->tab_strip_count++;
+        if (is_active) {
+            active_x = sx; active_w = tw_;
+            SDL_Rect ul = { tr.x + 4, tab_top + tab_h - 2, tw_ - 8, 2 };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
+            SDL_RenderFillRect(a->renderer, &ul);
+        }
+        sx += tw_ + 2;
+    }
+    SDL_RenderSetClipRect(a->renderer, NULL);
+
+    /* Keep the active tab within the strip (one-frame-lagged auto-scroll). */
+    if (active_x >= 0) {
+        if (active_x < strip_x0)
+            a->tab_scroll_x -= (strip_x0 - active_x);
+        else if (active_x + active_w > strip_x1)
+            a->tab_scroll_x += (active_x + active_w) - strip_x1;
+        if (a->tab_scroll_x < 0) a->tab_scroll_x = 0;
+    }
 
     /* Right-side buttons. */
     int sz    = chrome_button_size(a);
@@ -14485,6 +14546,16 @@ static void app_event(App* a, const SDL_Event* e)
                 my >= cv->y && my < cv->y + cv->h)        a->crumb_hover = 0;
             else if (ct->w > 0 && mx >= ct->x && mx < ct->x + ct->w &&
                      my >= ct->y && my < ct->y + ct->h)   a->crumb_hover = 1;
+            /* Tab strip hover. */
+            a->tab_hover = -1;
+            if (mx >= a->tab_strip_x0 && mx < a->tab_strip_x1 &&
+                my >= title_bar_h(a) && my < chrome_bar_h(a)) {
+                for (int i = 0; i < a->tab_strip_count; ++i) {
+                    SDL_Rect r = a->tab_hits[i].rect;
+                    if (mx >= r.x && mx < r.x + r.w &&
+                        my >= r.y && my < r.y + r.h) { a->tab_hover = i; break; }
+                }
+            }
             if (a->ctx_menu_active) {
                 int parent_row = ctx_menu_row_at(a, e->motion.x, e->motion.y);
                 int sub_row    = a->ctx_submenu_active
@@ -14927,6 +14998,34 @@ static void app_event(App* a, const SDL_Event* e)
                     ctx_menu_open_menu(a, mi, r.x, r.y + r.h + 2);
                     break;
                 }
+            }
+            /* Tab strip clicks: left = switch (or × = close), middle = close.
+             * Gated to the strip region + no floating overlay. */
+            if ((e->button.button == SDL_BUTTON_LEFT ||
+                 e->button.button == SDL_BUTTON_MIDDLE) &&
+                !a->backlinks_active && !a->tags_active && !a->tpl_active &&
+                !a->outline_active   && !a->vsearch_active &&
+                !a->picker_active    && !a->keybind_active &&
+                !a->settings_active  && !a->ctx_menu_active &&
+                e->button.y >= title_bar_h(a) && e->button.y < chrome_bar_h(a) &&
+                e->button.x >= a->tab_strip_x0 && e->button.x < a->tab_strip_x1)
+            {
+                for (int i = 0; i < a->tab_strip_count; ++i) {
+                    SDL_Rect r  = a->tab_hits[i].rect;
+                    SDL_Rect cr = a->tab_hits[i].close_rect;
+                    if (e->button.x >= r.x && e->button.x < r.x + r.w &&
+                        e->button.y >= r.y && e->button.y < r.y + r.h) {
+                        bool on_close = (e->button.x >= cr.x &&
+                                         e->button.x < cr.x + cr.w);
+                        if (e->button.button == SDL_BUTTON_MIDDLE ||
+                            (e->button.button == SDL_BUTTON_LEFT && on_close))
+                            close_tab(a, i);
+                        else
+                            switch_to_tab(a, i);
+                        break;
+                    }
+                }
+                break;   /* click consumed within the strip */
             }
             /* Chrome bar: clicks here only fire if NO overlay is open. The
              * overlay-handlers below intercept first. */

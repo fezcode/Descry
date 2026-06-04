@@ -397,6 +397,16 @@ typedef struct {
     int      crumb_hover;            /* -1 none, 0 vault, 1 title */
     float    crumb_hover_t[2];       /* eased hover state per segment */
 
+    /* Tab strip hit-rects, rebuilt every frame by render_chrome (parallel to
+     * tabs.items, capped at 64). close_rect is the close-button sub-rect.
+     * tab_strip_x0/x1 are the strip's horizontal bounds so the mouse handlers
+     * can gate clicks to the strip region. */
+    struct TabHit { SDL_Rect rect; SDL_Rect close_rect; } tab_hits[64];
+    int      tab_strip_count;        /* tabs laid out this frame */
+    int      tab_hover;              /* hovered tab index, -1 none */
+    int      tab_scroll_x;           /* horizontal scroll of the strip, px */
+    int      tab_strip_x0, tab_strip_x1;
+
     /* Custom window-decoration state. Title bar window controls hover
      * tracking + animations. -1 in tb_btn_hover means no button hovered. */
     int      tb_btn_hover;           /* -1 none, 0 min, 1 max, 2 close */
