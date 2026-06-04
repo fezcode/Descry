@@ -29,6 +29,8 @@ typedef enum {
     ICON_VAULT_SEARCH,
     /* Command palette — terminal prompt glyph. */
     ICON_COMMAND,
+    /* Split live-preview — panel split into two columns. */
+    ICON_SPLIT,
     ICON_COUNT,
 } IconId;
 

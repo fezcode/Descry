@@ -98,6 +98,7 @@ typedef struct {
 
     /* Sidebar resize handle (drag the divider to resize) */
     bool     resizing_sidebar;
+    bool     resizing_split;         /* dragging the split-preview divider */
     SDL_Cursor* cursor_resize;
     bool     cursor_is_resize;
     /* Window-edge resize cursors (used while hovering the borderless
@@ -429,8 +430,8 @@ typedef struct {
     /* Per-button animation level [0..1] for the chrome bar; eased toward
      * 1 when the button is hovered, 0 otherwise. Drives bg fade and the
      * animated underline. Indexed by ChromeButton enum value (0..CB_COUNT-1). */
-    float    chrome_hover_t[7];   /* one per CB_* enum value */
-    float    chrome_press_t[7];
+    float    chrome_hover_t[8];   /* one per CB_* enum value */
+    float    chrome_press_t[8];
 
     /* Animation tick for time-stepped UI animations (chrome hover/press,
      * context menu fade-in, etc.). Updated once per frame. */

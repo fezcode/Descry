@@ -3302,6 +3302,7 @@ static int app_init(App* a, const char* note_path_arg)
 
     a->sidebar_open  = lua_host_cfg_number(a->lua, "sidebar_open",  1) != 0;
     a->split_preview = lua_host_cfg_number(a->lua, "split_preview", 0) != 0;
+    a->split_ratio   = (float)lua_host_cfg_number(a->lua, "split_ratio", 0.5);
     a->sidebar_w     = (int)lua_host_cfg_number(a->lua, "sidebar_width", 240);
     a->outline_pinned   = lua_host_cfg_number(a->lua, "outline_pinned", 0) != 0;
     a->outline_panel_w  = (int)lua_host_cfg_number(a->lua, "outline_panel_width", 240);
@@ -3414,6 +3415,7 @@ static int app_init(App* a, const char* note_path_arg)
     a->split_ratio = 0.5f;
     a->preview_scroll_y = 0;
     a->render_pane = PANE_FULL;
+    a->resizing_split = false;
     a->imgcache = image_cache_create(a->renderer);
 
     vault_init(&a->vault);
@@ -5564,8 +5566,9 @@ enum ChromeButton {
     CB_FIND      = 4,    /* in-doc find */
     CB_VSEARCH   = 5,    /* vault-wide search */
     CB_CMDP      = 6,    /* command palette */
+    CB_SPLIT     = 7,    /* toggle split live-preview */
 };
-#define CB_COUNT 7
+#define CB_COUNT 8
 
 static int chrome_button_size(const App* a) {
     return chrome_row_h(a);     /* square buttons matching the chrome ROW height */
@@ -5601,8 +5604,9 @@ static int chrome_hit_test(const App* a, int mx, int my)
     if (mx >= right - 4 * sz   && mx < right - 3 * sz) return CB_FIND;
     if (mx >= right - 5 * sz   && mx < right - 4 * sz) return CB_VSEARCH;
     if (mx >= right - 6 * sz   && mx < right - 5 * sz) return CB_CMDP;
+    if (mx >= right - 7 * sz   && mx < right - 6 * sz) return CB_SPLIT;
     int pill_w = 100;
-    int pill_x = right - 6 * sz - 10 - pill_w;
+    int pill_x = right - 7 * sz - 10 - pill_w;
     if (mx >= pill_x && mx < pill_x + pill_w) return CB_MODE;
     return CB_NONE;
 }
@@ -5619,6 +5623,7 @@ static void chrome_button_invoke(App* a, int btn)
             break;
         case CB_VSEARCH:  action_vsearch(a);        break;
         case CB_CMDP:     cmdp_open(a);             break;
+        case CB_SPLIT:    action_toggle_split(a);   break;
         case CB_MODE:     action_toggle_edit(a);    break;
         default: break;
     }
@@ -5702,7 +5707,7 @@ static void render_chrome(App* a)
      * the old title-crumb hover/click path is inert. */
     int btn_sz   = chrome_button_size(a);
     int strip_x0 = bx;
-    int strip_x1 = a->win_w - 6 * btn_sz - 110 - 8;   /* before the mode pill */
+    int strip_x1 = a->win_w - 7 * btn_sz - 110 - 8;   /* before the mode pill */
     if (strip_x1 < strip_x0) strip_x1 = strip_x0;
     a->tab_strip_x0 = strip_x0;
     a->tab_strip_x1 = strip_x1;
@@ -5847,13 +5852,19 @@ static void render_chrome(App* a)
         icon_draw(a->renderer, ICON_COMMAND,
                   right - 6 * sz + ipad, icon_off_y, icon_sz, gc);
     }
+    /* Split live-preview toggle: two-column icon, accented when active. */
+    {
+        SDL_Color gc = BTN_PREP(right - 7 * sz, CB_SPLIT, a->split_preview);
+        icon_draw(a->renderer, ICON_SPLIT,
+                  right - 7 * sz + ipad, icon_off_y, icon_sz, gc);
+    }
     #undef BTN_PREP
 
     /* Mode pill: PREVIEW / EDIT. Lives in the chrome row only. */
     {
         int pill_w = 100;
         int pill_h = CRH - 12;
-        int pill_x = right - 6 * sz - 10 - pill_w;
+        int pill_x = right - 7 * sz - 10 - pill_w;
         int pill_y = TBH + (CRH - pill_h) / 2;
         float t  = a->chrome_hover_t[CB_MODE];
         float et = ease_out_cubic(t);
@@ -6976,7 +6987,7 @@ static int ctx_visible_count(const App* a)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return ED_COUNT;
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 2;
-    if (a->ctx_menu_kind == CTX_KIND_TAB)     return 2;
+    if (a->ctx_menu_kind == CTX_KIND_TAB)     return 3;
     if (a->ctx_menu_kind == CTX_KIND_MENU)    return menu_count(a->ctx_menu_target);
     return ctx_sidebar_visible_count(a);
 }
@@ -6995,6 +7006,7 @@ static const char* ctx_label_at(const App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_TAB) {
         if (row == 0) return "Open in Explorer";
         if (row == 1) return "Copy absolute path";
+        if (row == 2) return "Close";
         return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
@@ -7778,10 +7790,11 @@ static void ctx_menu_invoke_row(App* a, int row)
 {
     if (a->ctx_menu_kind == CTX_KIND_TAB) {
         int ti = a->ctx_menu_target;
-        const char* path = (ti >= 0 && ti < a->tabs.count)
-            ? (ti == a->tabs.active ? a->note_path : a->tabs.items[ti].path)
-            : NULL;
         ctx_menu_close(a);
+        if (ti < 0 || ti >= a->tabs.count) return;
+        if (row == 2) { close_tab(a, ti); return; }      /* Close */
+        const char* path = (ti == a->tabs.active)
+            ? a->note_path : a->tabs.items[ti].path;
         if (!path || path[0] == '(') { app_notify(a, "no file on disk"); return; }
         if (row == 0) {                          /* Open in Explorer */
             reveal_file_in_explorer(path);
@@ -8523,6 +8536,7 @@ static int settings_persist(App* a)
             a->cfg_edit_wrap ? "true" : "false");
     fprintf(f, "    split_preview  = %s,\n",
             a->split_preview ? "true" : "false");
+    fprintf(f, "    split_ratio    = %.3f,\n", a->split_ratio);
     fprintf(f, "    close_anim     = %d,  -- 0 off, 1 fade, 2 dissolve\n",
             a->cfg_close_anim);
     fprintf(f, "    sidebar_width  = %d,\n", a->sidebar_w);
@@ -14890,6 +14904,9 @@ static void app_event(App* a, const SDL_Event* e)
                 if (a->sidebar_open &&
                     abs(e->motion.x - a->sidebar_w) <= 3)
                     over_resize = true;
+                if (a->split_preview && e->motion.y >= chrome_bar_h(a) &&
+                    abs(e->motion.x - split_divider_x(a)) <= 3)
+                    over_resize = true;
                 if (a->outline_pinned) {
                     int px = a->win_w - a->outline_panel_w;
                     if (abs(e->motion.x - px) <= 3) over_resize = true;
@@ -14913,6 +14930,20 @@ static void app_event(App* a, const SDL_Event* e)
                 if (w > a->win_w / 2)     w = a->win_w / 2;
                 a->sidebar_w = w;
                 clamp_scroll(a);
+                break;
+            }
+
+            /* Active split-divider resize: set the editor's width fraction. */
+            if (a->resizing_split &&
+                (e->motion.state & SDL_BUTTON_LMASK)) {
+                int l = a->sidebar_open ? a->sidebar_w : 0;
+                int r = a->win_w - (a->outline_pinned ? a->outline_panel_w : 0);
+                if (r > l) {
+                    float ratio = (float)(e->motion.x - l) / (float)(r - l);
+                    if (ratio < 0.2f) ratio = 0.2f;
+                    if (ratio > 0.8f) ratio = 0.8f;
+                    a->split_ratio = ratio;
+                }
                 break;
             }
             /* Active outline-panel resize: width = win_w - mouse.x. */
@@ -15087,6 +15118,7 @@ static void app_event(App* a, const SDL_Event* e)
                 a->mouse_selecting   = false;
                 a->preview_selecting = false;
                 a->resizing_sidebar  = false;
+                a->resizing_split    = false;
                 a->resizing_outline  = false;
                 a->sb_drag           = SB_NONE;
             }
@@ -15565,6 +15597,12 @@ static void app_event(App* a, const SDL_Event* e)
                 break;
             }
             if (e->button.button == SDL_BUTTON_LEFT) {
+                /* Split-divider resize handle (doc area only). */
+                if (a->split_preview && e->button.y >= chrome_bar_h(a) &&
+                    abs(e->button.x - split_divider_x(a)) <= 3) {
+                    a->resizing_split = true;
+                    break;
+                }
                 /* Sidebar resize handle: pin starts a drag, swallows click. */
                 if (a->sidebar_open &&
                     abs(e->button.x - a->sidebar_w) <= 3) {
