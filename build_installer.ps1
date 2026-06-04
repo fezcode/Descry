@@ -1,9 +1,9 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$version = "0.74.0"
+$version = "0.75.0"
 $forge   = "D:\Workhammer\Forge\build\forge.exe"
-$project = "D:\Workhammer\Descry"
-$outDir  = "D:\Workhammer\Descry\dist"
+$project = $PSScriptRoot
+$outDir  = Join-Path $PSScriptRoot "dist"
 $output  = Join-Path $outDir "Descry-Setup-$version.exe"
 
 Write-Host "Building forge.exe (windowsgui) from D:\Workhammer\Forge..."

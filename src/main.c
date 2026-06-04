@@ -98,7 +98,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.74.0"
+#define DESCRY_VERSION "0.75.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
