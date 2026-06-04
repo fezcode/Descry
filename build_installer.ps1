@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$version = "0.73.2"
+$version = "0.74.0"
 $forge   = "D:\Workhammer\Forge\build\forge.exe"
 $project = "D:\Workhammer\Downsee"
 $outDir  = "D:\Workhammer\Downsee\dist"

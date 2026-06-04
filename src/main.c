@@ -33,7 +33,67 @@
   #include <unistd.h>
 #endif
 
-#define DOWNSEE_VERSION "0.73.2"
+/* Absolute path of the single log file, resolved per-OS at startup. Shown to
+ * the user in Settings ("Log file"). Defaults to a cwd-relative name as a
+ * last resort if the per-user data dir can't be resolved. */
+static char g_log_path[1024] = "downsee.log";
+
+/* Create `path` and any missing parent directories. Slashes may be '/' or
+ * '\\'. Best-effort: silently ignores already-exists. */
+static void mkdir_p(const char* path)
+{
+    char tmp[1024];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    size_t n = strlen(tmp);
+    for (size_t i = 1; i <= n; ++i) {
+        if (i == n || tmp[i] == '/' || tmp[i] == '\\') {
+            char saved = tmp[i];
+            tmp[i] = 0;
+#if defined(_WIN32)
+            CreateDirectoryA(tmp, NULL);
+#else
+            mkdir(tmp, 0755);
+#endif
+            if (i == n) break;
+            tmp[i] = saved;
+        }
+    }
+}
+
+/* Resolve the per-OS, per-user location for downsee.log into g_log_path and
+ * make sure its directory exists:
+ *   Windows : %LOCALAPPDATA%\Downsee\downsee.log
+ *   macOS   : ~/Library/Logs/Downsee/downsee.log
+ *   Linux   : $XDG_STATE_HOME/downsee/downsee.log (else ~/.local/state/...)
+ * Falls back to the cwd-relative default if the environment is bare. */
+static void resolve_log_path(void)
+{
+    char dir[1024] = {0};
+#if defined(_WIN32)
+    const char* base = getenv("LOCALAPPDATA");
+    if (!base || !base[0]) base = getenv("APPDATA");
+    if (!base || !base[0]) base = getenv("TEMP");
+    if (base && base[0]) snprintf(dir, sizeof dir, "%s\\Downsee", base);
+#elif defined(__APPLE__)
+    const char* home = getenv("HOME");
+    if (home && home[0]) snprintf(dir, sizeof dir, "%s/Library/Logs/Downsee", home);
+#else
+    const char* xdg  = getenv("XDG_STATE_HOME");
+    const char* home = getenv("HOME");
+    if (xdg && xdg[0])        snprintf(dir, sizeof dir, "%s/downsee", xdg);
+    else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.local/state/downsee", home);
+#endif
+    if (dir[0]) {
+        mkdir_p(dir);
+#if defined(_WIN32)
+        snprintf(g_log_path, sizeof g_log_path, "%s\\downsee.log", dir);
+#else
+        snprintf(g_log_path, sizeof g_log_path, "%s/downsee.log", dir);
+#endif
+    }
+}
+
+#define DOWNSEE_VERSION "0.74.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -881,7 +941,7 @@ static bool path_is_image(const char* path)
     if (!path) return false;
     size_t n = strlen(path);
     static const char* exts[] = {
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
     };
     for (size_t i = 0; i < sizeof exts / sizeof exts[0]; ++i) {
         size_t en = strlen(exts[i]);
@@ -2999,6 +3059,7 @@ static int app_init(App* a, const char* note_path_arg)
     if (first_run) {
         FILE* f = fopen("settings.lua", "wb");
         if (f) {
+            fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
             fprintf(f,
                 "-- Downsee settings (auto-generated on first run).\n"
                 "-- Edit by hand or via Settings (Ctrl+,) — values written\n"
@@ -3663,28 +3724,38 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     if (line->kind == LINE_BLANK) { *y_inout = y + lh / 2; return; }
 
     if (line->kind == LINE_IMAGE) {
-        char src[512];
+        char src[1024];
         size_t n = line->len < sizeof(src) - 1 ? line->len : sizeof(src) - 1;
         memcpy(src, a->doc.data + line->start, n);
         src[n] = 0;
 
-        char path[1024];
-        int is_abs = (src[0] == '/' || src[0] == '\\' ||
-                      (n >= 2 && src[1] == ':'));
-        if (is_abs) {
+        /* http(s):// → pass the URL straight through (the image cache fetches
+         * it on a background thread). Otherwise resolve a filesystem path
+         * relative to the note. */
+        char path[2048];
+        int is_url = (strncmp(src, "http://", 7) == 0 ||
+                      strncmp(src, "https://", 8) == 0);
+        if (is_url) {
             snprintf(path, sizeof path, "%s", src);
         } else {
-            char dir[1024];
-            snprintf(dir, sizeof dir, "%s", a->note_path ? a->note_path : "");
-            char* slash = strrchr(dir, '/');
-            char* bs    = strrchr(dir, '\\');
-            char* last  = slash > bs ? slash : bs;
-            if (last) *last = 0; else dir[0] = 0;
-            snprintf(path, sizeof path, "%s/%s", dir, src);
+            int is_abs = (src[0] == '/' || src[0] == '\\' ||
+                          (n >= 2 && src[1] == ':'));
+            if (is_abs) {
+                snprintf(path, sizeof path, "%s", src);
+            } else {
+                char dir[1024];
+                snprintf(dir, sizeof dir, "%s", a->note_path ? a->note_path : "");
+                char* slash = strrchr(dir, '/');
+                char* bs    = strrchr(dir, '\\');
+                char* last  = slash > bs ? slash : bs;
+                if (last) *last = 0; else dir[0] = 0;
+                snprintf(path, sizeof path, "%s/%s", dir, src);
+            }
         }
 
-        int img_w = 0, img_h = 0;
-        SDL_Texture* tex = image_cache_get(a->imgcache, path, &img_w, &img_h);
+        int img_w = 0, img_h = 0, img_status = IMG_FAILED;
+        SDL_Texture* tex = image_cache_get(a->imgcache, path,
+                                           &img_w, &img_h, &img_status);
         if (tex) {
             int max_w  = doc_x_right(a) - xL - 2 * MARGIN_X;
             int draw_w = img_w;
@@ -3699,8 +3770,13 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
             }
             *y_inout = y + draw_h + lh / 4;
         } else {
-            char placeholder[600];
-            snprintf(placeholder, sizeof placeholder, "[image not found: %s]", src);
+            char placeholder[1200];
+            if (img_status == IMG_LOADING)
+                snprintf(placeholder, sizeof placeholder, "[loading image… %s]", src);
+            else if (is_url)
+                snprintf(placeholder, sizeof placeholder, "[image failed: %s]", src);
+            else
+                snprintf(placeholder, sizeof placeholder, "[image not found: %s]", src);
             if (draw) font_draw_line(a->font_code, placeholder, strlen(placeholder),
                                      x_start, y + font_ascent(a->font_code),
                                      a->fg_muted);
@@ -7642,6 +7718,7 @@ typedef enum {
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
     SET_COLORS,         /* opens the color picker overlay */
     SET_CONVERT_LF,     /* one-shot: rewrite current note as LF */
+    SET_LOG_LOCATION,   /* shows the log path; Enter opens its folder */
     SET_RESET,          /* delete settings.lua, factory defaults */
     SET_COUNT,
 } SettingsRow;
@@ -7654,7 +7731,8 @@ typedef enum {
 static bool settings_is_enter_only_row(SettingsRow r)
 {
     return r == SET_KEYBINDINGS || r == SET_COLORS ||
-           r == SET_CONVERT_LF  || r == SET_RESET;
+           r == SET_CONVERT_LF  || r == SET_RESET  ||
+           r == SET_LOG_LOCATION;
 }
 
 static const char* SETTINGS_LABELS[SET_COUNT] = {
@@ -7674,6 +7752,7 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Keybindings",
     "Colors",
     "Convert this file to LF",
+    "Log file",
     "Reset to defaults",
 };
 
@@ -7734,6 +7813,7 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
                                               "Off");
             break;
         case SET_CONVERT_LF:  snprintf(out, cap, "(Enter)");                  break;
+        case SET_LOG_LOCATION:snprintf(out, cap, "%s", g_log_path);          break;
         case SET_SIDEBAR_W:   snprintf(out, cap, "%d", a->sidebar_w);        break;
         case SET_KEYBINDINGS: snprintf(out, cap, "(Enter)");                 break;
         case SET_COLORS:      snprintf(out, cap, "(Enter)");                 break;
@@ -7865,6 +7945,29 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             if (v < 120) v = 120;
             if (v > a->win_w / 2) v = a->win_w / 2;
             a->sidebar_w = v;
+            break;
+        }
+        case SET_LOG_LOCATION: {
+            /* Open the folder that holds the log so the user can find it. */
+            (void)dir;
+            char folder[1024];
+            snprintf(folder, sizeof folder, "%s", g_log_path);
+            char* slash = strrchr(folder, '/');
+            char* bs    = strrchr(folder, '\\');
+            char* last  = slash > bs ? slash : bs;
+            if (last) *last = 0;
+#if defined(_WIN32)
+            for (int k = 0; folder[k]; k++)
+                if (folder[k] == '/') folder[k] = '\\';
+            ShellExecuteA(NULL, "explore", folder, NULL, NULL, SW_SHOWNORMAL);
+#else
+            {
+                char cmd[1200];
+                snprintf(cmd, sizeof cmd, "xdg-open \"%s\" >/dev/null 2>&1 &", folder);
+                int rc = system(cmd); (void)rc;
+            }
+#endif
+            app_notify(a, "opened log folder");
             break;
         }
         case SET_KEYBINDINGS: {
@@ -8049,6 +8152,7 @@ static int settings_persist(App* a)
     const char* path = "settings.lua";
     FILE* f = fopen(path, "wb");
     if (!f) return -1;
+    fprintf(f, "-- Log file (this OS): %s\n", g_log_path);
     fprintf(f,
         "-- Downsee settings -- auto-generated.\n"
         "-- Edit values to override defaults. Re-saving from the\n"
@@ -16089,11 +16193,13 @@ static void app_event(App* a, const SDL_Event* e)
 int main(int argc, char** argv)
 {
     /* Windows GUI-subsystem apps have no stderr — pipe it to a log file so
-     * fprintf(stderr,...) diagnostics survive. Unbuffered so each line hits
-     * disk immediately even on a hard kill. */
-    if (!freopen("downsee.log", "w", stderr)) { /* nowhere to report */ }
+     * fprintf(stderr,...) diagnostics survive. ONE file in the per-user data
+     * dir (see resolve_log_path), never scattered across launch folders.
+     * Unbuffered so each line hits disk even on a hard kill. */
+    resolve_log_path();
+    if (!freopen(g_log_path, "w", stderr)) { /* nowhere to report */ }
     setvbuf(stderr, NULL, _IONBF, 0);
-    fprintf(stderr, "downsee: log opened\n");
+    fprintf(stderr, "downsee: log opened at %s\n", g_log_path);
 
     App app = {0};
     const char* note = (argc > 1) ? argv[1] : NULL;

@@ -53,7 +53,8 @@ target_link_libraries(downsee PRIVATE
   md4c-html
 )
 if(WIN32)
-  target_link_libraries(downsee PRIVATE comdlg32)
+  # comdlg32: native file dialogs.  wininet: GET remote images in preview.
+  target_link_libraries(downsee PRIVATE comdlg32 wininet)
   # Embed the multi-size .ico into the exe so Explorer + taskbar pick it
   # up automatically. CMake's RC language drives windres on MinGW; the
   # .rc references downsee.ico relative to its own directory.

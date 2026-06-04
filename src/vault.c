@@ -66,7 +66,8 @@ static int has_image_ext(const char* name)
 {
     return ext_eq(name, ".png")  || ext_eq(name, ".jpg") ||
            ext_eq(name, ".jpeg") || ext_eq(name, ".gif") ||
-           ext_eq(name, ".webp") || ext_eq(name, ".bmp");
+           ext_eq(name, ".webp") || ext_eq(name, ".bmp") ||
+           ext_eq(name, ".svg");
 }
 
 static void items_reserve(Vault* v, size_t extra)
