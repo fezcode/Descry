@@ -957,7 +957,7 @@ static bool path_is_image(const char* path)
     return false;
 }
 
-static int load_note(App* a, const char* path)
+static int load_into_live(App* a, const char* path)
 {
     /* Image file? Synthesize a tiny markdown buffer whose only line is an
      * image embed so the existing LINE_IMAGE renderer picks it up. The
@@ -1010,6 +1010,60 @@ static int load_note(App* a, const char* path)
 
     update_window_title(a);
     fprintf(stderr, "descry: opened %s (%zu lines)\n", path, a->doc.line_count);
+    return 0;
+}
+
+/* ---- Tabs: open files share one live document; others are parked ---------
+ * load_into_live (above) reads a file's bytes into the live buffer. The
+ * functions below add the tab layer on top: the ACTIVE tab's state lives in
+ * the live a->buf/note_path/scroll/edit_mode/viewing_image fields, and every
+ * other open file is parked in a->tabs.items[i]. */
+
+/* Park the active tab's live state back into its slot. No-op if none active. */
+static void tabs_park_active(App* a)
+{
+    if (a->tabs.active < 0 || a->tabs.active >= a->tabs.count) return;
+    tab_store(&a->tabs.items[a->tabs.active], a->note_path, &a->buf,
+              a->scroll_y, a->scroll_x, a->edit_mode, a->viewing_image);
+}
+
+/* Make tab i active: park the current file, move slot i into the live fields,
+ * and reparse the preview for the newly-active document. */
+static void switch_to_tab(App* a, int i)
+{
+    if (i < 0 || i >= a->tabs.count || i == a->tabs.active) return;
+    tabs_park_active(a);
+    tab_load(&a->tabs.items[i], &a->note_path, &a->buf,
+             &a->scroll_y, &a->scroll_x, &a->edit_mode, &a->viewing_image);
+    a->tabs.active   = i;
+    a->doc_height_px = 0;
+    a->doc_width_px  = 0;
+    buffer_invalidate_row_cache(&a->buf);
+    reparse_preview(a);
+    a->vault.selected = a->note_path
+        ? vault_index_of(&a->vault, a->note_path) : -1;
+    update_window_title(a);
+}
+
+/* Tab-aware open: focus `path`'s existing tab, else park the current file and
+ * load `path` into a new tab. This is what every "user opened a file" path
+ * calls (it keeps the old load_note name so all call sites route through it).
+ * Returns 0 on success, -1 on load failure (the new tab is rolled back). */
+static int load_note(App* a, const char* path)
+{
+    int existing = tablist_find(&a->tabs, path);
+    if (existing >= 0) { switch_to_tab(a, existing); return 0; }
+
+    int prev = a->tabs.active;
+    tabs_park_active(a);              /* prev safe in its slot; a->buf now empty */
+    int idx = tablist_append(&a->tabs, path);
+    a->tabs.active = idx;
+    if (load_into_live(a, path) != 0) {
+        tablist_remove(&a->tabs, idx);   /* idx is last; prev index unchanged */
+        a->tabs.active = -1;             /* force switch_to_tab to run */
+        if (prev >= 0) switch_to_tab(a, prev);
+        return -1;
+    }
     return 0;
 }
 
@@ -3260,6 +3314,7 @@ static int app_init(App* a, const char* note_path_arg)
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
 
     buffer_init(&a->buf);
+    tablist_init(&a->tabs);
     a->imgcache = image_cache_create(a->renderer);
 
     vault_init(&a->vault);
@@ -7967,8 +8022,9 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             int prev = a->cfg_line_endings;
             a->cfg_line_endings = 1;     /* force LF */
             if (save_note_with_eol(a, a->note_path) == 0) {
-                /* Reload to scrub any \r chars from the buffer. */
-                load_note(a, a->note_path);
+                /* Reload to scrub any \r chars from the buffer. Primitive
+                 * reload (same file = active tab), not the tab-aware open. */
+                load_into_live(a, a->note_path);
                 app_notify(a, "converted to LF");
             } else {
                 app_notify(a, "save failed");
