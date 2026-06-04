@@ -1315,6 +1315,20 @@ static bool confirm_discard(App* a)
         "You have unsaved changes. Discard them?", "Discard", "Cancel");
 }
 
+/* Like confirm_discard, but also accounts for unsaved edits parked in other
+ * open tabs — used on quit/close so non-active dirty tabs aren't lost
+ * silently now that several files can be open at once. */
+static bool confirm_discard_all(App* a)
+{
+    bool any = a->buf.dirty;
+    for (int i = 0; i < a->tabs.count && !any; ++i)
+        if (i != a->tabs.active && a->tabs.items[i].buf.dirty) any = true;
+    if (!any) return true;
+    return confirm_action(a, "Unsaved changes",
+        "You have unsaved changes in open tabs. Discard them all?",
+        "Discard", "Cancel");
+}
+
 /* Close tab i. If it's the active tab and dirty, confirm first; if it's a
  * non-active dirty tab, surface it and confirm. Activates a neighbor, or
  * leaves an empty welcome buffer when the last tab closes. */
@@ -5351,7 +5365,7 @@ static void titlebar_button_invoke(App* a, int btn)
 #endif
             break;
         case TBB_CLOSE:
-            if (confirm_discard(a)) a->running = false;
+            if (confirm_discard_all(a)) a->running = false;
             break;
         default: break;
     }
@@ -13667,7 +13681,7 @@ typedef void (*ActionFn)(App*);
 static void action_save_as(App* a);
 
 static void action_quit          (App* a) {
-    if (confirm_discard(a)) a->running = false;
+    if (confirm_discard_all(a)) a->running = false;
 }
 static void action_save          (App* a) {
     if (a->viewing_image) {
@@ -14493,7 +14507,7 @@ static void app_event(App* a, const SDL_Event* e)
 
     switch (e->type) {
         case SDL_QUIT:
-            if (confirm_discard(a)) a->running = false;
+            if (confirm_discard_all(a)) a->running = false;
             break;
 
         case SDL_WINDOWEVENT:
@@ -14913,7 +14927,8 @@ static void app_event(App* a, const SDL_Event* e)
                     dnd_reset(a);
                     if (idx >= 0 && idx < (int)a->vault.count) {
                         VaultItem* it = &a->vault.items[idx];
-                        if (!it->is_dir && confirm_discard(a))
+                        if (!it->is_dir)         /* opening parks the current
+                                                  * file, so no discard prompt */
                             load_note(a, it->path);
                     }
                 }
