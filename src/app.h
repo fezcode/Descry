@@ -8,6 +8,7 @@
 #include "buffer.h"
 #include "image.h"
 #include "markdown.h"
+#include "tabs.h"
 #include "vault.h"
 
 typedef struct Font    Font;
@@ -67,6 +68,11 @@ typedef struct {
      * bulk-invalidated so we don't reuse stale heights. */
     int      row_cache_wrap_w;
     bool     row_cache_wrap_on;
+
+    /* Open tabs. The ACTIVE tab's live state lives in the a->buf / note_path /
+     * scroll / edit_mode / viewing_image fields; tabs.items[tabs.active] is a
+     * stale husk until parked via tabs_park_active(). */
+    TabList  tabs;
 
     /* Vault sidebar */
     Vault    vault;

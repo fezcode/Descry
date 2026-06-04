@@ -39,6 +39,7 @@ add_executable(descry
   src/lua_host.c
   src/markdown.c
   src/regex.c
+  src/tabs.c
   src/vault.c
 )
 target_include_directories(descry PRIVATE src vendor/nanosvg)
