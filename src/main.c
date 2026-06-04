@@ -3301,6 +3301,7 @@ static int app_init(App* a, const char* note_path_arg)
     }
 
     a->sidebar_open  = lua_host_cfg_number(a->lua, "sidebar_open",  1) != 0;
+    a->split_preview = lua_host_cfg_number(a->lua, "split_preview", 0) != 0;
     a->sidebar_w     = (int)lua_host_cfg_number(a->lua, "sidebar_width", 240);
     a->outline_pinned   = lua_host_cfg_number(a->lua, "outline_pinned", 0) != 0;
     a->outline_panel_w  = (int)lua_host_cfg_number(a->lua, "outline_panel_width", 240);
@@ -5576,6 +5577,7 @@ static void action_settings      (App* a);
 static void action_toggle_sidebar(App* a);
 static void action_toggle_edit   (App* a);
 static void action_toggle_wrap   (App* a);
+static void action_toggle_split  (App* a);
 static void action_find          (App* a);
 static void action_outline_pin   (App* a);
 static void action_vsearch       (App* a);
@@ -6795,6 +6797,7 @@ static const MenuItem MENU_VIEW[] = {
     { "Toggle Edit/Preview", "Ctrl+E", action_toggle_edit },
     { "Toggle Sidebar",      "Ctrl+B", action_toggle_sidebar },
     { "Toggle Word Wrap",    "Alt+Z",  action_toggle_wrap },
+    { "Toggle Live Preview", "Ctrl+\\",action_toggle_split },
     { "Outline Panel",       NULL,     action_outline_pin },
     { "Outline\xe2\x80\xa6",  NULL,     action_outline },
     { "Backlinks\xe2\x80\xa6",NULL,    action_backlinks },
@@ -8518,6 +8521,8 @@ static int settings_persist(App* a)
             a->cfg_line_endings);
     fprintf(f, "    edit_wrap      = %s,\n",
             a->cfg_edit_wrap ? "true" : "false");
+    fprintf(f, "    split_preview  = %s,\n",
+            a->split_preview ? "true" : "false");
     fprintf(f, "    close_anim     = %d,  -- 0 off, 1 fade, 2 dissolve\n",
             a->cfg_close_anim);
     fprintf(f, "    sidebar_width  = %d,\n", a->sidebar_w);
@@ -13965,6 +13970,18 @@ static void action_toggle_wrap   (App* a) {
     settings_persist(a);
     app_notify(a, a->cfg_edit_wrap ? "word wrap on" : "word wrap off");
 }
+static void action_toggle_split  (App* a) {
+    if (a->viewing_image) { app_notify(a, "image files are view-only"); return; }
+    a->split_preview = !a->split_preview;
+    if (a->split_preview) {
+        a->preview_scroll_y = a->scroll_y;   /* start the preview aligned */
+        a->edit_mode = true;                 /* left pane is the editor */
+        SDL_StartTextInput();
+        ensure_cursor_visible(a);
+    }
+    settings_persist(a);
+    app_notify(a, a->split_preview ? "live preview on" : "live preview off");
+}
 static void action_toggle_edit   (App* a) {
     if (a->viewing_image) {
         app_notify(a, "image files are view-only");
@@ -14465,6 +14482,7 @@ static const ActionEntry ACTIONS[] = {
     { "toggle_edit",     "View",       action_toggle_edit     },
     { "toggle_sidebar",  "View",       action_toggle_sidebar  },
     { "toggle_wrap",     "View",       action_toggle_wrap     },
+    { "toggle_split",    "View",       action_toggle_split    },
 
     { "settings",        "App",        action_settings        },
     { "keybindings",     "App",        action_keybindings     },
@@ -14496,6 +14514,7 @@ static const struct { const char* keystr; const char* action; } DEFAULT_KEYS[] =
     { "ctrl+b",       "toggle_sidebar" },
     { "ctrl+e",       "toggle_edit"    },
     { "alt+z",        "toggle_wrap"    },
+    { "ctrl+\\",      "toggle_split"   },
     { "ctrl+z",       "undo"           },
     { "ctrl+shift+z", "redo"           },
     { "ctrl+y",       "redo"           },
@@ -16583,6 +16602,10 @@ static void app_event(App* a, const SDL_Event* e)
             }
             if (ctrl && k == SDLK_w) {
                 if (a->tabs.active >= 0) close_tab(a, a->tabs.active);
+                break;
+            }
+            if (ctrl && k == SDLK_BACKSLASH) {
+                action_toggle_split(a);
                 break;
             }
 
