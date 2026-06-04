@@ -76,6 +76,7 @@ typedef struct {
     bool     split_preview;
     int      preview_scroll_y;     /* right pane's own vertical scroll */
     int      preview_doc_height_px;/* right pane's rendered content height */
+    unsigned long preview_parsed_seq;/* buf.seq the preview doc was parsed at */
     float    split_ratio;          /* editor's fraction of the doc width (~0.5) */
     int      render_pane;          /* PANE_FULL / PANE_LEFT / PANE_RIGHT */
 

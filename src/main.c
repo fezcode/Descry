@@ -11580,6 +11580,13 @@ static void app_render(App* a)
     a->preview_row_count = 0;
 
     if (a->split_preview && !a->viewing_image) {
+        /* Live preview: reparse the doc only when the buffer changed since the
+         * last parse, so the right pane reflects edits as you type without
+         * reparsing every idle frame. */
+        if (a->buf.seq != a->preview_parsed_seq) {
+            reparse_preview(a);
+            a->preview_parsed_seq = a->buf.seq;
+        }
         /* Editor on the left, live preview of the SAME doc on the right. Each
          * pass confines itself via render_pane → doc_x_left/right. The preview
          * borrows a->scroll_y for the duration of its pass (swap in/out) so

@@ -32,6 +32,11 @@ typedef struct {
     int    pref_col;
     bool   dirty;
 
+    /* Bumped on every content mutation (insert/delete/undo/redo/set_text).
+     * Lets the split live-preview reparse only when the text actually
+     * changed, instead of every frame. */
+    unsigned long seq;
+
     /* Line-start index. line_starts[0] == 0 always. line_starts[i] is the
      * byte offset of the first character of line i. Maintained incrementally
      * by every mutation so line_count/start/end and cursor_pos are O(1) /

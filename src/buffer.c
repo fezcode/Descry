@@ -168,6 +168,7 @@ static void apply_insert(Buffer* b, size_t pos, const char* s, size_t n)
     memmove(b->data + pos + n, b->data + pos, b->len - pos + 1);
     memcpy(b->data + pos, s, n);
     b->len += n;
+    b->seq++;
     lis_after_insert(b, pos, s, n);
 }
 
@@ -175,6 +176,7 @@ static void apply_delete(Buffer* b, size_t pos, size_t n)
 {
     memmove(b->data + pos, b->data + pos + n, b->len - pos - n + 1);
     b->len -= n;
+    b->seq++;
     lis_after_delete(b, pos, n);
 }
 
@@ -259,6 +261,7 @@ void buffer_set_text(Buffer* b, const char* s, size_t n)
     for (size_t i = 0; i < b->op_count; ++i) free(b->ops[i].text);
     b->op_count = b->op_head = b->saved_head = 0;
     b->coalesce = OP_NONE;
+    b->seq++;
     lis_rebuild(b);
 }
 
