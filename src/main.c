@@ -566,7 +566,31 @@ static SDL_Color color_from_cfg(LuaHost* L, const char* key,
     return (SDL_Color){ rgba[0], rgba[1], rgba[2], rgba[3] };
 }
 
-static int doc_x_left(const App* a) { return a->sidebar_open ? a->sidebar_w : 0; }
+/* Split-preview pane selector, consulted by doc_x_left/right so the existing
+ * editor/preview renderers confine themselves to one half without any change
+ * to their bodies. Set transiently during app_render; PANE_FULL otherwise. */
+#define PANE_FULL  0
+#define PANE_LEFT  1
+#define PANE_RIGHT 2
+
+/* X of the divider between the editor (left) and live-preview (right) panes
+ * when split_preview is on. Computes the doc-area extents inline to avoid
+ * recursing through doc_x_left/right. */
+static int split_divider_x(const App* a)
+{
+    int l = a->sidebar_open ? a->sidebar_w : 0;
+    int r = a->win_w - (a->outline_pinned ? a->outline_panel_w : 0);
+    float ratio = (a->split_ratio > 0.15f && a->split_ratio < 0.85f)
+                  ? a->split_ratio : 0.5f;
+    return l + (int)((r - l) * ratio);
+}
+
+static int doc_x_left(const App* a)
+{
+    if (a->split_preview && a->render_pane == PANE_RIGHT)
+        return split_divider_x(a) + 1;
+    return a->sidebar_open ? a->sidebar_w : 0;
+}
 
 /* Add the user's line-spacing override to a font's natural line height.
  * Used by every render-time line stepping so the user can loosen the
@@ -584,6 +608,8 @@ static void path_to_forward(char* s);
  * when the outline is pinned to the right. */
 static int doc_x_right(const App* a)
 {
+    if (a->split_preview && a->render_pane == PANE_LEFT)
+        return split_divider_x(a);
     return a->win_w - (a->outline_pinned ? a->outline_panel_w : 0);
 }
 
@@ -3383,6 +3409,10 @@ static int app_init(App* a, const char* note_path_arg)
     a->tab_scroll_x = 0;
     a->tab_strip_count = 0;
     a->tab_strip_x0 = a->tab_strip_x1 = 0;
+    a->split_preview = false;
+    a->split_ratio = 0.5f;
+    a->preview_scroll_y = 0;
+    a->render_pane = PANE_FULL;
     a->imgcache = image_cache_create(a->renderer);
 
     vault_init(&a->vault);
@@ -11525,11 +11555,38 @@ static void app_render(App* a)
     a->hit_count = 0;        /* refilled by styled_run during preview */
     a->preview_row_count = 0;
 
-    if (a->edit_mode) a->doc_height_px = render_editor(a);
-    else              a->doc_height_px = render_preview(a, true);
+    if (a->split_preview && !a->viewing_image) {
+        /* Editor on the left, live preview of the SAME doc on the right. Each
+         * pass confines itself via render_pane → doc_x_left/right. The preview
+         * borrows a->scroll_y for the duration of its pass (swap in/out) so
+         * its render body stays unchanged while keeping an independent scroll. */
+        a->render_pane = PANE_LEFT;
+        a->doc_height_px = render_editor(a);
+        render_find_highlights(a);
 
-    if (!a->edit_mode) render_preview_selection(a);
-    if (a->edit_mode) render_find_highlights(a);
+        a->render_pane = PANE_RIGHT;
+        int saved_scroll = a->scroll_y;
+        a->scroll_y = a->preview_scroll_y;
+        render_preview(a, true);
+        render_preview_selection(a);
+        a->preview_scroll_y = a->scroll_y;       /* render may have clamped */
+        a->scroll_y = saved_scroll;
+
+        a->render_pane = PANE_FULL;
+
+        int dx = split_divider_x(a);
+        SDL_Rect dv = { dx, chrome_bar_h(a), 1,
+                        a->win_h - chrome_bar_h(a) - status_bar_h(a) };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 90);
+        SDL_RenderFillRect(a->renderer, &dv);
+    } else {
+        if (a->edit_mode) a->doc_height_px = render_editor(a);
+        else              a->doc_height_px = render_preview(a, true);
+
+        if (!a->edit_mode) render_preview_selection(a);
+        if (a->edit_mode) render_find_highlights(a);
+    }
     render_scrollbar(a);
     render_hscrollbar(a);
     render_sidebar(a);
