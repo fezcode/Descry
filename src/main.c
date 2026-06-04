@@ -3478,34 +3478,8 @@ static int app_init(App* a, const char* note_path_arg)
      * the user's most-recent docs even if the start path is the default. */
     recent_load(a);
 
-    const char* start = note_path_arg;
-    if (!start && a->vault.count > 0) start = a->vault.items[0].path;
-    if (!start) start = "data/sample.md";
-
-    if (load_note(a, start) != 0) {
-        /* Fallback chain so a bad CLI arg or missing file never kills the
-         * window. Try vault[0], then sample.md, then a welcome doc. */
-        bool ok = false;
-        if (a->vault.count > 0 && load_note(a, a->vault.items[0].path) == 0)
-            ok = true;
-        else if (load_note(a, "data/sample.md") == 0)
-            ok = true;
-        if (!ok) {
-            const char* welcome =
-                "# Welcome to Descry\n\n"
-                "No note loaded. Try one of these:\n\n"
-                "- Press **Ctrl+O** to open a file\n"
-                "- Click an item in the sidebar (Ctrl+B to toggle)\n"
-                "- Press **Ctrl+E** to switch to edit mode\n";
-            free(a->note_path);
-            a->note_path = strdup("(welcome)");
-            buffer_set_text(&a->buf, welcome, strlen(welcome));
-            reparse_preview(a);
-            update_window_title(a);
-        }
-    }
-
-    a->edit_mode = lua_host_cfg_number(a->lua, "start_in_edit_mode", 0) != 0;
+    /* Note opening is deferred until after the .descry.state read below, so a
+     * saved tab session can be restored first. See "Open the session". */
     /* Optional: open the settings / keybindings page on launch. Useful for
      * first-run UX and as a debug aid since SDL doesn't always receive
      * synthesized keystrokes from external automation. */
@@ -3523,9 +3497,13 @@ static int app_init(App* a, const char* note_path_arg)
     a->cur_nesw  = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
     a->cur_kind  = 0;
 
-    /* Restore folder-collapse state and saved sidebar width from a sidecar
-     * state file in the vault. Lines starting with `@` are app-state
-     * directives (currently `@sidebar_w=240`); other lines are paths. */
+    /* Restore folder-collapse state, sidebar width, and the open-tab session
+     * from a sidecar state file in the vault. `@`-prefixed lines are app-state
+     * directives (@sidebar_w, @tab, @active); other lines are collapsed-dir
+     * paths. Tab paths are collected here and opened after this block. */
+    char restore_paths[64][1024];
+    int  restore_count  = 0;
+    int  restore_active = -1;
     {
         char st[1024];
         snprintf(st, sizeof st, "%s/.descry.state", vault_path);
@@ -3537,6 +3515,14 @@ static int app_init(App* a, const char* note_path_arg)
                 while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
                     line[--n] = 0;
                 if (n == 0) continue;
+                char tabp[1024]; int act = -1;
+                int kind = tabs_parse_state_line(line, tabp, sizeof tabp, &act);
+                if (kind == 1) {
+                    if (restore_count < 64)
+                        snprintf(restore_paths[restore_count++], 1024, "%s", tabp);
+                    continue;
+                }
+                if (kind == 2) { restore_active = act; continue; }
                 if (line[0] == '@') {
                     if (strncmp(line, "@sidebar_w=", 11) == 0) {
                         int w = atoi(line + 11);
@@ -3556,6 +3542,40 @@ static int app_init(App* a, const char* note_path_arg)
         }
     }
 
+    /* Open the session: a CLI note arg overrides; otherwise restore the saved
+     * tab set; otherwise fall back to the first vault note / sample; otherwise
+     * leave a welcome buffer. */
+    if (note_path_arg) {
+        load_note(a, note_path_arg);
+    } else {
+        for (int i = 0; i < restore_count; ++i) {
+            FILE* probe = fopen(restore_paths[i], "rb");
+            if (!probe) continue;            /* file vanished since last run */
+            fclose(probe);
+            load_note(a, restore_paths[i]);
+        }
+        if (restore_active >= 0 && restore_active < a->tabs.count)
+            switch_to_tab(a, restore_active);
+    }
+    if (a->tabs.count == 0) {
+        if (a->vault.count > 0) load_note(a, a->vault.items[0].path);
+        else                    load_note(a, "data/sample.md");
+    }
+    if (a->tabs.count == 0) {
+        const char* welcome =
+            "# Welcome to Descry\n\n"
+            "No note loaded. Try one of these:\n\n"
+            "- Press **Ctrl+O** to open a file\n"
+            "- Click an item in the sidebar (Ctrl+B to toggle)\n"
+            "- Press **Ctrl+E** to switch to edit mode\n";
+        free(a->note_path);
+        a->note_path = strdup("(welcome)");
+        buffer_set_text(&a->buf, welcome, strlen(welcome));
+        reparse_preview(a);
+        update_window_title(a);
+    }
+    a->edit_mode = lua_host_cfg_number(a->lua, "start_in_edit_mode", 0) != 0;
+
     a->running   = true;
     return 0;
 }
@@ -3568,6 +3588,14 @@ static void save_collapse_state(App* a)
     FILE* fp = fopen(st, "wb");
     if (!fp) return;
     fprintf(fp, "@sidebar_w=%d\n", a->sidebar_w);
+    /* Open-tab session. The active tab's path is live in a->note_path; other
+     * tabs hold theirs in their slot — no parking needed since we only read. */
+    for (int i = 0; i < a->tabs.count; ++i) {
+        const char* p = (i == a->tabs.active) ? a->note_path
+                                              : a->tabs.items[i].path;
+        if (p) fprintf(fp, "@tab=%s\n", p);
+    }
+    fprintf(fp, "@active=%d\n", a->tabs.active);
     for (size_t i = 0; i < a->vault.count; ++i) {
         if (a->vault.items[i].is_dir && a->vault.items[i].collapsed)
             fprintf(fp, "%s\n", a->vault.items[i].path);
@@ -3713,6 +3741,7 @@ static void app_shutdown(App* a)
     md_doc_free(&a->doc);
     buffer_free(&a->buf);
     free(a->note_path);
+    tablist_free(&a->tabs);
     free(a->notification_msg);
     free(a->search_matches);
     free(a->search_match_lens);
