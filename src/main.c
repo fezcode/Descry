@@ -16241,6 +16241,23 @@ static void app_event(App* a, const SDL_Event* e)
                 break;
             }
 
+            /* --- Tab switching (global; ahead of the editing keys so
+             * Ctrl+Tab beats the plain-Tab-inserts-spaces handler). --- */
+            if (ctrl && k == SDLK_TAB) {
+                if (a->tabs.count > 1) {
+                    int n  = a->tabs.count;
+                    int nx = sel ? (a->tabs.active - 1 + n) % n
+                                 : (a->tabs.active + 1) % n;
+                    switch_to_tab(a, nx);
+                }
+                break;
+            }
+            if (ctrl && k >= SDLK_1 && k <= SDLK_9) {
+                int want = (k == SDLK_9) ? a->tabs.count - 1 : (k - SDLK_1);
+                if (want >= 0 && want < a->tabs.count) switch_to_tab(a, want);
+                break;
+            }
+
             /* Action lookup: user-set bindings (settings UI) override the
              * Lua keybindings table, which itself overrides DEFAULT_KEYS. */
             char keystr[64];
