@@ -6703,6 +6703,7 @@ static void app_notify(App* a, const char* msg)
 #define CTX_KIND_EDITOR  1
 #define CTX_KIND_MENU    2     /* title-bar File/Edit/View/Help dropdowns */
 #define CTX_KIND_PREVIEW 3     /* right-click on selected text in preview */
+#define CTX_KIND_TAB     4     /* right-click on a tab in the strip */
 
 /* Title-bar menu definitions: a (label, shortcut, action) per menu item.
  * ctx_menu_target stores which menu is open (0=File, 1=Edit, 2=View,
@@ -6942,6 +6943,7 @@ static int ctx_visible_count(const App* a)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return ED_COUNT;
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 2;
+    if (a->ctx_menu_kind == CTX_KIND_TAB)     return 2;
     if (a->ctx_menu_kind == CTX_KIND_MENU)    return menu_count(a->ctx_menu_target);
     return ctx_sidebar_visible_count(a);
 }
@@ -6955,6 +6957,11 @@ static const char* ctx_label_at(const App* a, int row)
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
         if (row == 0) return "Copy";
         if (row == 1) return "Go to source";
+        return "";
+    }
+    if (a->ctx_menu_kind == CTX_KIND_TAB) {
+        if (row == 0) return "Open in Explorer";
+        if (row == 1) return "Copy absolute path";
         return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
@@ -7091,6 +7098,27 @@ static void ctx_menu_open_menu(App* a, int menu_idx, int x, int y)
     a->ctx_menu_target = menu_idx;
     a->ctx_menu_x      = x;
     a->ctx_menu_y      = y;
+    a->ctx_menu_hover  = 0;
+    a->ctx_menu_open_t = 0.0f;
+    for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
+    int rh = ctx_menu_row_h(a);
+    int h  = rh * ctx_visible_count(a) + 8;
+    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
+        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
+    if (a->ctx_menu_y + h > a->win_h - 4)
+        a->ctx_menu_y = a->win_h - 4 - h;
+    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
+    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+}
+
+/* Right-click on a tab. target = tab index. */
+static void ctx_menu_open_tab(App* a, int x, int y, int tab_idx)
+{
+    a->ctx_menu_active = true;
+    a->ctx_menu_kind   = CTX_KIND_TAB;
+    a->ctx_menu_x      = x;
+    a->ctx_menu_y      = y;
+    a->ctx_menu_target = tab_idx;
     a->ctx_menu_hover  = 0;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
@@ -7695,8 +7723,49 @@ static void preview_copy(App* a);
 static void preview_go_to_source(App* a);
 
 /* Single dispatch from a row click, switches on the active menu kind. */
+/* Reveal a file in the OS file manager (Explorer selects the file). */
+static void reveal_file_in_explorer(const char* path)
+{
+    if (!path || !path[0]) return;
+#ifdef _WIN32
+    char target[1024];
+    snprintf(target, sizeof target, "%s", path);
+    for (int k = 0; target[k]; k++) if (target[k] == '/') target[k] = '\\';
+    char args[1100];
+    snprintf(args, sizeof args, "/select,\"%s\"", target);
+    ShellExecuteA(NULL, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
+#else
+    char cmd[1100];
+    snprintf(cmd, sizeof cmd, "xdg-open \"%s\"", path);
+    if (system(cmd) != 0) { /* best effort */ }
+#endif
+}
+
 static void ctx_menu_invoke_row(App* a, int row)
 {
+    if (a->ctx_menu_kind == CTX_KIND_TAB) {
+        int ti = a->ctx_menu_target;
+        const char* path = (ti >= 0 && ti < a->tabs.count)
+            ? (ti == a->tabs.active ? a->note_path : a->tabs.items[ti].path)
+            : NULL;
+        ctx_menu_close(a);
+        if (!path || path[0] == '(') { app_notify(a, "no file on disk"); return; }
+        if (row == 0) {                          /* Open in Explorer */
+            reveal_file_in_explorer(path);
+        } else if (row == 1) {                   /* Copy absolute path */
+            char abs[1024];
+#ifdef _WIN32
+            if (!_fullpath(abs, path, sizeof abs))
+                snprintf(abs, sizeof abs, "%s", path);
+#else
+            if (!realpath(path, abs))
+                snprintf(abs, sizeof abs, "%s", path);
+#endif
+            SDL_SetClipboardText(abs);
+            app_notify(a, "copied absolute path");
+        }
+        return;
+    }
     if (a->ctx_menu_kind == CTX_KIND_EDITOR) {
         if (row >= 0 && row < ED_COUNT) ed_menu_invoke(a, (EditorAction)row);
         else                             ctx_menu_close(a);
@@ -15043,10 +15112,11 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
             }
-            /* Tab strip clicks: left = switch (or × = close), middle = close.
-             * Gated to the strip region + no floating overlay. */
+            /* Tab strip clicks: left = switch (or × = close), middle = close,
+             * right = context menu. Gated to the strip region + no overlay. */
             if ((e->button.button == SDL_BUTTON_LEFT ||
-                 e->button.button == SDL_BUTTON_MIDDLE) &&
+                 e->button.button == SDL_BUTTON_MIDDLE ||
+                 e->button.button == SDL_BUTTON_RIGHT) &&
                 !a->backlinks_active && !a->tags_active && !a->tpl_active &&
                 !a->outline_active   && !a->vsearch_active &&
                 !a->picker_active    && !a->keybind_active &&
@@ -15059,13 +15129,17 @@ static void app_event(App* a, const SDL_Event* e)
                     SDL_Rect cr = a->tab_hits[i].close_rect;
                     if (e->button.x >= r.x && e->button.x < r.x + r.w &&
                         e->button.y >= r.y && e->button.y < r.y + r.h) {
-                        bool on_close = (e->button.x >= cr.x &&
-                                         e->button.x < cr.x + cr.w);
-                        if (e->button.button == SDL_BUTTON_MIDDLE ||
-                            (e->button.button == SDL_BUTTON_LEFT && on_close))
-                            close_tab(a, i);
-                        else
-                            switch_to_tab(a, i);
+                        if (e->button.button == SDL_BUTTON_RIGHT) {
+                            ctx_menu_open_tab(a, e->button.x, e->button.y, i);
+                        } else {
+                            bool on_close = (e->button.x >= cr.x &&
+                                             e->button.x < cr.x + cr.w);
+                            if (e->button.button == SDL_BUTTON_MIDDLE ||
+                                (e->button.button == SDL_BUTTON_LEFT && on_close))
+                                close_tab(a, i);
+                            else
+                                switch_to_tab(a, i);
+                        }
                         break;
                     }
                 }
