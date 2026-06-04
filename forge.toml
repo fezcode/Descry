@@ -48,6 +48,12 @@ type  = "finish"
 title = "Installation Complete"
 body  = "Descry has been installed successfully.\n\nClick Finish to close."
 
+[[steps.launches]]
+kind    = "app"
+target  = "${INSTALLDIR}/descry.exe"
+label   = "Launch Descry"
+checked = true
+
 # Application binaries and DLL dependencies
 [[files]]
 src = "build/descry.exe"

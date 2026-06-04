@@ -11,6 +11,7 @@ compile_commands.json
 
 # Dev-time artifacts at the repo root
 /*.png
+!/banner-image.png
 *.log
 /bash.exe.stackdump
 

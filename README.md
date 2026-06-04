@@ -1,3 +1,5 @@
+![Descry — a keyboard-driven markdown editor in C, SDL2 & Lua](./banner-image.png)
+
 # Descry
 
 A keyboard-driven markdown editor in C, SDL2, and Lua. Aims at the

@@ -15239,11 +15239,12 @@ static void app_event(App* a, const SDL_Event* e)
                     break;
                 }
             }
-            /* Tab strip clicks: left = switch (or × = close), middle = close,
-             * right = context menu. Gated to the strip region + no overlay. */
+            /* Tab strip left/middle clicks: left = switch (or × = close),
+             * middle = close. Right-click → tab menu is handled in the
+             * right-click block below so it works even while a menu is open.
+             * Gated to the strip region + no floating overlay. */
             if ((e->button.button == SDL_BUTTON_LEFT ||
-                 e->button.button == SDL_BUTTON_MIDDLE ||
-                 e->button.button == SDL_BUTTON_RIGHT) &&
+                 e->button.button == SDL_BUTTON_MIDDLE) &&
                 !a->backlinks_active && !a->tags_active && !a->tpl_active &&
                 !a->outline_active   && !a->vsearch_active &&
                 !a->picker_active    && !a->keybind_active &&
@@ -15256,17 +15257,13 @@ static void app_event(App* a, const SDL_Event* e)
                     SDL_Rect cr = a->tab_hits[i].close_rect;
                     if (e->button.x >= r.x && e->button.x < r.x + r.w &&
                         e->button.y >= r.y && e->button.y < r.y + r.h) {
-                        if (e->button.button == SDL_BUTTON_RIGHT) {
-                            ctx_menu_open_tab(a, e->button.x, e->button.y, i);
-                        } else {
-                            bool on_close = (e->button.x >= cr.x &&
-                                             e->button.x < cr.x + cr.w);
-                            if (e->button.button == SDL_BUTTON_MIDDLE ||
-                                (e->button.button == SDL_BUTTON_LEFT && on_close))
-                                close_tab(a, i);
-                            else
-                                switch_to_tab(a, i);
-                        }
+                        bool on_close = (e->button.x >= cr.x &&
+                                         e->button.x < cr.x + cr.w);
+                        if (e->button.button == SDL_BUTTON_MIDDLE ||
+                            (e->button.button == SDL_BUTTON_LEFT && on_close))
+                            close_tab(a, i);
+                        else
+                            switch_to_tab(a, i);
                         break;
                     }
                 }
@@ -15570,7 +15567,23 @@ static void app_event(App* a, const SDL_Event* e)
              * right-click in the editor (edit mode) opens the formatting
              * menu. Anywhere else closes any open menu. */
             if (e->button.button == SDL_BUTTON_RIGHT) {
-                if (a->sidebar_open && e->button.x < a->sidebar_w) {
+                if (e->button.y >= title_bar_h(a) &&
+                    e->button.y <  chrome_bar_h(a) &&
+                    e->button.x >= a->tab_strip_x0 &&
+                    e->button.x <  a->tab_strip_x1) {
+                    /* Right-click in the tab strip → tab context menu. Works
+                     * even if another menu is already open. */
+                    int hit = -1;
+                    for (int i = 0; i < a->tab_strip_count; ++i) {
+                        SDL_Rect r = a->tab_hits[i].rect;
+                        if (e->button.x >= r.x && e->button.x < r.x + r.w) {
+                            hit = i; break;
+                        }
+                    }
+                    if (hit >= 0) ctx_menu_open_tab(a, e->button.x, e->button.y, hit);
+                    else          ctx_menu_close(a);
+                } else if (a->sidebar_open && e->button.x < a->sidebar_w &&
+                           e->button.y >= chrome_bar_h(a)) {
                     int idx = sidebar_item_at(a, e->button.x, e->button.y);
                     ctx_menu_open(a, e->button.x, e->button.y, idx);
                 } else if (a->edit_mode &&
