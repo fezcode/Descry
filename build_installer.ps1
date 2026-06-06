@@ -17,8 +17,10 @@ try {
 
 Push-Location $project
 try {
-    & $forge build --out $outDir
-    if ($LASTEXITCODE -ne 0) { throw "forge build failed with exit code $LASTEXITCODE" }
+    # forge.exe is a GUI-subsystem binary, so PowerShell's call operator (&) does
+    # not wait for it and $LASTEXITCODE is unreliable. Use Start-Process -Wait.
+    $p = Start-Process -FilePath $forge -ArgumentList @("build", "--out", $outDir) -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { throw "forge build failed with exit code $($p.ExitCode)" }
 } finally {
     Pop-Location
 }
