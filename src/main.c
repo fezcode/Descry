@@ -151,6 +151,12 @@ static float ease_out_cubic(float t);
 static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
     const SDL_Point* p, void* data);
 
+/* App singleton for static menu callbacks that carry no App* (the recent-
+ * vaults submenu, via app_recent_dirs_*). Set once at the top of app_init.
+ * Lives outside _WIN32 because those callbacks are cross-platform even
+ * though the WndProc subclass below is Windows-only. */
+static App* g_app_for_wndproc = NULL;
+
 #if defined(_WIN32)
 /* Win32 WindowProc subclass that fixes aero snap on a borderless window:
  *  - WM_NCCALCSIZE returns 0 to make the client area span the full window
@@ -159,7 +165,6 @@ static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
  *    area so the window doesn't cover the taskbar.
  * Other messages chain to the original WndProc that SDL installed. */
 static WNDPROC g_orig_wndproc    = NULL;
-static App*    g_app_for_wndproc = NULL;
 static LRESULT CALLBACK descry_wndproc(HWND hwnd, UINT msg,
                                         WPARAM wp, LPARAM lp);
 #endif
@@ -374,9 +379,34 @@ static int file_exists(const char* path)
     return 1;
 }
 
+/* Per-OS default monospace font. THE single source of truth for "we have no
+ * usable configured font": first-run settings.lua, the cfg default, and
+ * Settings -> Reset all route through here so the default never drifts. */
+static const char* platform_default_font_path(void)
+{
+#if defined(_WIN32)
+    return "C:/Windows/Fonts/consola.ttf";
+#elif defined(__APPLE__)
+    return "/System/Library/Fonts/Menlo.ttc";
+#else
+    return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+#endif
+}
+
+/* Return `path` if it names a readable file, else the platform default.
+ * Guards against a settings.lua copied between machines pointing at a font
+ * that exists on one OS but not this one (e.g. a Windows path on macOS),
+ * which would otherwise fail every face load and abort startup. */
+static const char* font_path_or_default(const char* path)
+{
+    if (path && path[0] && file_exists(path)) return path;
+    return platform_default_font_path();
+}
+
 static void font_choices_init(void)
 {
     static const struct { const char* name; const char* path; } known[] = {
+#if defined(_WIN32)
         /* Monospace — best for editor */
         {"Consolas",         "C:/Windows/Fonts/consola.ttf"},
         {"Cascadia Code",    "C:/Windows/Fonts/CascadiaCode.ttf"},
@@ -391,6 +421,29 @@ static void font_choices_init(void)
         {"Arial",            "C:/Windows/Fonts/arial.ttf"},
         {"Times New Roman",  "C:/Windows/Fonts/times.ttf"},
         {"Georgia",          "C:/Windows/Fonts/georgia.ttf"},
+#elif defined(__APPLE__)
+        /* Monospace — best for editor (SF Mono only present if installed;
+         * file_exists below silently drops any that are missing). */
+        {"Menlo",            "/System/Library/Fonts/Menlo.ttc"},
+        {"SF Mono",          "/System/Library/Fonts/SFNSMono.ttf"},
+        {"Monaco",           "/System/Library/Fonts/Monaco.ttf"},
+        {"Courier New",      "/System/Library/Fonts/Supplemental/Courier New.ttf"},
+        /* Proportional — readable for body text */
+        {"Helvetica",        "/System/Library/Fonts/Helvetica.ttc"},
+        {"Avenir Next",      "/System/Library/Fonts/Avenir Next.ttc"},
+        {"Georgia",          "/System/Library/Fonts/Supplemental/Georgia.ttf"},
+        {"Times New Roman",  "/System/Library/Fonts/Supplemental/Times New Roman.ttf"},
+        {"Arial",            "/System/Library/Fonts/Supplemental/Arial.ttf"},
+#else
+        /* Monospace — best for editor */
+        {"DejaVu Sans Mono", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"},
+        {"Liberation Mono",  "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"},
+        {"Noto Sans Mono",   "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"},
+        {"Ubuntu Mono",      "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"},
+        /* Proportional — readable for body text */
+        {"DejaVu Sans",      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"},
+        {"Liberation Sans",  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"},
+#endif
         /* Drop bundled fonts in data/fonts/ — they're picked up here too. */
         {"Bundled: Inter",        "data/fonts/Inter-Regular.ttf"},
         {"Bundled: JetBrains",    "data/fonts/JetBrainsMono-Regular.ttf"},
@@ -3161,12 +3214,49 @@ static bool app_dir_modal(App* a, const char* title, const char* start_dir,
     return ok;
 }
 
+/* HiDPI plumbing. The SDL renderer's drawable (device pixels) can exceed the
+ * window size in points — 2x on a Retina display. We keep ALL layout in
+ * logical points (a->win_w/h stay point-sized) and let SDL_RenderSetLogicalSize
+ * map them onto the larger drawable, so no layout constant changes. The only
+ * thing that blurs under that mapping is pre-rasterized glyph textures, so we
+ * publish the device scale to the font module, which rasterizes glyphs at that
+ * scale yet reports logical metrics — crisp text, untouched layout. On a
+ * standard-DPI display the scale is 1.0 and every line here is a no-op. Reloads
+ * fonts when the scale actually changes (e.g. the window is dragged between a
+ * Retina and a non-Retina monitor). */
+static void sync_renderer_logical_size(App* a)
+{
+    if (!a->renderer || !a->window) return;
+    int dw = 0, dh = 0, ww = 0, wh = 0;
+    SDL_GetRendererOutputSize(a->renderer, &dw, &dh);  /* device pixels  */
+    SDL_GetWindowSize(a->window, &ww, &wh);            /* logical points */
+    if (ww <= 0 || wh <= 0) return;
+    a->win_w = ww;
+    a->win_h = wh;
+    SDL_RenderSetIntegerScale(a->renderer, SDL_FALSE);
+    SDL_RenderSetLogicalSize(a->renderer, ww, wh);
+
+    float s = (float)dw / (float)ww;
+    if (s < 1.0f) s = 1.0f;
+    if (s != a->dpi_scale) {
+        a->dpi_scale = s;
+        font_set_render_scale(s);
+        /* Fonts may not exist on the first call (from app_init, before the
+         * first app_reload_fonts); only re-rasterize when already loaded. */
+        if (a->font_body) app_reload_fonts(a);
+    }
+}
+
 static int app_init(App* a, const char* note_path_arg)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return -1;
     }
+    /* Publish the App singleton before anything can render or build a menu;
+     * the recent-vaults submenu callbacks read it on all platforms. */
+    g_app_for_wndproc = a;
+
     /* Bilinear scaling for any texture that gets stretched (rare for us
      * since glyphs are blitted 1:1, but cheap insurance). */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
@@ -3225,10 +3315,10 @@ static int app_init(App* a, const char* note_path_arg)
                 "    sidebar_open = true,\n"
                 "    sidebar_width= 240,\n"
                 "\n"
-                "    font_path    = \"C:/Windows/Fonts/consola.ttf\",\n"
+                "    font_path    = \"%s\",\n"
                 "    font_size    = 16,\n"
                 "    theme        = \"Editorial Dark\",\n"
-                "}\n");
+                "}\n", platform_default_font_path());
             fclose(f);
             fprintf(stderr, "descry: first run -- wrote %s\n", g_settings_path);
             (void)lua_host_load_config(a->lua, g_settings_path);
@@ -3252,14 +3342,14 @@ static int app_init(App* a, const char* note_path_arg)
     int sz_h2   = (int)lua_host_cfg_number(a->lua, "font_size_h2",  22);
     int sz_h3   = (int)lua_host_cfg_number(a->lua, "font_size_h3",  18);
 
-    const char* font_path = lua_host_cfg_string(
-        a->lua, "font_path", "C:/Windows/Fonts/consola.ttf");
-    const char* font_mono = lua_host_cfg_string(
-        a->lua, "font_path_mono", font_path);
+    const char* font_path = font_path_or_default(lua_host_cfg_string(
+        a->lua, "font_path", platform_default_font_path()));
+    const char* font_mono = font_path_or_default(lua_host_cfg_string(
+        a->lua, "font_path_mono", font_path));
     /* IDE chrome font: defaults to body so existing setups don't suddenly
      * shift their UI on first launch after this change. */
-    const char* font_ide  = lua_host_cfg_string(
-        a->lua, "font_path_ide",  font_path);
+    const char* font_ide  = font_path_or_default(lua_host_cfg_string(
+        a->lua, "font_path_ide",  font_path));
     /* Cache the live font config on App so the settings page can mutate it. */
     snprintf(a->cfg_font_path,      sizeof a->cfg_font_path,      "%s", font_path);
     snprintf(a->cfg_font_path_ide,  sizeof a->cfg_font_path_ide,  "%s", font_ide);
@@ -3399,6 +3489,14 @@ static int app_init(App* a, const char* note_path_arg)
     SDL_GetWindowSize(a->window, &a->win_w, &a->win_h);
     fprintf(stderr, "descry: window size %dx%d\n", a->win_w, a->win_h);
 
+    /* Establish the logical->device mapping and font render scale for HiDPI
+     * (Retina) BEFORE any font is created. No-op at scale 1.0 on standard DPI. */
+    sync_renderer_logical_size(a);
+
+    /* Init the buffer BEFORE loading fonts: if a font fails to load and we
+     * bail out below, any render on the way out (e.g. the close animation)
+     * must still find a valid buffer rather than touch line_starts == NULL. */
+    buffer_init(&a->buf);
     if (app_reload_fonts(a) != 0) return -1;
     if (icons_init(a->renderer) != 0)
         fprintf(stderr, "icons_init failed; chrome will fall back to nothing\n");
@@ -3410,7 +3508,6 @@ static int app_init(App* a, const char* note_path_arg)
      * Win+arrow shortcuts work for free. */
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
 
-    buffer_init(&a->buf);
     tablist_init(&a->tabs);
     a->tab_hover = -1;
     a->tab_scroll_x = 0;
@@ -3674,7 +3771,10 @@ static void app_close_anim_fade(App* a)
         float opacity = 1.0f - e;
         if (opacity < 0.0f) opacity = 0.0f;
         SDL_SetWindowOpacity(a->window, opacity);
-        app_render(a);
+        /* Belt-and-suspenders: never render the fade with an un-init'd
+         * buffer (a startup that failed before buffer_init could still
+         * reach a close animation on some paths). */
+        if (a->buf.line_starts) app_render(a);
         SDL_Delay(8);
     }
     SDL_SetWindowOpacity(a->window, 0.0f);
@@ -3811,6 +3911,7 @@ static void app_shutdown(App* a)
     free(a->hits);
     free(a->sidebar_visible);
     free(a->preview_rows);
+    free(a->ptbl_bars);
     if (a->cursor_resize) SDL_FreeCursor(a->cursor_resize);
     if (a->cur_arrow) SDL_FreeCursor(a->cur_arrow);
     if (a->cur_ns)    SDL_FreeCursor(a->cur_ns);
@@ -4287,9 +4388,52 @@ static int render_frontmatter_pill(App* a, int x_left, int y_top, bool draw)
     return y - y_top;
 }
 
+/* ---- wide-table horizontal scroll (preview) ---------------------------- */
+
+/* Append an overflowing table's scrollbar geometry to the per-frame hot list
+ * (grown on demand) so the event loop can hit-test it next frame. */
+static void ptbl_bar_push(App* a, size_t line, SDL_Rect table,
+                          SDL_Rect track, SDL_Rect thumb, int max_scroll)
+{
+    if (a->ptbl_bar_count >= a->ptbl_bar_cap) {
+        size_t nc = a->ptbl_bar_cap ? a->ptbl_bar_cap * 2 : 8;
+        PreviewTableBar* nb = realloc(a->ptbl_bars, nc * sizeof *nb);
+        if (!nb) return;
+        a->ptbl_bars    = nb;
+        a->ptbl_bar_cap = nc;
+    }
+    a->ptbl_bars[a->ptbl_bar_count++] = (PreviewTableBar){
+        .line = line, .table = table, .track = track,
+        .thumb = thumb, .max_scroll = max_scroll
+    };
+}
+
+/* The overflowing table whose visible rect contains (x,y), or NULL. */
+static PreviewTableBar* ptbl_bar_at_point(App* a, int x, int y)
+{
+    for (size_t i = 0; i < a->ptbl_bar_count; ++i) {
+        SDL_Rect r = a->ptbl_bars[i].table;
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+            return &a->ptbl_bars[i];
+    }
+    return NULL;
+}
+
+/* Clamp + store a table's horizontal scroll offset (keyed by its first line). */
+static void ptbl_apply_scroll(App* a, size_t line, int sx, int max_scroll)
+{
+    if (line >= a->doc.line_count) return;
+    if (sx < 0)          sx = 0;
+    if (sx > max_scroll) sx = max_scroll;
+    a->doc.lines[line].h_scroll = sx;
+}
+
 /* Render a contiguous run of LINE_TABLE_HEAD/ROW lines as a grid. Two
  * passes: first collect column count + max pixel-width per column, then
- * lay out cells with padding + a header divider underline. */
+ * lay out cells with padding + a header divider underline. A table wider
+ * than the preview pane gets a per-table horizontal scroll offset (persisted
+ * in MdLine.h_scroll on its first line) and a thin scrollbar beneath it;
+ * tables that fit are unaffected. */
 #define MD_PREV_TABLE_COLS 12
 
 static void render_table_run(App* a, size_t i0, size_t i1,
@@ -4327,7 +4471,39 @@ static void render_table_run(App* a, size_t i0, size_t i1,
     int total_w = 0;
     for (int c = 0; c < col_count; ++c) total_w += col_w[c] + 2 * pad;
 
-    int y = *y_inout;
+    /* Does the table overflow the visible preview width? Only then does it get
+     * its own horizontal scroll + a thin scrollbar beneath it; tables that fit
+     * render exactly as before (ox == xL, no clip, no bar). */
+    int  avail = doc_x_right(a) - MARGIN_X - xL;
+    if (avail < 0) avail = 0;
+    bool overflow = (avail > 0) && (total_w > avail);
+
+    int scroll_x = 0, max_scroll = 0;
+    if (overflow) {
+        max_scroll = total_w - avail;
+        scroll_x   = a->doc.lines[i0].h_scroll;
+        if (scroll_x < 0)          scroll_x = 0;
+        if (scroll_x > max_scroll) scroll_x = max_scroll;
+        a->doc.lines[i0].h_scroll = scroll_x;   /* persist the clamp */
+    }
+    int ox = xL - scroll_x;          /* content origin (== xL when it fits) */
+
+    int y_top  = *y_inout;
+    int y      = y_top;
+    int rows_h = (int)(i1 - i0) * row_h;
+
+    /* Clip the scrolled cells to the visible band so overflow doesn't spill
+     * into the margins. Save/restore any outer clip (e.g. the editor pane in
+     * split view) rather than blindly clearing it. */
+    SDL_Rect saved_clip;
+    SDL_bool had_clip = SDL_FALSE;
+    if (draw && overflow) {
+        had_clip = SDL_RenderIsClipEnabled(a->renderer);
+        if (had_clip) SDL_RenderGetClipRect(a->renderer, &saved_clip);
+        SDL_Rect clip = { xL, y_top, avail, rows_h };
+        SDL_RenderSetClipRect(a->renderer, &clip);
+    }
+
     for (size_t i = i0; i < i1; ++i) {
         const MdLine* l = &a->doc.lines[i];
         bool is_head = (l->kind == LINE_TABLE_HEAD);
@@ -4340,12 +4516,12 @@ static void render_table_run(App* a, size_t i0, size_t i1,
             if (!is_head && ((i - i0) % 2 == 1)) {
                 SDL_SetRenderDrawColor(a->renderer,
                     a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 12);
-                SDL_Rect bg = { xL, y, total_w, row_h };
+                SDL_Rect bg = { ox, y, total_w, row_h };
                 SDL_RenderFillRect(a->renderer, &bg);
             }
         }
 
-        int cx = xL;
+        int cx = ox;
         size_t cs = 0;
         int col = 0;
         for (size_t j = 0; j <= len && col < col_count; ++j) {
@@ -4377,15 +4553,51 @@ static void render_table_run(App* a, size_t i0, size_t i1,
                 a->fg_muted.r, a->fg_muted.g, a->fg_muted.b,
                 is_head ? 140 : 30);
             SDL_RenderDrawLine(a->renderer,
-                xL, y + row_h - 1, xL + total_w, y + row_h - 1);
+                ox, y + row_h - 1, ox + total_w, y + row_h - 1);
             /* Outer top border on the very first row. */
             if (i == i0) {
-                SDL_RenderDrawLine(a->renderer,
-                    xL, y, xL + total_w, y);
+                SDL_RenderDrawLine(a->renderer, ox, y, ox + total_w, y);
             }
         }
         y += row_h;
     }
+
+    if (draw && overflow) {
+        /* Lift the clip before the scrollbar — it sits in the gutter and its
+         * rounded corners would otherwise be clipped. */
+        if (had_clip) SDL_RenderSetClipRect(a->renderer, &saved_clip);
+        else          SDL_RenderSetClipRect(a->renderer, NULL);
+    }
+
+    if (overflow) {
+        const int sb_gap = 3, sb_h = 8;
+        int track_y = y + sb_gap;
+        SDL_Rect track = { xL, track_y, avail, sb_h };
+        int thumb_w = (total_w > 0)
+                      ? (int)((long)avail * avail / total_w) : avail;
+        if (thumb_w < 24)    thumb_w = 24;
+        if (thumb_w > avail) thumb_w = avail;
+        int max_x   = avail - thumb_w;
+        int thumb_x = (max_scroll > 0 && max_x > 0)
+                      ? (int)((long)max_x * scroll_x / max_scroll) : 0;
+        SDL_Rect thumb = { xL + thumb_x, track_y, thumb_w, sb_h };
+
+        if (draw) {
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 30);
+            fill_rrect(a->renderer, track, sb_h / 2);
+            int alpha = (a->sb_drag == SB_PREVIEW_TABLE &&
+                         a->ptbl_drag_line == i0) ? 220 : 130;
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, alpha);
+            fill_rrect(a->renderer, thumb, sb_h / 2);
+
+            SDL_Rect table_rect = { xL, y_top, avail, rows_h };
+            ptbl_bar_push(a, i0, table_rect, track, thumb, max_scroll);
+        }
+        y += sb_gap + sb_h;
+    }
+
     *y_inout = y + lh / 3;     /* a bit of breathing space after the table */
 }
 
@@ -4394,6 +4606,9 @@ static int render_preview(App* a, bool draw)
     int y = doc_y_top(a) - a->scroll_y;
     int win_h = a->win_h;
     int default_lh = line_step(a, a->font_body);
+
+    /* Rebuild the wide-table scrollbar hot list from scratch each paint. */
+    if (draw) a->ptbl_bar_count = 0;
 
     /* If the window width changed since the last paint, every cached row
      * height is potentially stale (wrap re-flowed). Drop them. */
@@ -6501,6 +6716,33 @@ static bool hscrollbar_handle_click(App* a, int btn_x, int btn_y)
     return true;
 }
 
+/* Returns true if a left-click landed on a wide preview table's scrollbar
+ * (thumb grab or track jump), starting an SB_PREVIEW_TABLE drag. Bars come
+ * from the previous render_preview pass. */
+static bool ptbl_handle_mousedown(App* a, int btn_x, int btn_y)
+{
+    for (size_t i = 0; i < a->ptbl_bar_count; ++i) {
+        PreviewTableBar* b = &a->ptbl_bars[i];
+        /* A few px of slop above/below the slim groove for easy grabbing. */
+        if (btn_x <  b->track.x || btn_x >= b->track.x + b->track.w ||
+            btn_y <  b->track.y - 3 || btn_y >= b->track.y + b->track.h + 3)
+            continue;
+        a->sb_drag        = SB_PREVIEW_TABLE;
+        a->ptbl_drag_line = b->line;
+        if (btn_x >= b->thumb.x && btn_x < b->thumb.x + b->thumb.w) {
+            a->sb_drag_offset = btn_x - b->thumb.x;
+        } else {
+            /* Track jump: drop the thumb centered under the cursor. */
+            int sx = hscroll_from_thumb_drag(btn_x, b->track.x, b->track.w,
+                         b->thumb.w, b->thumb.w / 2, b->max_scroll);
+            ptbl_apply_scroll(a, b->line, sx, b->max_scroll);
+            a->sb_drag_offset = b->thumb.w / 2;
+        }
+        return true;
+    }
+    return false;
+}
+
 /* ---- generic overlay-list scrollbar plumbing -------------------------------
  * All "list-style" overlays (vsearch, outline, backlinks, tags, picker) share
  * the same layout: centered box, header rows on top, scrollable rows in the
@@ -7462,6 +7704,11 @@ static void open_external_url(const char* href)
 {
 #if defined(_WIN32)
     ShellExecuteA(NULL, "open", href, NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", href);
+    int rc = system(cmd);
+    (void)rc;
 #else
     char cmd[1024];
     snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", href);
@@ -7784,6 +8031,12 @@ static void reveal_file_in_explorer(const char* path)
     char args[1100];
     snprintf(args, sizeof args, "/select,\"%s\"", target);
     ShellExecuteA(NULL, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    /* -R reveals AND selects the file in Finder, matching Explorer's
+     * /select behaviour (plain `open` would just launch the file). */
+    char cmd[1100];
+    snprintf(cmd, sizeof cmd, "open -R \"%s\"", path);
+    if (system(cmd) != 0) { /* best effort */ }
 #else
     char cmd[1100];
     snprintf(cmd, sizeof cmd, "xdg-open \"%s\"", path);
@@ -8327,6 +8580,12 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             for (int k = 0; folder[k]; k++)
                 if (folder[k] == '/') folder[k] = '\\';
             ShellExecuteA(NULL, "explore", folder, NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+            {
+                char cmd[1200];
+                snprintf(cmd, sizeof cmd, "open \"%s\" >/dev/null 2>&1 &", folder);
+                int rc = system(cmd); (void)rc;
+            }
 #else
             {
                 char cmd[1200];
@@ -8350,11 +8609,11 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
              * AND removes the saved override file). User must re-customise
              * to bring back any preferences. */
             snprintf(a->cfg_font_path, sizeof a->cfg_font_path,
-                     "C:/Windows/Fonts/consola.ttf");
+                     "%s", platform_default_font_path());
             snprintf(a->cfg_font_path_ide, sizeof a->cfg_font_path_ide,
-                     "C:/Windows/Fonts/consola.ttf");
+                     "%s", platform_default_font_path());
             snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono,
-                     "C:/Windows/Fonts/consola.ttf");
+                     "%s", platform_default_font_path());
             a->cfg_font_size    = 16;
             a->cfg_font_size_h1 = 28;
             a->cfg_font_size_h2 = 22;
@@ -11333,6 +11592,7 @@ static int SDLCALL resize_event_watch(void* userdata, SDL_Event* e)
     {
         a->win_w = e->window.data1;
         a->win_h = e->window.data2;
+        sync_renderer_logical_size(a);   /* re-map logical->device on resize */
         a->resize_show_until = SDL_GetTicks() + 900;
         clamp_scroll(a);
         app_render(a);
@@ -14685,6 +14945,7 @@ static void app_event(App* a, const SDL_Event* e)
             if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 a->win_w = e->window.data1;
                 a->win_h = e->window.data2;
+                sync_renderer_logical_size(a); /* re-map logical->device */
                 clamp_scroll(a);
                 /* Flash a centered "WxH" badge so the user has feedback
                  * while dragging the window edge. Hides ~900ms after the
@@ -14977,6 +15238,20 @@ static void app_event(App* a, const SDL_Event* e)
                     a->scroll_x = hscroll_from_thumb_drag(e->motion.x,
                         inner.x, inner.w, thumb.w,
                         a->sb_drag_offset, doc_hscroll_max(a));
+                }
+                break;
+            }
+            /* Active wide-table scrollbar drag. */
+            if (a->sb_drag == SB_PREVIEW_TABLE &&
+                (e->motion.state & SDL_BUTTON_LMASK)) {
+                for (size_t i = 0; i < a->ptbl_bar_count; ++i) {
+                    PreviewTableBar* b = &a->ptbl_bars[i];
+                    if (b->line != a->ptbl_drag_line) continue;
+                    int sx = hscroll_from_thumb_drag(e->motion.x, b->track.x,
+                                 b->track.w, b->thumb.w,
+                                 a->sb_drag_offset, b->max_scroll);
+                    ptbl_apply_scroll(a, b->line, sx, b->max_scroll);
+                    break;
                 }
                 break;
             }
@@ -15826,6 +16101,11 @@ static void app_event(App* a, const SDL_Event* e)
                         }
                     }
                     out_of_hits:
+                    /* A wide table's scrollbar takes priority over starting a
+                     * text selection. */
+                    if (!handled &&
+                        ptbl_handle_mousedown(a, e->button.x, e->button.y))
+                        handled = 1;
                     if (!handled) {
                         /* Start a preview-mode drag-select. */
                         int rp_save = a->render_pane;
@@ -15937,6 +16217,25 @@ static void app_event(App* a, const SDL_Event* e)
                 int m = sidebar_max_scroll(a);
                 if (a->sidebar_scroll_y > m) a->sidebar_scroll_y = m;
                 break;
+            }
+            /* Wide preview table under the cursor: horizontal intent (a real
+             * horizontal wheel, or Shift+vertical) scrolls the table, not the
+             * page. Plain vertical wheel falls through to page scroll. */
+            {
+                PreviewTableBar* tb = ptbl_bar_at_point(a, mx, my);
+                if (tb && tb->max_scroll > 0) {
+                    int dx = 0;
+                    if (e->wheel.x != 0)
+                        dx = e->wheel.x * line_px;
+                    else if ((SDL_GetModState() & KMOD_SHIFT) && e->wheel.y != 0)
+                        dx = -e->wheel.y * line_px;
+                    if (dx != 0) {
+                        int cur = (tb->line < a->doc.line_count)
+                                  ? a->doc.lines[tb->line].h_scroll : 0;
+                        ptbl_apply_scroll(a, tb->line, cur + dx, tb->max_scroll);
+                        break;
+                    }
+                }
             }
             /* Shift+wheel pans horizontally when wrap is off (no-op otherwise);
              * wheel.x from horizontal scroll devices does the same. */

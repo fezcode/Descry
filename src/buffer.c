@@ -556,8 +556,16 @@ size_t buffer_line_end(const Buffer* b, size_t line)
 
 void buffer_cursor_pos(const Buffer* b, size_t* line, size_t* col)
 {
-    size_t after = lis_first_after(b, b->cursor);   /* never 0: line_starts[0]==0 */
-    size_t ln    = after - 1;
+    /* Defensive: an un-init'd buffer (buffer_init not yet run, e.g. an early
+     * render on a failed-startup path) has line_starts == NULL and count 0.
+     * lis_first_after would return 0, ln = (size_t)-1 underflows, and the
+     * line_starts[ln] read segfaults. Mirror the (after>0?...:0) guard used
+     * by lir_invalidate_from above. */
+    if (!b || !b->line_starts || b->line_starts_count == 0) {
+        *line = 0; *col = 0; return;
+    }
+    size_t after = lis_first_after(b, b->cursor);
+    size_t ln    = (after > 0) ? after - 1 : 0;
     *line = ln;
     *col  = b->cursor - b->line_starts[ln];
 }

@@ -17,6 +17,13 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
                   int pixel_size, FontStyle style);
 void  font_destroy(Font* f);
 
+/* Set the device render scale for HiDPI (Retina). Fonts created AFTER this
+ * call rasterize their glyphs at `scale`x the requested point size, but report
+ * metrics and advances in logical points (÷scale), so callers keep laying out
+ * in points while text stays crisp. 1.0 = standard DPI (the default, and an
+ * exact no-op). Call this before (re)loading the app's fonts. */
+void  font_set_render_scale(float scale);
+
 /* Append a fallback font to the chain. Loaded at the same pixel size as the
  * primary, always FONT_STYLE_REGULAR (degrading bold/italic for missing
  * glyphs is preferable to tofu rectangles). */

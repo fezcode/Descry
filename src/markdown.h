@@ -51,6 +51,10 @@ typedef struct {
      * paying the per-line layout cost on every frame. The renderer is also
      * responsible for invalidating this when wrap width or fonts change. */
     int      cached_h;
+    /* Horizontal scroll offset (px) for a wide table that overflows the
+     * preview width. Only meaningful on the FIRST line of a table run; starts
+     * at 0 and resets on every re-parse (designated-initializer zero-fill). */
+    int      h_scroll;
 } MdLine;
 
 /* `[[note-name]]` Obsidian-style wiki link found in the text. The full byte

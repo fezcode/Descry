@@ -14,11 +14,23 @@
 typedef struct Font    Font;
 typedef struct LuaHost LuaHost;
 
+/* Per-frame record of an overflowing preview table's horizontal scrollbar,
+ * rebuilt every render_preview and consumed by mouse/drag handling. The
+ * scroll offset itself lives in MdLine.h_scroll (reset on re-parse). */
+typedef struct {
+    size_t   line;        /* index of the table's first MdLine (the scroll key) */
+    SDL_Rect table;       /* visible table rect, for wheel hit-testing */
+    SDL_Rect track;       /* scrollbar groove */
+    SDL_Rect thumb;       /* draggable thumb */
+    int      max_scroll;  /* content width - visible width */
+} PreviewTableBar;
+
 typedef struct {
     SDL_Window*   window;
     SDL_Renderer* renderer;
     int           win_w;
     int           win_h;
+    float         dpi_scale;    /* device pixels / logical points; 1.0 std DPI */
 
     /* IDE chrome font (regular only) — title bar, menus, sidebar, status
      * bar, settings overlay, every modal/picker/popup. Independent of the
@@ -130,6 +142,14 @@ typedef struct {
     }*       preview_rows;
     size_t   preview_row_count;
     size_t   preview_row_cap;
+
+    /* Wide Markdown tables in preview get a per-table horizontal scrollbar.
+     * Offsets persist in MdLine.h_scroll; this list is the per-frame hot-rect
+     * map for hit-testing, rebuilt each render_preview. */
+    PreviewTableBar* ptbl_bars;
+    size_t           ptbl_bar_count;
+    size_t           ptbl_bar_cap;
+    size_t           ptbl_drag_line;  /* dragged table (sb_drag==SB_PREVIEW_TABLE) */
 
     /* Find / Replace overlay state */
     int      search_mode;        /* 0 = off, 1 = find, 2 = find+replace    */
@@ -369,7 +389,7 @@ typedef struct {
      * and the y-offset within the thumb when the drag started. */
     enum { SB_NONE = 0, SB_DOC, SB_KEYBIND, SB_OUTLINE_PANEL,
            SB_VSEARCH, SB_OUTLINE_LIST, SB_BACKLINKS, SB_TAGS, SB_PICKER,
-           SB_CMDP, SB_TINPUT, SB_DOC_H }
+           SB_CMDP, SB_TINPUT, SB_DOC_H, SB_PREVIEW_TABLE }
                                                               sb_drag;
     int      sb_drag_offset;
 

@@ -6,10 +6,22 @@
 #include <hb.h>
 #include <hb-ft.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Device render scale for HiDPI (set via font_set_render_scale). Fonts created
+ * while this is >1 rasterize glyph bitmaps at scale x their point size but
+ * report logical (÷scale) metrics, so layout stays in points and text is
+ * crisp. 1.0 = standard DPI; at 1.0 all the scale math below is the identity. */
+static float g_render_scale = 1.0f;
+
+void font_set_render_scale(float scale)
+{
+    g_render_scale = (scale >= 1.0f) ? scale : 1.0f;
+}
 
 typedef struct GlyphSlot {
     unsigned int      glyph_index;
@@ -27,7 +39,8 @@ struct Font {
     FT_Face       ft_face;
     hb_font_t*    hb_font;
     hb_buffer_t*  hb_buf;
-    int           pixel_size;
+    int           pixel_size;   /* logical point size requested by the caller */
+    float         scale;        /* device render scale; 1.0 on standard DPI    */
     int           ascent;
     int           descent;
     int           line_height;
@@ -155,6 +168,7 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
     Font* f = calloc(1, sizeof *f);
     f->renderer   = r;
     f->pixel_size = pixel_size;
+    f->scale      = (g_render_scale >= 1.0f) ? g_render_scale : 1.0f;
     f->style      = style;
 
     if (FT_Init_FreeType(&f->ft_lib) != 0) {
@@ -165,7 +179,11 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
         fprintf(stderr, "FT_New_Face failed for %s\n", ttf_path);
         FT_Done_FreeType(f->ft_lib); free(f); return NULL;
     }
-    if (FT_Set_Pixel_Sizes(f->ft_face, 0, pixel_size) != 0) {
+    /* Rasterize at the device scale: a 16pt font on a 2x Retina display loads
+     * 32px glyph bitmaps. Metrics below are divided back to logical points so
+     * callers lay out unchanged. */
+    if (FT_Set_Pixel_Sizes(f->ft_face, 0,
+                           (FT_UInt)lround(pixel_size * f->scale)) != 0) {
         fprintf(stderr, "FT_Set_Pixel_Sizes failed\n");
         FT_Done_Face(f->ft_face); FT_Done_FreeType(f->ft_lib);
         free(f); return NULL;
@@ -178,9 +196,11 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
         FT_Set_Transform(f->ft_face, &m, NULL);
     }
 
-    f->ascent      = f->ft_face->size->metrics.ascender    >> 6;
-    f->descent     = -(f->ft_face->size->metrics.descender >> 6);
-    f->line_height = f->ft_face->size->metrics.height      >> 6;
+    /* Logical-point metrics (raster px ÷ scale). At scale 1.0 these are the
+     * exact original integer values. */
+    f->ascent      = (int)lround((f->ft_face->size->metrics.ascender  >> 6) / f->scale);
+    f->descent     = (int)lround(-(f->ft_face->size->metrics.descender >> 6) / f->scale);
+    f->line_height = (int)lround((f->ft_face->size->metrics.height     >> 6) / f->scale);
 
     f->hb_font = hb_ft_font_create_referenced(f->ft_face);
     f->hb_buf  = hb_buffer_create();
@@ -251,8 +271,14 @@ static int shape_run(Font* f, const char* utf8, size_t len,
         }
     }
 
-    int pen_x = x;
-    int pen_y = y_baseline;
+    /* Pen runs in logical points. Glyph bitmaps are rasterized at f->scale x,
+     * so their offsets/bearings (device px) divide by scale to land in points
+     * and their dest rects shrink by scale; SDL_RenderSetLogicalSize then
+     * scales the whole canvas back up to device resolution for a crisp blit.
+     * At scale 1.0 every term reduces to the original integer arithmetic. */
+    double scale = f->scale;
+    double pen_x = x;
+    double pen_y = y_baseline;
     for (unsigned int i = 0; i < n; ++i) {
         if (draw) {
             GlyphSlot* g = glyph_load(f, infos[i].codepoint);
@@ -260,19 +286,20 @@ static int shape_run(Font* f, const char* utf8, size_t len,
                 int x_off = poss[i].x_offset >> 6;
                 int y_off = poss[i].y_offset >> 6;
                 SDL_Rect dst = {
-                    pen_x + x_off + g->bearing_x,
-                    pen_y - y_off - g->bearing_y,
-                    g->w, g->h
+                    (int)lround(pen_x + (x_off + g->bearing_x) / scale),
+                    (int)lround(pen_y - (y_off + g->bearing_y) / scale),
+                    (int)lround(g->w / scale),
+                    (int)lround(g->h / scale)
                 };
                 SDL_SetTextureColorMod(g->tex, color.r, color.g, color.b);
                 SDL_SetTextureAlphaMod(g->tex, color.a);
                 SDL_RenderCopy(f->renderer, g->tex, NULL, &dst);
             }
         }
-        pen_x += poss[i].x_advance >> 6;
-        pen_y += poss[i].y_advance >> 6;
+        pen_x += (poss[i].x_advance >> 6) / scale;
+        pen_y += (poss[i].y_advance >> 6) / scale;
     }
-    return pen_x - x;
+    return (int)lround(pen_x - x);
 }
 
 /* For each codepoint, pick the first font in the chain whose FreeType face

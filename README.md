@@ -104,6 +104,21 @@ ninja -C build
 ./build/descry.exe
 ```
 
+### macOS (Homebrew)
+
+Apple Silicon and Intel both work; the app renders crisp on Retina and
+falls back to system fonts (Menlo) automatically.
+
+```sh
+brew install cmake ninja pkg-config sdl2 freetype harfbuzz libpng jpeg
+# Apple Silicon Homebrew lives under /opt/homebrew; on Intel use /usr/local.
+# libjpeg is keg-only, so point pkg-config at it explicitly:
+export PKG_CONFIG_PATH="/opt/homebrew/opt/jpeg/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
+cmake -G Ninja -B build
+ninja -C build
+./build/descry
+```
+
 ### Linux
 
 ```sh
@@ -118,6 +133,27 @@ via `file(GET_RUNTIME_DEPENDENCIES)` so the build dir is portable —
 zip it and run anywhere without an MSYS2 install. The `data/` folder
 is *not* copied; the exe loads `data/` from its own directory at
 runtime, so put your vault wherever you like and point Descry at it.
+
+The repo ships thin wrappers around the commands above: `build.ps1`
+for Windows (MSYS2 MinGW-w64) and `build.sh` for macOS/Linux. Both
+configure + build into `build/`; pass `-Run` / `--run` to launch
+afterwards.
+
+### macOS notes
+
+- **Retina / HiDPI** renders at native pixel density — glyphs are
+  rasterized at the display scale while layout stays in logical points,
+  so text is sharp rather than upscaled. Crossing between a Retina and
+  a non-Retina display re-rasterizes the fonts automatically.
+- **Fonts** default to Menlo and fall back through Apple Symbols,
+  PingFang and Apple Color Emoji for symbols / CJK / emoji. A
+  `settings.lua` copied from another OS that points at a missing font
+  is detected and swapped for the platform default instead of failing
+  to start.
+- **Reveal in Finder** uses `open -R`; external links and the log
+  folder open via `open`.
+- File dialogs use AppleScript (`osascript`); logs and settings live
+  under `~/Library/Logs/Descry/`.
 
 ---
 
@@ -193,7 +229,9 @@ Keybindings` and persists to `settings.lua` next to the exe.
 
 When word wrap is off, long edit-mode lines extend past the viewport;
 Shift+wheel pans, or use the horizontal scrollbar that appears at the
-bottom of the editor.
+bottom of the editor. In preview, a table wider than the pane gets its
+own horizontal scrollbar beneath it — drag the thumb, or hover the
+table and use Shift+wheel or a horizontal swipe.
 
 ---
 
