@@ -119,6 +119,19 @@ ninja -C build
 ./build/descry
 ```
 
+**Package as a double-clickable app.** To get a self-contained `Descry.app`
+(SDL/FreeType/HarfBuzz dylibs bundled inside, HiDPI-aware, ad-hoc signed so it
+launches locally) instead of running the binary from a terminal:
+
+```sh
+brew install dylibbundler      # bundles the dylibs into the app
+./package_macos.sh             # -> build/Descry.app
+./package_macos.sh --dmg       # also -> dist/Descry-<version>.dmg (drag to /Applications)
+```
+
+For distribution to other Macs, sign with a Developer ID
+(`--sign "Developer ID Application: …"`) and notarize.
+
 ### Linux
 
 ```sh
