@@ -27,6 +27,10 @@ typedef enum {
      * column widths from the max content width seen. */
     LINE_TABLE_HEAD,
     LINE_TABLE_ROW,
+    /* ```mermaid fenced block. Each source line is one LINE_MERMAID; the
+     * renderer gathers a consecutive run, rebuilds the source, and draws it
+     * as a diagram instead of code text. */
+    LINE_MERMAID,
 } LineKind;
 
 typedef enum {

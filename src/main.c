@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -98,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.75.1"
+#define DESCRY_VERSION "0.76.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -3915,6 +3916,12 @@ static void app_shutdown(App* a)
     free(a->sidebar_visible);
     free(a->preview_rows);
     free(a->ptbl_bars);
+    for (size_t i = 0; i < a->mmd_cache_count; ++i) {
+        free(a->mmd_cache[i].src);
+        mermaid_free(a->mmd_cache[i].diagram);
+    }
+    free(a->mmd_cache);
+    free(a->mmd_bars);
     for (size_t i = 0; i < a->drop_file_count; ++i) free(a->drop_files[i]);
     free(a->drop_files);
     if (a->cursor_resize) SDL_FreeCursor(a->cursor_resize);
@@ -4606,14 +4613,338 @@ static void render_table_run(App* a, size_t i0, size_t i1,
     *y_inout = y + lh / 3;     /* a bit of breathing space after the table */
 }
 
+/* ---- mermaid diagram rendering ----------------------------------------- */
+
+static int mmd_measure_cb(void* ctx, const char* s, size_t n)
+{
+    App* a = ctx;
+    return font_measure(a->font_body, s, n);
+}
+
+/* Find or build+cache the laid-out diagram for `src`. Returns the cache index
+ * (offsets persist there), or -1 on failure. */
+static int mmd_cache_get(App* a, const char* src, size_t len)
+{
+    for (size_t i = 0; i < a->mmd_cache_count; ++i)
+        if (a->mmd_cache[i].src &&
+            strlen(a->mmd_cache[i].src) == len &&
+            memcmp(a->mmd_cache[i].src, src, len) == 0)
+            return (int)i;
+
+    /* Bound memory: diagrams are cheap to rebuild, so just flush when large. */
+    if (a->mmd_cache_count >= 64) {
+        for (size_t i = 0; i < a->mmd_cache_count; ++i) {
+            free(a->mmd_cache[i].src);
+            mermaid_free(a->mmd_cache[i].diagram);
+        }
+        a->mmd_cache_count = 0;
+    }
+    if (a->mmd_cache_count >= a->mmd_cache_cap) {
+        size_t nc = a->mmd_cache_cap ? a->mmd_cache_cap * 2 : 8;
+        MermaidEntry* ne = realloc(a->mmd_cache, nc * sizeof *ne);
+        if (!ne) return -1;
+        a->mmd_cache = ne; a->mmd_cache_cap = nc;
+    }
+    MermaidEntry* e = &a->mmd_cache[a->mmd_cache_count];
+    e->src = malloc(len + 1);
+    if (!e->src) return -1;
+    memcpy(e->src, src, len); e->src[len] = 0;
+    e->diagram  = mermaid_build(e->src, len, mmd_measure_cb, a,
+                                font_line_height(a->font_body));
+    e->scroll_x = e->scroll_y = 0;
+    return (int)a->mmd_cache_count++;
+}
+
+static void mmd_dashed_line(App* a, int x0, int y0, int x1, int y1)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    if (steps <= 0) { SDL_RenderDrawPoint(a->renderer, x0, y0); return; }
+    for (int s = 0; s <= steps; ++s) {
+        if ((s / 5) % 2) continue;                 /* 5px on, 5px off */
+        SDL_RenderDrawPoint(a->renderer, x0 + dx * s / steps, y0 + dy * s / steps);
+    }
+}
+
+/* Point where the segment from box center toward (tx,ty) exits the box. */
+static void mmd_box_exit(int x, int y, int w, int h, int tx, int ty,
+                         int* ox, int* oy)
+{
+    int cx = x + w / 2, cy = y + h / 2;
+    int dx = tx - cx, dy = ty - cy;
+    if (dx == 0 && dy == 0) { *ox = cx; *oy = cy; return; }
+    double sx = dx != 0 ? (w / 2.0) / (double)(dx < 0 ? -dx : dx) : 1e9;
+    double sy = dy != 0 ? (h / 2.0) / (double)(dy < 0 ? -dy : dy) : 1e9;
+    double s = sx < sy ? sx : sy;
+    *ox = cx + (int)(dx * s);
+    *oy = cy + (int)(dy * s);
+}
+
+static void mmd_arrowhead(App* a, double fx, double fy, double tx, double ty,
+                          SDL_Color c)
+{
+    double dx = tx - fx, dy = ty - fy;
+    double L = sqrt(dx * dx + dy * dy);
+    if (L < 0.01) return;
+    dx /= L; dy /= L;
+    double sz = 10.0, spread = 5.0;
+    double bx = tx - dx * sz, by = ty - dy * sz;
+    double px = -dy, py = dx;
+    SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, c.a);
+    SDL_RenderDrawLine(a->renderer, (int)tx, (int)ty,
+                       (int)(bx + px * spread), (int)(by + py * spread));
+    SDL_RenderDrawLine(a->renderer, (int)tx, (int)ty,
+                       (int)(bx - px * spread), (int)(by - py * spread));
+    SDL_RenderDrawLine(a->renderer, (int)(bx + px * spread), (int)(by + py * spread),
+                       (int)(bx - px * spread), (int)(by - py * spread));
+}
+
+static void mmd_fill_diamond(App* a, SDL_Rect r, SDL_Color c)
+{
+    int cx = r.x + r.w / 2;
+    int hh = r.h / 2; if (hh < 1) hh = 1;
+    SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, c.a);
+    for (int yy = 0; yy < r.h; ++yy) {
+        int dy = yy - r.h / 2; if (dy < 0) dy = -dy;
+        int hw = (r.w / 2) * (hh - dy) / hh;
+        if (hw <= 0) continue;
+        SDL_RenderDrawLine(a->renderer, cx - hw, r.y + yy, cx + hw, r.y + yy);
+    }
+}
+
+/* Draw the node/edge graph translated so node (0,0) maps to (tx,ty). */
+static void mmd_draw_graph(App* a, const MmDiagram* d, int tx, int ty)
+{
+    SDL_Color edge_c = { a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 220 };
+    SDL_Color fill_c = a->bg_code;
+    SDL_Color bord_c = { a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 200 };
+
+    for (int i = 0; i < d->edge_count; ++i) {
+        const MmEdge* e = &d->edges[i];
+        if (e->from < 0 || e->to < 0 ||
+            e->from >= d->node_count || e->to >= d->node_count) continue;
+        const MmNode* A = &d->nodes[e->from];
+        const MmNode* B = &d->nodes[e->to];
+        int acx = A->x + A->w / 2 + tx, acy = A->y + A->h / 2 + ty;
+        int bcx = B->x + B->w / 2 + tx, bcy = B->y + B->h / 2 + ty;
+        int sx, sy, ex, ey;
+        mmd_box_exit(A->x + tx, A->y + ty, A->w, A->h, bcx, bcy, &sx, &sy);
+        mmd_box_exit(B->x + tx, B->y + ty, B->w, B->h, acx, acy, &ex, &ey);
+        SDL_SetRenderDrawColor(a->renderer, edge_c.r, edge_c.g, edge_c.b, edge_c.a);
+        if (e->dashed) mmd_dashed_line(a, sx, sy, ex, ey);
+        else           SDL_RenderDrawLine(a->renderer, sx, sy, ex, ey);
+        if (e->arrow_to)   mmd_arrowhead(a, sx, sy, ex, ey, edge_c);
+        if (e->arrow_from) mmd_arrowhead(a, ex, ey, sx, sy, edge_c);
+        if (e->label[0]) {
+            int lw = font_measure(a->font_ide, e->label, strlen(e->label));
+            int lh = font_line_height(a->font_ide);
+            int lx = (sx + ex) / 2 - lw / 2, ly = (sy + ey) / 2;
+            SDL_Rect lb = { lx - 4, ly - lh / 2, lw + 8, lh };
+            SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, 235);
+            fill_rrect(a->renderer, lb, 4);
+            font_draw_line(a->font_ide, e->label, strlen(e->label),
+                           lx, ly - lh / 2 + font_ascent(a->font_ide), a->fg_muted);
+        }
+    }
+
+    for (int i = 0; i < d->node_count; ++i) {
+        const MmNode* nd = &d->nodes[i];
+        SDL_Rect r = { nd->x + tx, nd->y + ty, nd->w, nd->h };
+        if (nd->shape == MM_SHAPE_DIAMOND) {
+            mmd_fill_diamond(a, r, fill_c);
+            SDL_SetRenderDrawColor(a->renderer, bord_c.r, bord_c.g, bord_c.b, bord_c.a);
+            SDL_RenderDrawLine(a->renderer, r.x + r.w / 2, r.y,           r.x + r.w,     r.y + r.h / 2);
+            SDL_RenderDrawLine(a->renderer, r.x + r.w,     r.y + r.h / 2, r.x + r.w / 2, r.y + r.h);
+            SDL_RenderDrawLine(a->renderer, r.x + r.w / 2, r.y + r.h,     r.x,           r.y + r.h / 2);
+            SDL_RenderDrawLine(a->renderer, r.x,           r.y + r.h / 2, r.x + r.w / 2, r.y);
+        } else {
+            int rad = 5;
+            if      (nd->shape == MM_SHAPE_ROUND)   rad = 12;
+            else if (nd->shape == MM_SHAPE_STADIUM) rad = r.h / 2;
+            else if (nd->shape == MM_SHAPE_CIRCLE)  rad = (r.w < r.h ? r.w : r.h) / 2;
+            else if (nd->shape == MM_SHAPE_HEX)     rad = 9;
+            SDL_SetRenderDrawColor(a->renderer, fill_c.r, fill_c.g, fill_c.b, 255);
+            fill_rrect(a->renderer, r, rad);
+            SDL_SetRenderDrawColor(a->renderer, bord_c.r, bord_c.g, bord_c.b, bord_c.a);
+            draw_rrect(a->renderer, r, rad);
+        }
+        int lw = font_measure(a->font_body, nd->label, strlen(nd->label));
+        int lx = nd->x + tx + (nd->w - lw) / 2;
+        int ly = nd->y + ty + (nd->h - font_line_height(a->font_body)) / 2
+                 + font_ascent(a->font_body);
+        font_draw_line(a->font_body, nd->label, strlen(nd->label), lx, ly, a->fg);
+    }
+}
+
+static void mmd_bar_push(App* a, int idx, SDL_Rect view,
+                         SDL_Rect ht, SDL_Rect hth, SDL_Rect vt, SDL_Rect vth,
+                         int max_x, int max_y)
+{
+    if (a->mmd_bar_count >= a->mmd_bar_cap) {
+        size_t nc = a->mmd_bar_cap ? a->mmd_bar_cap * 2 : 8;
+        MermaidBar* nb = realloc(a->mmd_bars, nc * sizeof *nb);
+        if (!nb) return;
+        a->mmd_bars = nb; a->mmd_bar_cap = nc;
+    }
+    a->mmd_bars[a->mmd_bar_count++] = (MermaidBar){
+        .cache_idx = idx, .view = view, .htrack = ht, .hthumb = hth,
+        .vtrack = vt, .vthumb = vth, .max_x = max_x, .max_y = max_y };
+}
+
+/* Fallback card for diagram types we don't lay out yet (sequence, class, …)
+ * or that failed to parse: a framed, labelled block showing the source so it
+ * still reads as an intentional element rather than raw ``` code. */
+static void mmd_render_card(App* a, size_t i0, size_t i1, const char* type,
+                            int xL, int availw, int* y_inout, bool draw)
+{
+    int lh   = line_step(a, a->font_code);
+    int padx = 12, pady = 10, hdr = line_step(a, a->font_ide) + 6;
+    int rows = (int)(i1 - i0);
+    int h = pady * 2 + hdr + rows * lh;
+    int y = *y_inout;
+    SDL_Rect card = { xL, y, availw, h };
+
+    if (draw) {
+        SDL_SetRenderDrawColor(a->renderer, a->bg_code.r, a->bg_code.g, a->bg_code.b, 60);
+        fill_rrect(a->renderer, card, 8);
+        SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 60);
+        draw_rrect(a->renderer, card, 8);
+
+        char hdr_s[80];
+        snprintf(hdr_s, sizeof hdr_s, "mermaid \xC2\xB7 %s",
+                 (type && type[0]) ? type : "diagram");
+        font_draw_line(a->font_ide, hdr_s, strlen(hdr_s),
+                       xL + padx, y + pady + font_ascent(a->font_ide), a->fg_link);
+
+        SDL_Rect saved; SDL_bool had = SDL_RenderIsClipEnabled(a->renderer);
+        if (had) SDL_RenderGetClipRect(a->renderer, &saved);
+        SDL_Rect clip = { xL, y, availw, h };
+        SDL_RenderSetClipRect(a->renderer, &clip);
+        int ty = y + pady + hdr;
+        for (size_t i = i0; i < i1; ++i) {
+            MdLine* l = &a->doc.lines[i];
+            font_draw_line(a->font_code, a->doc.data + l->start, l->len,
+                           xL + padx, ty + font_ascent(a->font_code), a->fg_muted);
+            ty += lh;
+        }
+        if (had) SDL_RenderSetClipRect(a->renderer, &saved);
+        else     SDL_RenderSetClipRect(a->renderer, NULL);
+    }
+    *y_inout = y + h + line_step(a, a->font_body) / 2;
+}
+
+static void render_mermaid_block(App* a, size_t i0, size_t i1,
+                                 int* y_inout, bool draw)
+{
+    int xL     = doc_x_left(a) + MARGIN_X;
+    int availw = doc_x_right(a) - MARGIN_X - xL;
+    if (availw < 120) availw = 120;
+
+    /* Rebuild the block's source from its run of LINE_MERMAID lines. */
+    size_t total = 0;
+    for (size_t i = i0; i < i1; ++i) total += a->doc.lines[i].len + 1;
+    char* src = malloc(total + 1);
+    if (!src) { *y_inout += line_step(a, a->font_body); return; }
+    size_t p = 0;
+    for (size_t i = i0; i < i1; ++i) {
+        MdLine* l = &a->doc.lines[i];
+        memcpy(src + p, a->doc.data + l->start, l->len); p += l->len;
+        if (i + 1 < i1) src[p++] = '\n';
+    }
+    src[p] = 0;
+
+    int ci = mmd_cache_get(a, src, p);
+    free(src);
+    if (ci < 0) { *y_inout += line_step(a, a->font_body); return; }
+    MermaidEntry* ent = &a->mmd_cache[ci];
+    MmDiagram* d = ent->diagram;
+
+    /* Anything we can't lay out as a graph → labelled source card. */
+    if (!d || d->status != MM_OK || d->node_count == 0) {
+        mmd_render_card(a, i0, i1, d ? d->type : "", xL, availw, y_inout, draw);
+        return;
+    }
+
+    int cap = viewport_h(a) - 100;
+    if (cap > 520) cap = 520;
+    if (cap < 220) cap = 220;
+    int vw = d->width  < availw ? d->width  : availw;
+    int vh = d->height < cap    ? d->height : cap;
+    if (vw < 100) vw = 100;
+    if (vh < 80)  vh = 80;
+
+    int max_x = d->width  - vw; if (max_x < 0) max_x = 0;
+    int max_y = d->height - vh; if (max_y < 0) max_y = 0;
+    if (ent->scroll_x < 0) ent->scroll_x = 0;
+    if (ent->scroll_x > max_x) ent->scroll_x = max_x;
+    if (ent->scroll_y < 0) ent->scroll_y = 0;
+    if (ent->scroll_y > max_y) ent->scroll_y = max_y;
+
+    int y = *y_inout;
+    SDL_Rect view = { xL, y, vw, vh };
+
+    if (draw) {
+        SDL_Rect card = { view.x - 1, view.y - 1, view.w + 2, view.h + 2 };
+        SDL_SetRenderDrawColor(a->renderer, a->bg_code.r, a->bg_code.g, a->bg_code.b, 55);
+        fill_rrect(a->renderer, card, 8);
+        SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 60);
+        draw_rrect(a->renderer, card, 8);
+
+        SDL_Rect saved; SDL_bool had = SDL_RenderIsClipEnabled(a->renderer);
+        if (had) SDL_RenderGetClipRect(a->renderer, &saved);
+        SDL_RenderSetClipRect(a->renderer, &view);
+        mmd_draw_graph(a, d, view.x - ent->scroll_x, view.y - ent->scroll_y);
+        if (had) SDL_RenderSetClipRect(a->renderer, &saved);
+        else     SDL_RenderSetClipRect(a->renderer, NULL);
+    }
+
+    /* Scrollbars. */
+    int sb = 8;
+    SDL_Rect ht = {0}, hth = {0}, vt = {0}, vth = {0};
+    if (max_x > 0) {
+        ht = (SDL_Rect){ view.x, view.y + view.h + 3, view.w, sb };
+        int tw = (int)((long)view.w * vw / d->width); if (tw < 24) tw = 24; if (tw > view.w) tw = view.w;
+        int mx = view.w - tw, tx = max_x > 0 ? mx * ent->scroll_x / max_x : 0;
+        hth = (SDL_Rect){ view.x + tx, ht.y, tw, sb };
+    }
+    if (max_y > 0) {
+        vt = (SDL_Rect){ view.x + view.w + 3, view.y, sb, view.h };
+        int th = (int)((long)view.h * vh / d->height); if (th < 24) th = 24; if (th > view.h) th = view.h;
+        int my = view.h - th, ty2 = max_y > 0 ? my * ent->scroll_y / max_y : 0;
+        vth = (SDL_Rect){ vt.x, view.y + ty2, sb, th };
+    }
+    if (draw) {
+        if (max_x > 0) {
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 30);
+            fill_rrect(a->renderer, ht, sb / 2);
+            int al = (a->mmd_drag == 1 && a->mmd_drag_idx == ci) ? 220 : 130;
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, al);
+            fill_rrect(a->renderer, hth, sb / 2);
+        }
+        if (max_y > 0) {
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 30);
+            fill_rrect(a->renderer, vt, sb / 2);
+            int al = (a->mmd_drag == 2 && a->mmd_drag_idx == ci) ? 220 : 130;
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, al);
+            fill_rrect(a->renderer, vth, sb / 2);
+        }
+        mmd_bar_push(a, ci, view, ht, hth, vt, vth, max_x, max_y);
+    }
+
+    int extra = (max_x > 0) ? sb + 3 : 0;
+    *y_inout = y + vh + extra + line_step(a, a->font_body) / 2;
+}
+
 static int render_preview(App* a, bool draw)
 {
     int y = doc_y_top(a) - a->scroll_y;
     int win_h = a->win_h;
     int default_lh = line_step(a, a->font_body);
 
-    /* Rebuild the wide-table scrollbar hot list from scratch each paint. */
+    /* Rebuild the wide-table + mermaid scrollbar hot lists each paint. */
     if (draw) a->ptbl_bar_count = 0;
+    if (draw) a->mmd_bar_count  = 0;
 
     /* If the window width changed since the last paint, every cached row
      * height is potentially stale (wrap re-flowed). Drop them. */
@@ -4626,6 +4957,18 @@ static int render_preview(App* a, bool draw)
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
     for (size_t i = 0; i < a->doc.line_count; ++i) {
         MdLine* l = &a->doc.lines[i];
+        if (l->kind == LINE_MERMAID) {
+            size_t end = i + 1;
+            while (end < a->doc.line_count &&
+                   a->doc.lines[end].kind == LINE_MERMAID) end++;
+            int y_before = y;
+            render_mermaid_block(a, i, end, &y, draw);
+            int per = ((y - y_before) > 0)
+                      ? (y - y_before) / (int)(end - i) : default_lh;
+            for (size_t k = i; k < end; ++k) a->doc.lines[k].cached_h = per;
+            i = end - 1;
+            continue;
+        }
         if (l->kind == LINE_TABLE_HEAD || l->kind == LINE_TABLE_ROW) {
             size_t end = i + 1;
             while (end < a->doc.line_count) {
@@ -6746,6 +7089,61 @@ static bool ptbl_handle_mousedown(App* a, int btn_x, int btn_y)
         return true;
     }
     return false;
+}
+
+/* Left-click on a mermaid diagram: grab a scrollbar thumb (or track-jump), or
+ * start panning the canvas. Returns true if consumed. Bars come from the last
+ * render_preview pass. */
+static bool mmd_handle_mousedown(App* a, int x, int y)
+{
+    for (size_t i = 0; i < a->mmd_bar_count; ++i) {
+        MermaidBar* b = &a->mmd_bars[i];
+        if (b->cache_idx < 0 || (size_t)b->cache_idx >= a->mmd_cache_count) continue;
+        MermaidEntry* e = &a->mmd_cache[b->cache_idx];
+
+        if (b->max_x > 0 && x >= b->htrack.x && x < b->htrack.x + b->htrack.w &&
+            y >= b->htrack.y - 3 && y < b->htrack.y + b->htrack.h + 3) {
+            a->mmd_drag = 1; a->mmd_drag_idx = b->cache_idx;
+            if (x >= b->hthumb.x && x < b->hthumb.x + b->hthumb.w) {
+                a->mmd_drag_off = x - b->hthumb.x;
+            } else {
+                e->scroll_x = hscroll_from_thumb_drag(x, b->htrack.x, b->htrack.w,
+                                  b->hthumb.w, b->hthumb.w / 2, b->max_x);
+                a->mmd_drag_off = b->hthumb.w / 2;
+            }
+            return true;
+        }
+        if (b->max_y > 0 && y >= b->vtrack.y && y < b->vtrack.y + b->vtrack.h &&
+            x >= b->vtrack.x - 3 && x < b->vtrack.x + b->vtrack.w + 3) {
+            a->mmd_drag = 2; a->mmd_drag_idx = b->cache_idx;
+            if (y >= b->vthumb.y && y < b->vthumb.y + b->vthumb.h) {
+                a->mmd_drag_off = y - b->vthumb.y;
+            } else {
+                e->scroll_y = hscroll_from_thumb_drag(y, b->vtrack.y, b->vtrack.h,
+                                  b->vthumb.h, b->vthumb.h / 2, b->max_y);
+                a->mmd_drag_off = b->vthumb.h / 2;
+            }
+            return true;
+        }
+        if ((b->max_x > 0 || b->max_y > 0) &&
+            x >= b->view.x && x < b->view.x + b->view.w &&
+            y >= b->view.y && y < b->view.y + b->view.h) {
+            a->mmd_drag = 3; a->mmd_drag_idx = b->cache_idx;
+            a->mmd_pan_mx = x; a->mmd_pan_my = y;
+            a->mmd_pan_sx = e->scroll_x; a->mmd_pan_sy = e->scroll_y;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Geometry lookup for the bar currently being dragged (it's re-recorded every
+ * frame, so fetch by cache index). NULL if it scrolled off-screen. */
+static MermaidBar* mmd_bar_for_idx(App* a, int idx)
+{
+    for (size_t i = 0; i < a->mmd_bar_count; ++i)
+        if (a->mmd_bars[i].cache_idx == idx) return &a->mmd_bars[i];
+    return NULL;
 }
 
 /* ---- generic overlay-list scrollbar plumbing -------------------------------
@@ -15440,6 +15838,32 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 break;
             }
+            /* Active mermaid scrollbar / pan drag. */
+            if (a->mmd_drag && (e->motion.state & SDL_BUTTON_LMASK)) {
+                MermaidBar* b = mmd_bar_for_idx(a, a->mmd_drag_idx);
+                if (b && a->mmd_drag_idx >= 0 &&
+                    (size_t)a->mmd_drag_idx < a->mmd_cache_count) {
+                    MermaidEntry* en = &a->mmd_cache[a->mmd_drag_idx];
+                    if (a->mmd_drag == 1) {
+                        en->scroll_x = hscroll_from_thumb_drag(e->motion.x,
+                            b->htrack.x, b->htrack.w, b->hthumb.w,
+                            a->mmd_drag_off, b->max_x);
+                    } else if (a->mmd_drag == 2) {
+                        en->scroll_y = hscroll_from_thumb_drag(e->motion.y,
+                            b->vtrack.y, b->vtrack.h, b->vthumb.h,
+                            a->mmd_drag_off, b->max_y);
+                    } else if (a->mmd_drag == 3) {
+                        int nx = a->mmd_pan_sx - (e->motion.x - a->mmd_pan_mx);
+                        int ny = a->mmd_pan_sy - (e->motion.y - a->mmd_pan_my);
+                        if (nx < 0) nx = 0;
+                        if (nx > b->max_x) nx = b->max_x;
+                        if (ny < 0) ny = 0;
+                        if (ny > b->max_y) ny = b->max_y;
+                        en->scroll_x = nx; en->scroll_y = ny;
+                    }
+                }
+                break;
+            }
             if (a->sb_drag != SB_NONE &&
                 (e->motion.state & SDL_BUTTON_LMASK)) {
                 SDL_Rect track, thumb;
@@ -15593,6 +16017,7 @@ static void app_event(App* a, const SDL_Event* e)
                 a->resizing_split    = false;
                 a->resizing_outline  = false;
                 a->sb_drag           = SB_NONE;
+                a->mmd_drag          = 0;
             }
             break;
 
@@ -16286,8 +16711,11 @@ static void app_event(App* a, const SDL_Event* e)
                         }
                     }
                     out_of_hits:
-                    /* A wide table's scrollbar takes priority over starting a
-                     * text selection. */
+                    /* A diagram or wide-table scrollbar / pan takes priority
+                     * over starting a text selection. */
+                    if (!handled &&
+                        mmd_handle_mousedown(a, e->button.x, e->button.y))
+                        handled = 1;
                     if (!handled &&
                         ptbl_handle_mousedown(a, e->button.x, e->button.y))
                         handled = 1;
@@ -16402,6 +16830,38 @@ static void app_event(App* a, const SDL_Event* e)
                 int m = sidebar_max_scroll(a);
                 if (a->sidebar_scroll_y > m) a->sidebar_scroll_y = m;
                 break;
+            }
+            /* Mermaid diagram under the cursor: wheel scrolls the diagram —
+             * horizontal intent (wheel.x / Shift) pans x, plain wheel pans y
+             * when it can scroll vertically. A short diagram lets plain wheel
+             * fall through to page scroll. */
+            {
+                int mmd_consumed = 0;
+                for (size_t i = 0; i < a->mmd_bar_count; ++i) {
+                    MermaidBar* b = &a->mmd_bars[i];
+                    if (mx < b->view.x || mx >= b->view.x + b->view.w ||
+                        my < b->view.y || my >= b->view.y + b->view.h) continue;
+                    if (b->cache_idx < 0 ||
+                        (size_t)b->cache_idx >= a->mmd_cache_count) break;
+                    MermaidEntry* en = &a->mmd_cache[b->cache_idx];
+                    int horiz = (e->wheel.x != 0) ||
+                                (SDL_GetModState() & KMOD_SHIFT);
+                    if (horiz && b->max_x > 0) {
+                        int dx = (e->wheel.x != 0) ? e->wheel.x * line_px
+                                                   : -e->wheel.y * line_px;
+                        en->scroll_x += dx;
+                        if (en->scroll_x < 0) en->scroll_x = 0;
+                        if (en->scroll_x > b->max_x) en->scroll_x = b->max_x;
+                        mmd_consumed = 1;
+                    } else if (!horiz && b->max_y > 0) {
+                        en->scroll_y -= e->wheel.y * line_px;
+                        if (en->scroll_y < 0) en->scroll_y = 0;
+                        if (en->scroll_y > b->max_y) en->scroll_y = b->max_y;
+                        mmd_consumed = 1;
+                    }
+                    break;
+                }
+                if (mmd_consumed) break;
             }
             /* Wide preview table under the cursor: horizontal intent (a real
              * horizontal wheel, or Shift+vertical) scrolls the table, not the

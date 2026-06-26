@@ -8,6 +8,7 @@
 #include "buffer.h"
 #include "image.h"
 #include "markdown.h"
+#include "mermaid.h"
 #include "tabs.h"
 #include "vault.h"
 
@@ -24,6 +25,25 @@ typedef struct {
     SDL_Rect thumb;       /* draggable thumb */
     int      max_scroll;  /* content width - visible width */
 } PreviewTableBar;
+
+/* A cached, laid-out mermaid diagram + its scroll offsets, keyed by the
+ * block's source text so it survives re-renders (and edits elsewhere in the
+ * note). */
+typedef struct {
+    char*      src;          /* owned source copy (cache key)         */
+    MmDiagram* diagram;      /* built layout (status carries OK/…)    */
+    int        scroll_x;
+    int        scroll_y;
+} MermaidEntry;
+
+/* Per-frame on-screen record of a mermaid block, for mouse hit-testing. */
+typedef struct {
+    int      cache_idx;
+    SDL_Rect view;           /* clipped diagram viewport               */
+    SDL_Rect htrack, hthumb; /* horizontal scrollbar (w/h 0 if absent) */
+    SDL_Rect vtrack, vthumb; /* vertical scrollbar                     */
+    int      max_x, max_y;
+} MermaidBar;
 
 typedef struct {
     SDL_Window*   window;
@@ -157,6 +177,18 @@ typedef struct {
     char**   drop_files;
     size_t   drop_file_count;
     size_t   drop_file_cap;
+
+    /* Mermaid diagrams: a source-keyed cache of laid-out diagrams, a per-frame
+     * hot list for mouse hit-testing, and scrollbar/pan drag state. */
+    MermaidEntry* mmd_cache;
+    size_t        mmd_cache_count, mmd_cache_cap;
+    MermaidBar*   mmd_bars;
+    size_t        mmd_bar_count, mmd_bar_cap;
+    int           mmd_drag;       /* 0 none, 1 h-scrollbar, 2 v-scrollbar, 3 pan */
+    int           mmd_drag_idx;   /* mmd_cache index being dragged               */
+    int           mmd_drag_off;   /* thumb grab offset                           */
+    int           mmd_pan_mx, mmd_pan_my;  /* pan: mouse at grab                  */
+    int           mmd_pan_sx, mmd_pan_sy;  /* pan: scroll at grab                 */
 
     /* Find / Replace overlay state */
     int      search_mode;        /* 0 = off, 1 = find, 2 = find+replace    */

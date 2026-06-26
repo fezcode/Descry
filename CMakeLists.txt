@@ -38,6 +38,7 @@ add_executable(descry
   src/image.c
   src/lua_host.c
   src/markdown.c
+  src/mermaid.c
   src/regex.c
   src/tabs.c
   src/vault.c

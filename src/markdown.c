@@ -126,11 +126,25 @@ static int cb_enter_block(MD_BLOCKTYPE t, void* detail, void* ud)
             c->line_start = c->doc->len;
             break;
         }
-        case MD_BLOCK_CODE:
-            c->cur_kind = LINE_CODE;
+        case MD_BLOCK_CODE: {
+            /* A ```mermaid fence renders as a diagram, not code text. Tag its
+             * lines LINE_MERMAID (case-insensitive on the info string). */
+            MD_BLOCK_CODE_DETAIL* d = detail;
+            int is_mermaid = 0;
+            if (d && d->lang.text && d->lang.size == 7) {
+                static const char* M = "mermaid";
+                is_mermaid = 1;
+                for (int k = 0; k < 7; ++k) {
+                    char ch = d->lang.text[k];
+                    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                    if (ch != M[k]) { is_mermaid = 0; break; }
+                }
+            }
+            c->cur_kind = is_mermaid ? LINE_MERMAID : LINE_CODE;
             c->in_text_block = 1;
             c->line_start = c->doc->len;
             break;
+        }
         case MD_BLOCK_P:
             if (!c->in_text_block) {
                 c->cur_kind   = (c->quote_depth > 0) ? LINE_QUOTE : LINE_NORMAL;
