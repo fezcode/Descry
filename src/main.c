@@ -7300,28 +7300,34 @@ static const char* ctx_shortcut_at(const App* a, int row)
 static int ctx_menu_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
 static int ctx_menu_w   (const App* a)
 {
-    if (a->ctx_menu_kind == CTX_KIND_EDITOR)  return 240;
-    if (a->ctx_menu_kind == CTX_KIND_PREVIEW) return 180;
-    if (a->ctx_menu_kind == CTX_KIND_MENU) {
-        /* Auto-size: widest label + widest shortcut + a fixed gap so the
-         * shortcut text never overlaps the label. */
-        int n = ctx_visible_count(a);
-        int max_label = 0, max_short = 0;
-        for (int i = 0; i < n; ++i) {
-            const char* L = ctx_label_at(a, i);
-            const char* S = ctx_shortcut_at(a, i);
-            int lw = font_measure(a->font_ide, L, strlen(L));
-            int sw = (S && *S) ? font_measure(a->font_ide, S, strlen(S)) : 0;
-            if (lw > max_label) max_label = lw;
-            if (sw > max_short) max_short = sw;
-        }
-        /* Padding: 14 left + 24 gap + 12 right. */
-        int w = max_label + 24 + max_short + 26;
-        if (w < 220) w = 220;
-        if (w > 360) w = 360;
-        return w;
+    /* Auto-size every context menu to the widest label + widest shortcut + a
+     * fixed gap, so the shortcut hint never overlaps the label — regardless of
+     * kind, label length, font, or HiDPI scale. (EDITOR/PREVIEW previously used
+     * fixed widths and long entries like "Go to source" + a shortcut collided.)
+     * A per-kind minimum keeps short menus from looking cramped; a generous
+     * maximum stops a stray long entry from sprawling. */
+    int n = ctx_visible_count(a);
+    int max_label = 0, max_short = 0;
+    for (int i = 0; i < n; ++i) {
+        const char* L = ctx_label_at(a, i);
+        const char* S = ctx_shortcut_at(a, i);
+        int lw = (L && *L) ? font_measure(a->font_ide, L, strlen(L)) : 0;
+        int sw = (S && *S) ? font_measure(a->font_ide, S, strlen(S)) : 0;
+        if (lw > max_label) max_label = lw;
+        if (sw > max_short) max_short = sw;
     }
-    return 200;
+    int gap = (max_short > 0) ? 24 : 0;          /* label/shortcut breathing room */
+    int w   = 14 + max_label + gap + max_short + 12;   /* 14 left + 12 right pad */
+
+    int min_w;
+    switch (a->ctx_menu_kind) {
+        case CTX_KIND_EDITOR:  min_w = 240; break;
+        case CTX_KIND_PREVIEW: min_w = 200; break;
+        default:               min_w = 220; break;
+    }
+    if (w < min_w) w = min_w;
+    if (w > 400)   w = 400;
+    return w;
 }
 
 static void ctx_menu_open(App* a, int x, int y, int target_idx)
@@ -11592,10 +11598,38 @@ static void word_count_str(int words, char* out, size_t cap)
     else           snprintf(out, cap, "%d words \xc2\xb7 %d min read", words, mins);
 }
 
-/* Live-resize indicator. Two pieces:
- *  (1) a faint border outline around the entire client area, so the user
- *      can see the live new bounds while dragging an edge.
- *  (2) a centered "WxH" pill that fades out shortly after the user stops.
+/* A themed 1px frame around the borderless window so it reads as a distinct
+ * surface against the desktop. While the user is actively resizing it switches
+ * to the accent color and thickens slightly — the live-resize highlight. Drawn
+ * last in app_render so it sits above all content and overlays. Suppressed when
+ * maximized (the window is flush to the screen edges). */
+static void render_window_border(App* a)
+{
+    if (window_is_maximized(a)) return;
+
+    /* Clear any clip a modal/overlay may have left set so the full perimeter
+     * always paints. */
+    SDL_RenderSetClipRect(a->renderer, NULL);
+
+    bool      resizing = SDL_GetTicks() < a->resize_show_until;
+    SDL_Color c        = resizing ? a->fg_link : a->fg_muted;
+    int       t        = resizing ? 2 : 1;
+    Uint8     alpha    = resizing ? 200 : 150;
+
+    SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, alpha);
+    SDL_Rect top   = { 0, 0, a->win_w, t };
+    SDL_Rect bot   = { 0, a->win_h - t, a->win_w, t };
+    SDL_Rect left  = { 0, 0, t, a->win_h };
+    SDL_Rect right = { a->win_w - t, 0, t, a->win_h };
+    SDL_RenderFillRect(a->renderer, &top);
+    SDL_RenderFillRect(a->renderer, &bot);
+    SDL_RenderFillRect(a->renderer, &left);
+    SDL_RenderFillRect(a->renderer, &right);
+}
+
+/* Live-resize indicator: a centered "WxH" pill that fades out shortly after
+ * the user stops dragging an edge. (The window-frame outline — including its
+ * accent resize-highlight — is drawn by render_window_border.)
  *
  * On Windows, SDL's main loop is blocked during the modal resize drag, so
  * SIZE_CHANGED events would only fire on mouse-up if we waited for the
@@ -11612,22 +11646,7 @@ static void render_resize_badge(App* a)
     float alpha_f = remain > 250 ? 1.0f : (remain / 250.0f);
     Uint8 alpha   = (Uint8)(alpha_f * 255.0f);
 
-    /* (1) Outline of the new window bounds — drawn as four thin filled
-     * strips so it stays sharp at any DPI without needing AA. */
-    SDL_SetRenderDrawColor(a->renderer,
-        a->fg_link.r, a->fg_link.g, a->fg_link.b,
-        (Uint8)(alpha * 0.55f));
-    int t = 2;
-    SDL_Rect top    = { 0, 0, a->win_w, t };
-    SDL_Rect bot    = { 0, a->win_h - t, a->win_w, t };
-    SDL_Rect left   = { 0, 0, t, a->win_h };
-    SDL_Rect right_ = { a->win_w - t, 0, t, a->win_h };
-    SDL_RenderFillRect(a->renderer, &top);
-    SDL_RenderFillRect(a->renderer, &bot);
-    SDL_RenderFillRect(a->renderer, &left);
-    SDL_RenderFillRect(a->renderer, &right_);
-
-    /* (2) WxH badge in the centre. */
+    /* WxH badge in the centre. */
     char label[64];
     snprintf(label, sizeof label, "%d x %d", a->win_w, a->win_h);
 
@@ -12066,6 +12085,10 @@ static void app_render(App* a)
     render_rename_popup(a);
     render_confirm_modal(a);
     render_eol_picker(a);
+
+    /* Themed window frame on top of everything (accent-highlighted while
+     * resizing). */
+    render_window_border(a);
 
     SDL_RenderPresent(a->renderer);
 }
