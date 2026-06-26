@@ -438,14 +438,50 @@ static int l_save(lua_State* L)
     return 0;
 }
 
-/* descry.rainbow([on]) — no/`nil` arg toggles; a boolean sets it explicitly. */
-static int l_rainbow(lua_State* L)
+/* ---- text decorations: descry.decorations.clear/add ------------------- */
+
+static int l_decor_clear(lua_State* L)
 {
-    int mode = -1;   /* toggle */
-    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1))
-        mode = lua_toboolean(L, 1) ? 1 : 0;
     LuaHost* h = host_self(L);
-    if (h && h->bridge.set_rainbow) h->bridge.set_rainbow(h->bridge.ud, mode);
+    if (h && h->bridge.decor_clear) h->bridge.decor_clear(h->bridge.ud);
+    return 0;
+}
+
+/* Read style[key] = {r,g,b} into a packed 0xRRGGBB, or -1 if absent. */
+static long decor_color_field(lua_State* L, int style_idx, const char* key)
+{
+    if (!lua_istable(L, style_idx)) return -1;
+    lua_getfield(L, style_idx, key);          /* style[key] */
+    long rgb = -1;
+    if (lua_istable(L, -1)) {
+        int comp[3] = { 0, 0, 0 };
+        for (int i = 0; i < 3; ++i) {
+            lua_rawgeti(L, -1, i + 1);
+            int v = (int)luaL_optinteger(L, -1, 0);
+            if (v < 0) v = 0;
+            if (v > 255) v = 255;
+            comp[i] = v;
+            lua_pop(L, 1);
+        }
+        rgb = ((long)comp[0] << 16) | ((long)comp[1] << 8) | (long)comp[2];
+    }
+    lua_pop(L, 1);                             /* style[key] */
+    return rgb;
+}
+
+/* descry.decorations.add(start, end, { fg={r,g,b}, bg=…, underline=… }) */
+static int l_decor_add(lua_State* L)
+{
+    lua_Integer start = luaL_checkinteger(L, 1);
+    lua_Integer end   = luaL_checkinteger(L, 2);
+    long fg = decor_color_field(L, 3, "fg");
+    long bg = decor_color_field(L, 3, "bg");
+    long ul = decor_color_field(L, 3, "underline");
+    if (start < 0) start = 0;
+    if (end <= start) return 0;
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.decor_add)
+        h->bridge.decor_add(h->bridge.ud, (size_t)start, (size_t)end, fg, bg, ul);
     return 0;
 }
 
@@ -507,7 +543,12 @@ static const luaL_Reg DESCRY_LIB[] = {
     { "on",              l_on },
     { "open",            l_open },
     { "save",            l_save },
-    { "rainbow",         l_rainbow },
+    { NULL, NULL },
+};
+
+static const luaL_Reg DESCRY_DECOR_LIB[] = {
+    { "clear", l_decor_clear },
+    { "add",   l_decor_add },
     { NULL, NULL },
 };
 
@@ -536,6 +577,8 @@ void lua_host_setup_api(LuaHost* h)
     lua_setfield(h->L, -2, "buffer");             /* descry.buffer = … */
     luaL_newlib(h->L, DESCRY_VAULT_LIB);          /* [descry, vault] */
     lua_setfield(h->L, -2, "vault");              /* descry.vault = … */
+    luaL_newlib(h->L, DESCRY_DECOR_LIB);          /* [descry, decorations] */
+    lua_setfield(h->L, -2, "decorations");        /* descry.decorations = … */
     lua_setglobal(h->L, "descry");
     /* pre-create the actions + events registries so plugins don't need to */
     lua_newtable(h->L);

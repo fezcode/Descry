@@ -27,27 +27,58 @@ typedef struct {
     int           link_pending;
     size_t        link_start;
     char*         link_href;
+    /* Source span, for the rendered→source byte map. src_base is the original
+     * buffer passed to md_doc_parse (so offsets include any stripped BOM);
+     * [src_lo, src_hi) is the valid range md4c text pointers fall within. */
+    const char*   src_base;
+    const char*   src_lo;
+    const char*   src_hi;
 } ParseCtx;
+
+/* Source offset of pointer p (relative to src_base), or MD_SRC_NONE when p
+ * isn't inside the source span (md4c hands decoded entities/escapes out of a
+ * static buffer, not the source). */
+static size_t ctx_src_off(const ParseCtx* c, const char* p)
+{
+    if (p >= c->src_lo && p < c->src_hi) return (size_t)(p - c->src_base);
+    return MD_SRC_NONE;
+}
 
 static void buffers_reserve(MdDoc* d, size_t extra)
 {
     if (d->len + extra + 1 <= d->cap) return;
     size_t nc = d->cap ? d->cap * 2 : 1024;
     while (nc < d->len + extra + 1) nc *= 2;
-    d->data  = realloc(d->data,  nc);
-    d->style = realloc(d->style, nc);
-    d->cap   = nc;
+    d->data    = realloc(d->data,    nc);
+    d->style   = realloc(d->style,   nc);
+    d->src_map = realloc(d->src_map, nc * sizeof *d->src_map);
+    d->cap     = nc;
 }
 
-static void data_append_styled(MdDoc* d, const char* s, size_t n,
-                               unsigned char style)
+/* Append n bytes with one style, recording a source offset per byte. When
+ * per_byte, byte k maps to base+k (verbatim copy of source text); otherwise
+ * all bytes map to base (transformed runs like math, or MD_SRC_NONE for
+ * synthesized bytes with no source). */
+static void data_emit(MdDoc* d, const char* s, size_t n, unsigned char style,
+                      size_t base, int per_byte)
 {
     buffers_reserve(d, n);
     memcpy(d->data + d->len, s, n);
     memset(d->style + d->len, style, n);
+    for (size_t k = 0; k < n; ++k)
+        d->src_map[d->len + k] =
+            (base == MD_SRC_NONE || !per_byte) ? base : base + k;
     d->len += n;
-    d->data[d->len]  = 0;
-    d->style[d->len] = 0;
+    d->data[d->len]    = 0;
+    d->style[d->len]   = 0;
+    d->src_map[d->len] = MD_SRC_NONE;
+}
+
+/* Synthesized text with no source origin (separators, placeholders). */
+static void data_append_styled(MdDoc* d, const char* s, size_t n,
+                               unsigned char style)
+{
+    data_emit(d, s, n, style, MD_SRC_NONE, 0);
 }
 
 static void lines_reserve(MdDoc* d, size_t extra)
@@ -534,7 +565,7 @@ static int cb_text(MD_TEXTTYPE t, const MD_CHAR* text, MD_SIZE size, void* ud)
     }
 
     if (t == MD_TEXT_SOFTBR) {
-        data_append_styled(c->doc, " ", 1, c->style_mask);
+        data_emit(c->doc, " ", 1, c->style_mask, ctx_src_off(c, text), 0);
         return 0;
     }
     if (t == MD_TEXT_BR) {
@@ -549,7 +580,7 @@ static int cb_text(MD_TEXTTYPE t, const MD_CHAR* text, MD_SIZE size, void* ud)
     while (p < end) {
         const MD_CHAR* nl = memchr(p, '\n', (size_t)(end - p));
         size_t n = nl ? (size_t)(nl - p) : (size_t)(end - p);
-        if (n) data_append_styled(c->doc, p, n, c->style_mask);
+        if (n) data_emit(c->doc, p, n, c->style_mask, ctx_src_off(c, p), 1);
         if (nl) {
             finalize_current_line(c);
             c->line_start = c->doc->len;
@@ -596,6 +627,7 @@ int md_doc_parse(const char* src, size_t src_len, MdDoc* out)
 {
     memset(out, 0, sizeof *out);
     ParseCtx ctx = { .doc = out };
+    const char* md_orig = src;     /* before BOM strip; src_map offsets vs this */
 
     /* Strip UTF-8 BOM (EF BB BF) — md4c counts those bytes as line content
      * so e.g. "\xef\xbb\xbf# Heading" never matches the H1 production
@@ -607,6 +639,9 @@ int md_doc_parse(const char* src, size_t src_len, MdDoc* out)
         src     += 3;
         src_len -= 3;
     }
+    ctx.src_base = md_orig;
+    ctx.src_lo   = src;
+    ctx.src_hi   = src + src_len;
 
     MD_PARSER parser = {
         .abi_version = 0,
@@ -635,6 +670,7 @@ void md_doc_free(MdDoc* d)
     if (!d) return;
     free(d->data);
     free(d->style);
+    free(d->src_map);
     free(d->lines);
     free(d->wikis);
     for (size_t i = 0; i < d->link_count; ++i) free(d->links[i].href);

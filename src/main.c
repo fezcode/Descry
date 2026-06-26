@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.77.1"
+#define DESCRY_VERSION "0.78.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -953,7 +953,8 @@ static void reparse_preview(App* a)
     md_doc_parse(a->buf.data + body_start,
                  a->buf.len - body_start, &a->doc);
 
-    /* Patch task offsets back into buf.data coordinates. */
+    /* Patch task offsets + the source map back into buf.data coordinates
+     * (md_doc_parse saw only the post-frontmatter body). */
     if (body_start > 0) {
         for (size_t i = 0; i < a->doc.line_count; ++i) {
             MdLine* ln = &a->doc.lines[i];
@@ -963,6 +964,9 @@ static void reparse_preview(App* a)
                 ln->task_mark_off += body_start;
             }
         }
+        for (size_t i = 0; i < a->doc.len; ++i)
+            if (a->doc.src_map[i] != MD_SRC_NONE)
+                a->doc.src_map[i] += body_start;
     }
 }
 
@@ -1273,10 +1277,17 @@ static void br_open_path(void* ud, const char* path)
 
 static void br_save(void* ud) { save_note((App*)ud); }
 
-static void br_set_rainbow(void* ud, int mode)
+static void br_decor_clear(void* ud) { decor_clear(&((App*)ud)->decor); }
+
+static void br_decor_add(void* ud, size_t start, size_t end,
+                         long fg, long bg, long ul)
 {
     App* a = ud;
-    a->rainbow_mode = (mode < 0) ? !a->rainbow_mode : (mode != 0);
+    SDL_Color cf = { (Uint8)(fg >> 16), (Uint8)(fg >> 8), (Uint8)fg, 255 };
+    SDL_Color cb = { (Uint8)(bg >> 16), (Uint8)(bg >> 8), (Uint8)bg, 255 };
+    SDL_Color cu = { (Uint8)(ul >> 16), (Uint8)(ul >> 8), (Uint8)ul, 255 };
+    decor_add(&a->decor, start, end,
+              fg >= 0, cf, bg >= 0, cb, ul >= 0, cu);
 }
 
 static void bridge_install(App* a)
@@ -1296,7 +1307,8 @@ static void bridge_install(App* a)
         .vault_path      = br_vault_path,
         .open_path       = br_open_path,
         .save            = br_save,
-        .set_rainbow     = br_set_rainbow,
+        .decor_clear     = br_decor_clear,
+        .decor_add       = br_decor_add,
     };
     lua_host_set_bridge(a->lua, &b);
 }
@@ -3436,6 +3448,7 @@ static int app_init(App* a, const char* note_path_arg)
 
     a->lua = lua_host_create();
     lua_host_setup_api(a->lua);
+    decor_init(&a->decor);
     bridge_install(a);                 /* descry.buffer.* / descry.vault.* */
     lua_host_on_notify(on_lua_notify, a);
     lua_host_on_dialog(on_lua_dialog, a);
@@ -4072,6 +4085,7 @@ static void app_shutdown(App* a)
     tablist_free(&a->tabs);
     graph_free(&a->graph);
     spell_free(&a->spell);
+    decor_free(&a->decor);
     free(a->notification_msg);
     free(a->search_matches);
     free(a->search_match_lens);
@@ -4146,36 +4160,26 @@ static Font* pick_font(const App* a, LineKind kind, unsigned char style)
     return a->font_body;
 }
 
-/* Spectrum color for row `idx` — the hue steps per row so adjacent rows differ.
- * Bright + moderately saturated so it reads on the dark themes. */
-static SDL_Color rainbow_color(int idx)
-{
-    float h = (float)(((idx * 32) % 360 + 360) % 360);   /* step hue per row */
-    float s = 0.72f, v = 1.0f;
-    float c = v * s;
-    float x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
-    float m = v - c;
-    float r = 0, g = 0, b = 0;
-    if      (h <  60) { r = c; g = x; }
-    else if (h < 120) { r = x; g = c; }
-    else if (h < 180) { g = c; b = x; }
-    else if (h < 240) { g = x; b = c; }
-    else if (h < 300) { r = x; b = c; }
-    else              { r = c; b = x; }
-    SDL_Color out = { (Uint8)((r + m) * 255), (Uint8)((g + m) * 255),
-                      (Uint8)((b + m) * 255), 255 };
-    return out;
-}
-
 static SDL_Color pick_color(const App* a, LineKind kind, unsigned char style)
 {
-    if (a->rainbow_mode) return rainbow_color(a->rainbow_row);
     if (kind >= LINE_H1 && kind <= LINE_H6) return a->fg_heading;
     if (kind == LINE_CODE)                   return a->fg_muted;
     if (style & STYLE_LINK)                  return a->fg_link;
     if (style & STYLE_CODE)                  return a->fg_muted;
     if (kind == LINE_QUOTE)                  return a->fg_quote;
     return a->fg;
+}
+
+/* Decoration covering the doc byte at p[i] (p points into doc.data), mapped
+ * through src_map to source coords. NULL when none / no decorations. */
+static const Decoration* preview_decor_at(App* a, const char* p, size_t i)
+{
+    if (a->decor.count == 0 || p < a->doc.data) return NULL;
+    size_t docoff = (size_t)(p - a->doc.data) + i;
+    if (docoff >= a->doc.len) return NULL;
+    size_t src = a->doc.src_map[docoff];
+    if (src == MD_SRC_NONE) return NULL;
+    return decor_at(&a->decor, src);
 }
 
 static int styled_run(App* a, LineKind kind,
@@ -4186,13 +4190,28 @@ static int styled_run(App* a, LineKind kind,
     size_t i = 0;
     while (i < n) {
         unsigned char s = st[i];
+        const Decoration* dec = preview_decor_at(a, p, i);
         size_t j = i + 1;
-        while (j < n && st[j] == s) j++;
+        /* break the run on style change OR decoration change */
+        while (j < n && st[j] == s && preview_decor_at(a, p, j) == dec) j++;
         Font* f = pick_font(a, kind, s);
         int run_w = font_measure(f, p + i, j - i);
         if (draw) {
-            SDL_Color c = pick_color(a, kind, s);
+            SDL_Color c = (dec && dec->has_fg) ? dec->fg : pick_color(a, kind, s);
+            if (dec && dec->has_bg) {
+                SDL_Rect bg = { x, y_baseline - font_ascent(f),
+                                run_w, font_line_height(f) };
+                SDL_SetRenderDrawColor(a->renderer,
+                    dec->bg.r, dec->bg.g, dec->bg.b, 255);
+                SDL_RenderFillRect(a->renderer, &bg);
+            }
             font_draw_line(f, p + i, j - i, x, y_baseline, c);
+            if (dec && dec->has_ul) {
+                int uy = y_baseline + 2;
+                SDL_SetRenderDrawColor(a->renderer,
+                    dec->ul.r, dec->ul.g, dec->ul.b, 255);
+                SDL_RenderDrawLine(a->renderer, x, uy, x + run_w - 1, uy);
+            }
 
             /* Track wiki/link click hit for preview-mode navigation. */
             if ((s & STYLE_LINK) && !a->edit_mode) {
@@ -5157,7 +5176,6 @@ static int render_preview(App* a, bool draw)
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
     for (size_t i = 0; i < a->doc.line_count; ++i) {
         MdLine* l = &a->doc.lines[i];
-        a->rainbow_row = (int)i;          /* hue source for pick_color */
         if (l->kind == LINE_MERMAID) {
             size_t end = i + 1;
             while (end < a->doc.line_count &&
@@ -5787,6 +5805,45 @@ static void spell_underline_row(App* a, const char* rowptr, size_t rowlen,
     }
 }
 
+/* Apply decorations across one editor visual row [a_lo, a_lo+rlen). Two passes:
+ * bg_pass=1 fills backgrounds (call BEFORE drawing text); bg_pass=0 overdraws
+ * the decorated text in its fg color and draws underlines (call AFTER). x
+ * positions come from edit_line_x_at so they line up with the base draw. */
+static void editor_decor_pass(App* a, const char* rp, size_t rlen, size_t a_lo,
+                              int base_x, int top_y, int lh, Font* lf,
+                              bool fence, int bg_pass)
+{
+    size_t k = 0;
+    while (k < rlen) {
+        const Decoration* dec = decor_at(&a->decor, a_lo + k);
+        size_t e = k + 1;
+        while (e < rlen && decor_at(&a->decor, a_lo + e) == dec) e++;
+        if (dec) {
+            int x0 = base_x + edit_line_x_at(a, rp, rlen, k, lf, fence);
+            int x1 = base_x + edit_line_x_at(a, rp, rlen, e, lf, fence);
+            if (bg_pass) {
+                if (dec->has_bg) {
+                    SDL_Rect r = { x0, top_y, x1 - x0, lh };
+                    SDL_SetRenderDrawColor(a->renderer,
+                        dec->bg.r, dec->bg.g, dec->bg.b, 255);
+                    SDL_RenderFillRect(a->renderer, &r);
+                }
+            } else {
+                if (dec->has_fg)
+                    edit_line_draw(a, rp + k, e - k, x0,
+                                   top_y + font_ascent(lf), dec->fg, lf, fence);
+                if (dec->has_ul) {
+                    int uy = top_y + lh - 2;
+                    SDL_SetRenderDrawColor(a->renderer,
+                        dec->ul.r, dec->ul.g, dec->ul.b, 255);
+                    SDL_RenderDrawLine(a->renderer, x0, uy, x1 - 1, uy);
+                }
+            }
+        }
+        k = e;
+    }
+}
+
 static int render_editor(App* a)
 {
     int xL = doc_x_left(a);
@@ -5862,9 +5919,7 @@ static int render_editor(App* a)
         b->line_rows[li] = n_rows;
 
         bool is_h = (lf == a->font_h1 || lf == a->font_h2 || lf == a->font_h3);
-        SDL_Color text_c = a->rainbow_mode ? rainbow_color((int)li)
-                         : is_h            ? a->fg_heading
-                                           : a->fg;
+        SDL_Color text_c = is_h ? a->fg_heading : a->fg;
 
         for (int r = 0; r < n_rows; ++r) {
             size_t r_lo = (r == 0)       ? 0    : (size_t)breaks[r - 1];
@@ -5895,12 +5950,18 @@ static int render_editor(App* a)
                 }
 
                 if (r_hi > r_lo) {
-                    edit_line_draw(a, b->data + a_lo, r_hi - r_lo,
-                                   xL + MARGIN_X - scroll_x,
-                                   y + font_ascent(lf), text_c, lf,
-                                   draw_in_fence);
-                    spell_underline_row(a, b->data + a_lo, r_hi - r_lo,
-                                        xL + MARGIN_X - scroll_x, y, lh, lf,
+                    const char* rp = b->data + a_lo;
+                    size_t      rl = r_hi - r_lo;
+                    int         bx = xL + MARGIN_X - scroll_x;
+                    if (a->decor.count)         /* backgrounds behind the text */
+                        editor_decor_pass(a, rp, rl, a_lo, bx, y, lh, lf,
+                                          draw_in_fence, 1);
+                    edit_line_draw(a, rp, rl, bx, y + font_ascent(lf),
+                                   text_c, lf, draw_in_fence);
+                    if (a->decor.count)         /* fg recolor + underlines */
+                        editor_decor_pass(a, rp, rl, a_lo, bx, y, lh, lf,
+                                          draw_in_fence, 0);
+                    spell_underline_row(a, rp, rl, bx, y, lh, lf,
                                         draw_in_fence);
                 }
 

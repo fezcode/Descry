@@ -82,9 +82,16 @@ typedef struct {
     char*  href;
 } MdLink;
 
+/* src_map[i] is the SOURCE byte offset that produced rendered byte data[i]
+ * (relative to the buffer passed to md_doc_parse), or MD_SRC_NONE for bytes
+ * with no source origin (synthesized separators, entity-decoded text, etc.).
+ * Lets the preview map a source-coordinate decoration onto rendered glyphs. */
+#define MD_SRC_NONE ((size_t)-1)
+
 typedef struct {
     char*          data;
     unsigned char* style;        /* parallel to data, one byte per byte */
+    size_t*        src_map;      /* parallel to data; source offset per byte */
     size_t         len, cap;
     MdLine*        lines;
     size_t         line_count, line_cap;

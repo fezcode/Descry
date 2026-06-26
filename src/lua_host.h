@@ -112,7 +112,11 @@ typedef struct {
     const char* (*vault_path)(void* ud, int i);
     void   (*open_path)      (void* ud, const char* path);
     void   (*save)           (void* ud);
-    void   (*set_rainbow)    (void* ud, int mode);   /* 1 on, 0 off, -1 toggle */
+    /* Text decorations. Colors are packed 0xRRGGBB, or -1 when that channel is
+     * unset. Ranges are buffer byte offsets (same space as the buffer API). */
+    void   (*decor_clear)    (void* ud);
+    void   (*decor_add)      (void* ud, size_t start, size_t end,
+                              long fg, long bg, long ul);
 } LuaAppBridge;
 
 /* Install the document/vault bridge. Copies the struct; the app keeps no

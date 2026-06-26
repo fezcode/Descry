@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "decor.h"
 #include "graph.h"
 #include "image.h"
 #include "markdown.h"
@@ -636,11 +637,10 @@ typedef struct {
     Spell    spell;
     bool     spellcheck_on;
 
-    /* Rainbow mode: tint every rendered row a cycling spectrum color. Toggled
-     * by the bundled rainbow.lua plugin via descry.rainbow(). rainbow_row is a
-     * transient set per line during render so pick_color can hue it. */
-    bool     rainbow_mode;
-    int      rainbow_row;
+    /* Plugin text decorations (descry.decorations.*): styled byte ranges over
+     * the source buffer. The editor applies them directly; the preview maps
+     * them through MdDoc.src_map. Recomputed by plugins on text_change/open. */
+    DecorSet decor;
 
     /* Graph view (Ctrl+Shift+M): a force-directed map of the vault's
      * wiki-link graph. Built + laid out on open; pan/zoom interactively. */

@@ -161,9 +161,52 @@ end)
   loses work.
 - **`descry.save()`** — save the active document to its file (a no-op for an
   unsaved scratch buffer with no path yet).
-- **`descry.rainbow([on])`** — toggle (no arg) or set (boolean) the rainbow
-  render mode, which tints every rendered row a cycling spectrum color. A small
-  example of a render-side bridge hook; see the bundled `rainbow.lua`.
+
+## `descry.decorations` — styled text ranges
+
+Push styled byte ranges and the renderer paints them in **both** the editor and
+the preview. Ranges are buffer byte offsets — the same coordinate space as
+`descry.buffer.*` (so a range computed from `descry.buffer.text()` "just
+works"). The render path never calls back into Lua: you recompute the
+decoration set in an event handler, and the engine applies it every frame.
+
+| Call | Effect |
+|------|--------|
+| `descry.decorations.clear()` | drop all decorations |
+| `descry.decorations.add(start, end, style)` | style bytes `[start, end)` |
+
+`style` is a table; every field is optional:
+
+```lua
+{ fg = {r, g, b},          -- text color (0–255 each)
+  bg = {r, g, b},          -- background highlight
+  underline = {r, g, b} }  -- colored underline
+```
+
+Recompute on edits/opens so the styling tracks the text:
+
+```lua
+-- Highlight every line that contains "TODO".
+local function refresh()
+    descry.decorations.clear()
+    local t, off = descry.buffer.text(), 0
+    for line in (t .. "\n"):gmatch("(.-)\n") do
+        if line:find("TODO", 1, true) then
+            descry.decorations.add(off, off + #line, { bg = {80, 60, 0} })
+        end
+        off = off + #line + 1
+    end
+end
+descry.on("open", refresh)
+descry.on("text_change", refresh)
+```
+
+The bundled **`rainbow.lua`** is a fuller example: one `fg` decoration per line,
+cycling the hue. Notes / limits: decorations are assumed non-overlapping (on
+overlap, the one with the greatest `start ≤ offset` wins); ranges over a
+`$…$` math span color the whole rendered span (math glyphs share one source
+offset); recomputing thousands of decorations on every keystroke is fine for
+normal notes but can lag on very large documents.
 
 ## Events: `descry.on(event, fn)`
 

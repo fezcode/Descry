@@ -33,6 +33,7 @@ pkg_check_modules(LIBJPEG  REQUIRED IMPORTED_TARGET libjpeg)
 add_executable(descry
   src/main.c
   src/buffer.c
+  src/decor.c
   src/font.c
   src/graph.c
   src/icons.c
