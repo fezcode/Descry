@@ -151,6 +151,13 @@ typedef struct {
     size_t           ptbl_bar_cap;
     size_t           ptbl_drag_line;  /* dragged table (sb_drag==SB_PREVIEW_TABLE) */
 
+    /* OS file-drop staging: SDL delivers one SDL_DROPFILE per file in a burst;
+     * collected here and flushed once (prompt + copy into the vault) after the
+     * event drain each frame, so a multi-file drop asks a single time. */
+    char**   drop_files;
+    size_t   drop_file_count;
+    size_t   drop_file_cap;
+
     /* Find / Replace overlay state */
     int      search_mode;        /* 0 = off, 1 = find, 2 = find+replace    */
     char     search_query[256];

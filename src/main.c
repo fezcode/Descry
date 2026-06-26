@@ -3508,6 +3508,9 @@ static int app_init(App* a, const char* note_path_arg)
      * Win+arrow shortcuts work for free. */
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
 
+    /* Accept files dropped onto the window from the OS file manager. */
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
     tablist_init(&a->tabs);
     a->tab_hover = -1;
     a->tab_scroll_x = 0;
@@ -3912,6 +3915,8 @@ static void app_shutdown(App* a)
     free(a->sidebar_visible);
     free(a->preview_rows);
     free(a->ptbl_bars);
+    for (size_t i = 0; i < a->drop_file_count; ++i) free(a->drop_files[i]);
+    free(a->drop_files);
     if (a->cursor_resize) SDL_FreeCursor(a->cursor_resize);
     if (a->cur_arrow) SDL_FreeCursor(a->cur_arrow);
     if (a->cur_ns)    SDL_FreeCursor(a->cur_ns);
@@ -8018,6 +8023,154 @@ static void ed_menu_invoke(App* a, EditorAction act)
 /* Defined in the clipboard section much further down. */
 static void preview_copy(App* a);
 static void preview_go_to_source(App* a);
+
+/* ---- OS file drag-and-drop: copy dropped files into the vault ---------- */
+
+/* True if `p` names a directory. */
+static int path_is_dir(const char* p)
+{
+    struct stat st;
+    return (stat(p, &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+/* Binary file copy (overwrites dst). Returns 0 on success, -1 on I/O error. */
+static int copy_file(const char* src, const char* dst)
+{
+    FILE* in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE* out = fopen(dst, "wb");
+    if (!out) { fclose(in); return -1; }
+    char   buf[64 * 1024];
+    int    rc = 0;
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    }
+    if (ferror(in)) rc = -1;
+    fclose(in);
+    if (fclose(out) != 0) rc = -1;
+    return rc;
+}
+
+/* Build a collision-free destination inside `vault_dir` for src's basename,
+ * inserting " (2)", " (3)" ... before the extension so a drop never silently
+ * overwrites an existing note. Returns 0 on success. */
+static int unique_vault_dest(const char* vault_dir, const char* src,
+                             char* out, size_t out_cap)
+{
+    const char* base = vault_basename(src);
+    const char* dot  = strrchr(base, '.');
+    char stem[512], ext[64];
+    if (dot && dot != base) {
+        size_t sl = (size_t)(dot - base);
+        if (sl >= sizeof stem) sl = sizeof stem - 1;
+        memcpy(stem, base, sl); stem[sl] = 0;
+        snprintf(ext, sizeof ext, "%s", dot);
+    } else {
+        snprintf(stem, sizeof stem, "%s", base);
+        ext[0] = 0;
+    }
+    for (int n = 1; n < 1000; ++n) {
+        if (n == 1) snprintf(out, out_cap, "%s/%s%s",      vault_dir, stem, ext);
+        else        snprintf(out, out_cap, "%s/%s (%d)%s", vault_dir, stem, n, ext);
+        if (!file_exists(out)) return 0;
+    }
+    return -1;
+}
+
+/* Stage one path from an SDL_DROPFILE burst (copied, since SDL frees the
+ * original right after the event). */
+static void drop_stage_file(App* a, const char* path)
+{
+    if (!path || !path[0]) return;
+    if (a->drop_file_count >= a->drop_file_cap) {
+        size_t nc = a->drop_file_cap ? a->drop_file_cap * 2 : 8;
+        char** nf = realloc(a->drop_files, nc * sizeof *nf);
+        if (!nf) return;
+        a->drop_files    = nf;
+        a->drop_file_cap = nc;
+    }
+    size_t len = strlen(path) + 1;
+    char*  dup = malloc(len);
+    if (!dup) return;
+    memcpy(dup, path, len);
+    a->drop_files[a->drop_file_count++] = dup;
+}
+
+static void drop_clear(App* a)
+{
+    for (size_t i = 0; i < a->drop_file_count; ++i) free(a->drop_files[i]);
+    a->drop_file_count = 0;
+}
+
+/* Prompt once for everything staged from a drag-drop and, on confirm, copy
+ * each file into the vault root (collision-safe), then rescan the sidebar.
+ * Called from the main loop after the per-frame event drain. */
+static void drop_flush(App* a)
+{
+    if (a->drop_file_count == 0) return;
+
+    if (!a->vault.dir || !a->vault.dir[0]) {
+        app_notify(a, "drop ignored \xE2\x80\x94 open a vault first");
+        drop_clear(a);
+        return;
+    }
+
+    size_t files = 0, dirs = 0;
+    const char* only = NULL;
+    for (size_t i = 0; i < a->drop_file_count; ++i) {
+        if (path_is_dir(a->drop_files[i])) dirs++;
+        else { files++; only = a->drop_files[i]; }
+    }
+    if (files == 0) {
+        app_notify(a, dirs ? "drop ignored \xE2\x80\x94 folders aren't supported yet"
+                           : "drop ignored");
+        drop_clear(a);
+        return;
+    }
+
+    char msg[600];
+    if (files == 1)
+        snprintf(msg, sizeof msg, "Copy \"%s\" into the vault?",
+                 vault_basename(only));
+    else
+        snprintf(msg, sizeof msg, "Copy %lu files into the vault?",
+                 (unsigned long)files);
+
+    if (!confirm_action(a, "Copy to vault", msg, "Copy", "Cancel")) {
+        drop_clear(a);
+        return;
+    }
+
+    size_t copied = 0;
+    char   dest[1024], last[1024];
+    last[0] = 0;
+    for (size_t i = 0; i < a->drop_file_count; ++i) {
+        const char* src = a->drop_files[i];
+        if (path_is_dir(src)) continue;
+        if (unique_vault_dest(a->vault.dir, src, dest, sizeof dest) != 0) continue;
+        if (copy_file(src, dest) == 0) {
+            copied++;
+            snprintf(last, sizeof last, "%s", dest);
+        }
+    }
+    drop_clear(a);
+
+    /* Surface the freshly-copied notes/images in the sidebar. */
+    vault_scan(&a->vault, a->vault.dir);
+
+    char note[600];
+    if (copied == 0) {
+        app_notify(a, "copy failed");
+    } else if (copied == 1) {
+        snprintf(note, sizeof note, "copied %s to vault", vault_basename(last));
+        app_notify(a, note);
+    } else {
+        snprintf(note, sizeof note, "copied %lu files to vault",
+                 (unsigned long)copied);
+        app_notify(a, note);
+    }
+}
 
 /* Single dispatch from a row click, switches on the active menu kind. */
 /* Reveal a file in the OS file manager (Explorer selects the file). */
@@ -14941,6 +15094,15 @@ static void app_event(App* a, const SDL_Event* e)
             if (confirm_discard_all(a)) a->running = false;
             break;
 
+        case SDL_DROPFILE:
+            /* Stage now; the prompt + copy happens once after the event drain
+             * (see the main loop) so a multi-file drop asks a single time. */
+            if (e->drop.file) {
+                drop_stage_file(a, e->drop.file);
+                SDL_free(e->drop.file);
+            }
+            break;
+
         case SDL_WINDOWEVENT:
             if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 a->win_w = e->window.data1;
@@ -17081,6 +17243,7 @@ int main(int argc, char** argv)
         if (SDL_WaitEventTimeout(&e, wait_ms)) {
             do { app_event(&app, &e); } while (SDL_PollEvent(&e));
         }
+        drop_flush(&app);     /* prompt + copy any OS file-drop, once per drop */
         app_render(&app);
     }
     app_shutdown(&app);
