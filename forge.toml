@@ -1,6 +1,6 @@
 ﻿[app]
 name    = "Descry"
-version = "0.76.0"
+version = "0.77.0"
 id      = "com.fezcode.descry"
 icon    = "resources/descry.ico"
 
@@ -19,8 +19,8 @@ keep = []
 
 [[steps]]
 type  = "welcome"
-title = "Descry 0.76.0"
-body  = "This wizard will install Descry 0.76.0 on your computer.\n\nClick Next to continue."
+title = "Descry 0.77.0"
+body  = "This wizard will install Descry 0.77.0 on your computer.\n\nClick Next to continue."
 
 [[steps]]
 type  = "license"
@@ -31,7 +31,7 @@ file  = "LICENSE.txt"
 [[steps]]
 type  = "folder"
 title = "Select Folder"
-body  = "Choose where to install Descry 0.76.0."
+body  = "Choose where to install Descry 0.77.0."
 
 [[steps]]
 type  = "shortcuts"
@@ -157,5 +157,5 @@ data  = "${INSTALLDIR}"
 hive  = "HKCU"
 key   = "Software\\Fezcode\\Descry"
 value = "Version"
-data  = "0.76.0"
+data  = "0.77.0"
 

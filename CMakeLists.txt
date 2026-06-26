@@ -34,12 +34,14 @@ add_executable(descry
   src/main.c
   src/buffer.c
   src/font.c
+  src/graph.c
   src/icons.c
   src/image.c
   src/lua_host.c
   src/markdown.c
   src/mermaid.c
   src/regex.c
+  src/spell.c
   src/tabs.c
   src/vault.c
 )

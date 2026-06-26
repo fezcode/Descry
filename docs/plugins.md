@@ -4,12 +4,14 @@ Descry can load Lua scripts at startup and expose them as named **actions**
 that the user can run from the command palette, bind to a key, or invoke
 from the menus.
 
-This is a small, deliberately-narrow API today. A plugin can register
-named actions, show toast notifications, and pop up modal dialogs.
-There is no read/write access to the open document, no buffer
-manipulation, no event subscription. If you need any of that, open
-an issue or send a PR — most of it would be a few dozen lines of C
-glue against `lua_host.c`.
+A plugin can register named actions, show toast notifications and modal
+dialogs, **read and edit the open document**, **list and open vault notes**,
+and **subscribe to lifecycle events** (`open` / `save` / `text_change`). The
+surface is intentionally small but no longer a dead end — a plugin can do real
+work on the text the user is looking at.
+
+What's still missing (custom UI panels, timers, inter-plugin calls) is listed
+honestly under [What's NOT exposed](#whats-not-exposed-yet) at the bottom.
 
 ---
 
@@ -60,7 +62,8 @@ the app exits).
 
 ## The `descry` global
 
-Three functions. That's the whole API.
+A handful of top-level functions plus two sub-tables (`descry.buffer`,
+`descry.vault`).
 
 ### `descry.register_action(name, fn)`
 
@@ -111,6 +114,82 @@ yet; either fall back to `notify` for now or open an issue.
 
 ---
 
+## `descry.buffer` — the open document
+
+Read and edit the active note. All text is UTF-8; positions are **byte
+offsets** into that UTF-8. Edits go through the real editor, so they land on
+the undo stack (Ctrl+Z reverts a plugin edit) and the preview re-renders
+immediately. The synthetic buffer behind an image preview is read-only — edit
+calls on it are silently ignored.
+
+| Call | Returns | Notes |
+|------|---------|-------|
+| `descry.buffer.text()` | string | the whole document |
+| `descry.buffer.set_text(s)` | — | replace the whole document (undoable) |
+| `descry.buffer.selection()` | string or `nil` | selected text, or nil if none |
+| `descry.buffer.replace_selection(s)` | — | replace the selection (or insert at caret) |
+| `descry.buffer.insert(s)` | — | insert `s` at the caret |
+| `descry.buffer.cursor()` | integer | caret byte offset |
+| `descry.buffer.set_cursor(pos)` | — | move the caret to byte `pos` (clamped) |
+| `descry.buffer.length()` | integer | document length in bytes |
+| `descry.buffer.path()` | string or `nil` | the note's file path, or nil if unsaved |
+
+```lua
+-- Uppercase the current selection.
+descry.register_action("upper_selection", function()
+    local sel = descry.buffer.selection()
+    if sel then descry.buffer.replace_selection(sel:upper()) end
+end)
+```
+
+## `descry.vault` — the note collection
+
+| Call | Returns | Notes |
+|------|---------|-------|
+| `descry.vault.list()` | array of strings | every markdown note's path (folders/images excluded) |
+
+```lua
+descry.register_action("note_count", function()
+    descry.notify(#descry.vault.list() .. " notes in the vault")
+end)
+```
+
+## Navigation: `descry.open` / `descry.save`
+
+- **`descry.open(path)`** — open `path` in a tab (reusing an existing tab if it
+  is already open). Because tabs keep each file's unsaved edits, this never
+  loses work.
+- **`descry.save()`** — save the active document to its file (a no-op for an
+  unsaved scratch buffer with no path yet).
+
+## Events: `descry.on(event, fn)`
+
+Register a handler that fires on an editor lifecycle event. Handlers run with
+no arguments — query `descry.buffer.*` for context. Register as many as you
+like (per event, in order). Like actions, handlers are wiped and re-registered
+on a plugin reload.
+
+| Event | Fires when |
+|-------|-----------|
+| `"open"` | a note is loaded from disk into the active document |
+| `"save"` | the active document is written to its file |
+| `"text_change"` | the document's text changed this frame (typing, paste, undo, a plugin edit) |
+
+```lua
+-- Stamp an updated-time into YAML frontmatter on every save.
+descry.on("save", function()
+    descry.notify("saved " .. (descry.buffer.path() or "scratch"))
+end)
+```
+
+A handler that errors is logged to stderr (`[lua] event 'NAME': …`) and skipped;
+the others still run, and the editor keeps going. Beware editing the buffer
+from inside `text_change` — your edit triggers another `text_change`. It is
+frame-throttled (not a hard loop), but guard against re-entrancy if your
+handler writes to the buffer.
+
+---
+
 ## Discovery in the UI
 
 Once plugins are loaded:
@@ -134,48 +213,42 @@ built-ins.
 ```lua
 -- data/plugins/word_count.lua
 --
--- Two actions: one shows a toast with a stub word count, the other
--- pops a dialog. Realistic plugins look like this — small, focused,
--- one file each.
+-- A real word counter: it reads the live document and keeps a status-bar
+-- tally in sync as you type. (This file ships in data/plugins/.)
 
-local function fake_word_count()
-    -- The plugin API doesn't expose the buffer yet; this is a
-    -- placeholder. Replace with a real count once that hook lands.
-    return 0
+local function counts()
+    local t = descry.buffer.text()
+    local _, words = t:gsub("%S+", "")   -- runs of non-space = words
+    return words, #t
 end
 
-descry.register_action("word_count_toast", function()
-    descry.notify("words: " .. fake_word_count())
+descry.register_action("word_count", function()
+    local words, chars = counts()
+    descry.dialog("Word count",
+        string.format("%d words\n%d characters", words, chars))
 end)
 
-descry.register_action("word_count_dialog", function()
-    descry.dialog("Word count",
-        "This document has " .. fake_word_count() .. " words.")
+descry.on("text_change", function()
+    descry.notify("words: " .. (select(1, counts())))
 end)
 
 descry.notify("[word_count] loaded")
 ```
 
-Drop that file in `data/plugins/`, restart Descry (or hit Reload in
-the Plugins overlay). Both actions show up in the command palette.
-Bind `word_count_toast` to e.g. `ctrl+shift+w` from the keybindings
-overlay (F1) and now Ctrl+Shift+W fires it.
+Drop that file in `data/plugins/`, restart Descry (or hit Reload in the
+Plugins overlay). The `word_count` action shows up in the command palette;
+bind it to e.g. `ctrl+shift+w` from the keybindings overlay (F1) and now
+Ctrl+Shift+W pops the dialog — while the status bar already shows a live
+count from the `text_change` handler.
 
 ---
 
 ## What's NOT exposed (yet)
 
-Honest list of holes — none of these are fundamental, just unwritten C
+Honest list of remaining holes — none are fundamental, just unwritten C
 glue. If you need one, the codebase is small enough to add it in
-`src/lua_host.c` against `DESCRY_LIB[]`:
+`src/lua_host.c` against `DESCRY_LIB[]` / the `LuaAppBridge` vtable:
 
-- **Buffer access**: no read/write to the current document, no cursor
-  position, no selection, no insert/delete.
-- **File I/O scoped to vault**: plugins can use Lua's standard
-  `io.open` if you want, but there's no helper for "open this note" or
-  "list vault files".
-- **Event subscription**: no `on_save`, `on_open`, `on_text_change`.
-  Actions only fire when the user explicitly invokes them.
 - **Custom UI**: no way to draw a panel, add a sidebar item, or render
   inside the preview pane. `dialog`/`notify` is the entire output
   surface.
@@ -183,6 +256,12 @@ glue. If you need one, the codebase is small enough to add it in
 - **Async / timers**: no `set_timeout`, no background work.
 - **Direct keybind from Lua**: plugins register actions; users bind
   keys. There's no way for a plugin to claim a default keystroke.
+- **Vault writes**: `descry.vault.list()` is read-only — there's no
+  create/rename/delete helper (use Lua's `io` plus `descry.open`).
+
+Buffer access, vault listing, file open/save, and lifecycle events —
+all previously on this list — are now implemented (see the sections
+above).
 
 The host design is intentionally minimal until real use cases push for
 more. If you write a plugin that wants any of the above, the right

@@ -1,6 +1,8 @@
 #ifndef DESCRY_LUA_HOST_H
 #define DESCRY_LUA_HOST_H
 
+#include <stddef.h>
+
 typedef struct LuaHost LuaHost;
 
 LuaHost* lua_host_create(void);
@@ -85,5 +87,42 @@ void lua_host_on_notify(LuaNotifyCallback cb, void* userdata);
 typedef void (*LuaDialogCallback)(void* userdata,
                                   const char* title, const char* msg);
 void lua_host_on_dialog(LuaDialogCallback cb, void* userdata);
+
+/* ---- Document / vault bridge ------------------------------------------
+ * The plugin API exposes `descry.buffer.*` and `descry.vault.*`, but the
+ * host knows nothing about the editor's App state. The app fills in this
+ * vtable once at startup; the host's C functions call back through it.
+ *
+ * All text is UTF-8; positions are byte offsets into that UTF-8. Pointers
+ * returned via `*_len` out-params are malloc'd by the app callback and freed
+ * by the host after copying into Lua. Any field may be NULL — the host
+ * guards every call, so a partially-filled bridge degrades gracefully. */
+typedef struct {
+    void* ud;                                                /* App* */
+    char*  (*buf_text)       (void* ud, size_t* out_len);    /* whole doc; malloc'd */
+    void   (*buf_set_text)   (void* ud, const char* s, size_t n);
+    char*  (*buf_selection)  (void* ud, size_t* out_len);    /* NULL if no selection */
+    void   (*buf_replace_sel)(void* ud, const char* s, size_t n);
+    void   (*buf_insert)     (void* ud, const char* s, size_t n);
+    size_t (*buf_cursor)     (void* ud);
+    void   (*buf_set_cursor) (void* ud, size_t pos);
+    size_t (*buf_len)        (void* ud);
+    const char* (*note_path) (void* ud);                     /* NULL if unsaved */
+    int    (*vault_count)    (void* ud);                     /* note files only */
+    const char* (*vault_path)(void* ud, int i);
+    void   (*open_path)      (void* ud, const char* path);
+    void   (*save)           (void* ud);
+} LuaAppBridge;
+
+/* Install the document/vault bridge. Copies the struct; the app keeps no
+ * ownership obligation. Call once after lua_host_setup_api(). */
+void lua_host_set_bridge(LuaHost* h, const LuaAppBridge* bridge);
+
+/* Invoke every handler a plugin registered with descry.on(event, fn), in
+ * registration order. Safe (a no-op) when no handler is registered. Handlers
+ * are called with no arguments — they query the descry.buffer and descry.vault
+ * tables for context. Known events: "open", "save", "text_change". A handler
+ * that errors is logged and skipped; the rest still run. */
+void lua_host_fire_event(LuaHost* h, const char* event);
 
 #endif

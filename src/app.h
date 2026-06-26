@@ -6,9 +6,11 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "graph.h"
 #include "image.h"
 #include "markdown.h"
 #include "mermaid.h"
+#include "spell.h"
 #include "tabs.h"
 #include "vault.h"
 
@@ -88,6 +90,10 @@ typedef struct {
     bool     viewing_image;/* current note is a raw image file (.png/.jpg/..)
                             * — buffer holds a synthetic `![](file)` so
                             * preview renders the image; edit/save blocked */
+
+    /* buf.seq value at the last fired plugin "text_change" event. Loads and
+     * tab switches resync this so they don't fire as edits. */
+    unsigned long fired_seq;
 
     int      scroll_y;
     int      scroll_x;          /* horizontal pan offset, only used when
@@ -623,6 +629,24 @@ typedef struct {
     int      vsearch_scroll;
     int      vsearch_files_with_hits;
     int      vsearch_total_hits;
+
+    /* Spell check (opt-in via config `spellcheck`). The editor underlines
+     * words missing from `spell`. spellcheck_on is true only once a dictionary
+     * actually loaded, so an enabled-but-dictionary-less config is inert. */
+    Spell    spell;
+    bool     spellcheck_on;
+
+    /* Graph view (Ctrl+Shift+M): a force-directed map of the vault's
+     * wiki-link graph. Built + laid out on open; pan/zoom interactively. */
+    bool       graph_active;
+    GraphModel graph;
+    float      graph_zoom;       /* user zoom multiplier on top of fit-scale */
+    float      graph_pan_x;      /* world-space pan offset                   */
+    float      graph_pan_y;
+    int        graph_hover_node; /* node under cursor this frame, -1 = none  */
+    bool       graph_panning;    /* left-drag pan in progress                */
+    int        graph_drag_mx, graph_drag_my;   /* mouse at pan grab          */
+    float      graph_drag_px, graph_drag_py;   /* pan offset at grab         */
 
     /* Sidebar drag-and-drop. */
     bool     dnd_active;

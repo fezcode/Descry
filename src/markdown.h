@@ -39,6 +39,7 @@ typedef enum {
     STYLE_CODE   = 1 << 2,
     STYLE_STRIKE = 1 << 3,
     STYLE_LINK   = 1 << 4,
+    STYLE_MATH   = 1 << 5,   /* inline/display `$…$` LaTeX-math span */
 } StyleFlags;
 
 typedef struct {

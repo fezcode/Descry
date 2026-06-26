@@ -239,9 +239,32 @@ char* vault_pick_file(SDL_Window* parent, const char* title,
     ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn)) return strdup(filename);
     return NULL;
+#elif defined(__APPLE__)
+    (void)filter_label; (void)filter_pattern;
+    char cmd[512];
+    snprintf(cmd, sizeof cmd,
+        "osascript -e 'POSIX path of (choose file with prompt \"%s\")' 2>/dev/null",
+        title ? title : "Open file");
+    return run_popen_line(cmd);
+#elif defined(__linux__) || defined(__unix__)
+    (void)parent;
+    const char* label = filter_label   ? filter_label   : "Files";
+    const char* pat   = filter_pattern ? filter_pattern : "*.*";
+    char cmd[768];
+    /* zenity first (GNOME), then kdialog (KDE). Mirrors vault_open_dialog. */
+    snprintf(cmd, sizeof cmd,
+        "zenity --file-selection --title=\"%s\" --file-filter='%s | %s' 2>/dev/null",
+        title ? title : "Open file", label, pat);
+    char* p = run_popen_line(cmd);
+    if (!p) {
+        snprintf(cmd, sizeof cmd,
+            "kdialog --getopenfilename '' '%s|%s' 2>/dev/null", pat, label);
+        p = run_popen_line(cmd);
+    }
+    return p;
 #else
     (void)parent; (void)title; (void)filter_label; (void)filter_pattern;
-    return NULL;     /* TODO: zenity / kdialog passthrough */
+    return NULL;
 #endif
 }
 

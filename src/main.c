@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.76.0"
+#define DESCRY_VERSION "0.77.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1066,6 +1066,8 @@ static int load_into_live(App* a, const char* path)
         recent_push(a, path);
         recent_save(a);
         update_window_title(a);
+        a->fired_seq = a->buf.seq;            /* loads aren't "text_change" */
+        lua_host_fire_event(a->lua, "open");
         fprintf(stderr, "descry: opened image %s\n", path);
         return 0;
     }
@@ -1094,6 +1096,8 @@ static int load_into_live(App* a, const char* path)
     recent_save(a);
 
     update_window_title(a);
+    a->fired_seq = a->buf.seq;                /* loads aren't "text_change" */
+    lua_host_fire_event(a->lua, "open");
     fprintf(stderr, "descry: opened %s (%zu lines)\n", path, a->doc.line_count);
     return 0;
 }
@@ -1127,6 +1131,7 @@ static void switch_to_tab(App* a, int i)
     reparse_preview(a);
     a->vault.selected = a->note_path
         ? vault_index_of(&a->vault, a->note_path) : -1;
+    a->fired_seq = a->buf.seq;            /* a switch isn't a "text_change" */
     update_window_title(a);
 }
 
@@ -1150,6 +1155,143 @@ static int load_note(App* a, const char* path)
         return -1;
     }
     return 0;
+}
+
+/* ---- Plugin bridge: descry.buffer.* / descry.vault.* / descry.open/save ---
+ * These back the Lua host's document/vault vtable (see lua_host.h
+ * LuaAppBridge). They operate on the live active document so plugins read and
+ * mutate exactly what the user sees. Every mutation routes through the real
+ * buffer ops so it lands on the undo stack, then re-derives the preview. */
+static void save_note(App* a);   /* defined far below; bridge needs its addr */
+
+static void bridge_after_edit(App* a)
+{
+    buffer_invalidate_row_cache(&a->buf);
+    reparse_preview(a);
+    a->doc_height_px = 0;
+    a->doc_width_px  = 0;
+    update_window_title(a);
+    bump_blink(a);
+}
+
+static char* br_buf_text(void* ud, size_t* out_len)
+{
+    App* a = ud;
+    char* s = malloc(a->buf.len + 1);
+    if (!s) { if (out_len) *out_len = 0; return NULL; }
+    memcpy(s, a->buf.data, a->buf.len);
+    s[a->buf.len] = 0;
+    if (out_len) *out_len = a->buf.len;
+    return s;
+}
+
+static void br_buf_set_text(void* ud, const char* s, size_t n)
+{
+    App* a = ud;
+    if (a->viewing_image) return;     /* synthetic image buffer — read-only */
+    buffer_select_all(&a->buf);
+    buffer_delete_selection(&a->buf);
+    if (n) buffer_insert(&a->buf, s, n);
+    buffer_undo_break(&a->buf);
+    bridge_after_edit(a);
+}
+
+static char* br_buf_selection(void* ud, size_t* out_len)
+{
+    App* a = ud;
+    if (!buffer_has_selection(&a->buf)) { if (out_len) *out_len = 0; return NULL; }
+    size_t lo, hi;
+    buffer_get_selection(&a->buf, &lo, &hi);
+    size_t n = hi - lo;
+    char* s = malloc(n + 1);
+    if (!s) { if (out_len) *out_len = 0; return NULL; }
+    memcpy(s, a->buf.data + lo, n);
+    s[n] = 0;
+    if (out_len) *out_len = n;
+    return s;
+}
+
+static void br_buf_replace_sel(void* ud, const char* s, size_t n)
+{
+    App* a = ud;
+    if (a->viewing_image) return;
+    if (buffer_has_selection(&a->buf)) buffer_delete_selection(&a->buf);
+    if (n) buffer_insert(&a->buf, s, n);
+    buffer_undo_break(&a->buf);
+    bridge_after_edit(a);
+}
+
+static void br_buf_insert(void* ud, const char* s, size_t n)
+{
+    App* a = ud;
+    if (a->viewing_image || !n) return;
+    buffer_insert(&a->buf, s, n);
+    buffer_undo_break(&a->buf);
+    bridge_after_edit(a);
+}
+
+static size_t br_buf_cursor(void* ud)   { return ((App*)ud)->buf.cursor; }
+static size_t br_buf_len(void* ud)      { return ((App*)ud)->buf.len; }
+
+static void br_buf_set_cursor(void* ud, size_t pos)
+{
+    App* a = ud;
+    if (pos > a->buf.len) pos = a->buf.len;
+    buffer_set_cursor(&a->buf, pos, false);
+    bump_blink(a);
+}
+
+static const char* br_note_path(void* ud) { return ((App*)ud)->note_path; }
+
+static int br_vault_count(void* ud)
+{
+    App* a = ud;
+    int n = 0;
+    for (size_t i = 0; i < a->vault.count; ++i)
+        if (!a->vault.items[i].is_dir) n++;
+    return n;
+}
+
+static const char* br_vault_path(void* ud, int idx)
+{
+    App* a = ud;
+    int n = 0;
+    for (size_t i = 0; i < a->vault.count; ++i) {
+        if (a->vault.items[i].is_dir) continue;
+        if (n == idx) return a->vault.items[i].path;
+        n++;
+    }
+    return NULL;
+}
+
+static void br_open_path(void* ud, const char* path)
+{
+    /* Tabs preserve each file's unsaved edits, so opening from a plugin can
+     * never lose work — no confirm prompt needed. */
+    if (path && *path) load_note((App*)ud, path);
+}
+
+static void br_save(void* ud) { save_note((App*)ud); }
+
+static void bridge_install(App* a)
+{
+    LuaAppBridge b = {
+        .ud              = a,
+        .buf_text        = br_buf_text,
+        .buf_set_text    = br_buf_set_text,
+        .buf_selection   = br_buf_selection,
+        .buf_replace_sel = br_buf_replace_sel,
+        .buf_insert      = br_buf_insert,
+        .buf_cursor      = br_buf_cursor,
+        .buf_set_cursor  = br_buf_set_cursor,
+        .buf_len         = br_buf_len,
+        .note_path       = br_note_path,
+        .vault_count     = br_vault_count,
+        .vault_path      = br_vault_path,
+        .open_path       = br_open_path,
+        .save            = br_save,
+    };
+    lua_host_set_bridge(a->lua, &b);
 }
 
 /* Forward decl: confirm_discard's event pump calls app_render. */
@@ -3287,6 +3429,7 @@ static int app_init(App* a, const char* note_path_arg)
 
     a->lua = lua_host_create();
     lua_host_setup_api(a->lua);
+    bridge_install(a);                 /* descry.buffer.* / descry.vault.* */
     lua_host_on_notify(on_lua_notify, a);
     lua_host_on_dialog(on_lua_dialog, a);
 
@@ -3334,6 +3477,28 @@ static int app_init(App* a, const char* note_path_arg)
         int n = lua_host_load_plugins(a->lua, pdir);
         if (n > 0) fprintf(stderr, "descry: loaded %d plugin(s) from %s\n",
                            n, pdir);
+    }
+
+    /* Spell check (opt-in). When `spellcheck = true`, load a dictionary from
+     * `dictionary_path`, else a sensible search: the bundled data/dictionary.txt
+     * then a system word list (present on most macOS/Linux installs). User
+     * additions accumulate in data/.dictionary_user. The feature stays inert
+     * if nothing loads, so it never produces noise without a dictionary. */
+    spell_init(&a->spell);
+    if (lua_host_cfg_number(a->lua, "spellcheck", 0) != 0) {
+        const char* dp = lua_host_cfg_string(a->lua, "dictionary_path", "");
+        int loaded = -1;
+        if (dp && *dp)   loaded = spell_load_file(&a->spell, dp);
+        if (loaded < 0)  loaded = spell_load_file(&a->spell, "data/dictionary.txt");
+        if (loaded < 0)  loaded = spell_load_file(&a->spell, "/usr/share/dict/words");
+        if (loaded < 0)  loaded = spell_load_file(&a->spell,
+                                          "/usr/share/dict/american-english");
+        spell_load_file(&a->spell, "data/.dictionary_user");   /* user words */
+        a->spellcheck_on = spell_ready(&a->spell);
+        fprintf(stderr, a->spellcheck_on
+                ? "spellcheck: on (%zu words)\n"
+                : "spellcheck: enabled but no dictionary found%.0zu\n",
+                a->spell.count);
     }
 
     int win_w   = (int)lua_host_cfg_number(a->lua, "window_w", 1100);
@@ -3898,6 +4063,8 @@ static void app_shutdown(App* a)
     buffer_free(&a->buf);
     free(a->note_path);
     tablist_free(&a->tabs);
+    graph_free(&a->graph);
+    spell_free(&a->spell);
     free(a->notification_msg);
     free(a->search_matches);
     free(a->search_match_lens);
@@ -3962,6 +4129,10 @@ static Font* pick_font(const App* a, LineKind kind, unsigned char style)
         default: break;
     }
     if (style & STYLE_CODE) return a->font_code;
+    /* Math renders in italic serif — the conventional look for variables. */
+    if (style & STYLE_MATH)
+        return (style & STYLE_BOLD) ? a->font_body_bold_italic
+                                    : a->font_body_italic;
     if ((style & STYLE_BOLD) && (style & STYLE_ITALIC)) return a->font_body_bold_italic;
     if (style & STYLE_BOLD)   return a->font_body_bold;
     if (style & STYLE_ITALIC) return a->font_body_italic;
@@ -5517,6 +5688,75 @@ static int edit_visual_rows(const App* a, const char* data, size_t len,
     return nb + 1;
 }
 
+/* ------------------------------ spell check -----------------------------
+ * Live, opt-in misspelling underlines in the editor. The dictionary lives in
+ * a->spell (see spell.c); this is just the editor-side tokenize + draw. */
+
+/* Red zig-zag underline from x0 to x1 with its peak at y. */
+static void spell_draw_squiggle(App* a, int x0, int x1, int y)
+{
+    if (x1 <= x0) return;
+    SDL_SetRenderDrawColor(a->renderer, 0xE0, 0x52, 0x52, 235);
+    int amp = 2, up = 1, px = x0, py = y;
+    for (int x = x0 + 2; x <= x1; x += 2) {
+        int ny = y + (up ? 0 : amp);
+        SDL_RenderDrawLine(a->renderer, px, py, x, ny);
+        px = x; py = ny; up = !up;
+    }
+}
+
+/* Should this token be flagged? Skips short words, ALLCAPS acronyms, anything
+ * with a digit, and contractions; strips a trailing possessive `'s`. */
+static bool spell_token_misspelled(const App* a, const char* w, size_t n)
+{
+    if (n < 3) return false;
+    bool has_lower = false;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)w[i];
+        if (c >= '0' && c <= '9') return false;
+        if (c >= 'a' && c <= 'z') has_lower = true;
+    }
+    if (!has_lower) return false;                  /* ALLCAPS / no a-z */
+    for (size_t i = 1; i + 1 < n; ++i)
+        if (w[i] == '\'') return false;            /* contraction: don't flag */
+    size_t m = n;
+    if (m > 2 && w[m-2] == '\'' && (w[m-1] == 's' || w[m-1] == 'S')) m -= 2;
+    return !spell_known(&a->spell, w, m);
+}
+
+/* Underline every misspelled word in one visual row [rowptr, rowptr+rowlen).
+ * base_x is the row's left screen x; top_y/lh its box; lf the row font. */
+static void spell_underline_row(App* a, const char* rowptr, size_t rowlen,
+                                int base_x, int top_y, int lh, Font* lf,
+                                bool fence)
+{
+    if (!a->spellcheck_on || fence) return;
+    size_t i = 0;
+    while (i < rowlen) {
+        unsigned char c = (unsigned char)rowptr[i];
+        bool isword = c == '\'' || (c >= 'A' && c <= 'Z') ||
+                      (c >= 'a' && c <= 'z') || c >= 0x80;
+        if (!isword) { i++; continue; }
+        size_t ws = i;
+        while (i < rowlen) {
+            unsigned char d = (unsigned char)rowptr[i];
+            bool w = d == '\'' || (d >= 'A' && d <= 'Z') ||
+                     (d >= 'a' && d <= 'z') || d >= 0x80 ||
+                     (d >= '0' && d <= '9');
+            if (!w) break;
+            i++;
+        }
+        size_t we = i;
+        while (ws < we && rowptr[ws] == '\'') ws++;
+        while (we > ws && rowptr[we-1] == '\'') we--;
+        if (we > ws && spell_token_misspelled(a, rowptr + ws, we - ws)) {
+            int x0 = base_x + edit_line_x_at(a, rowptr, rowlen, ws, lf, fence);
+            int x1 = base_x + edit_line_x_at(a, rowptr, rowlen, we, lf, fence);
+            spell_draw_squiggle(a, x0, x1, top_y + lh - 3);
+        }
+    }
+}
+
 static int render_editor(App* a)
 {
     int xL = doc_x_left(a);
@@ -5627,6 +5867,9 @@ static int render_editor(App* a)
                                    xL + MARGIN_X - scroll_x,
                                    y + font_ascent(lf), text_c, lf,
                                    draw_in_fence);
+                    spell_underline_row(a, b->data + a_lo, r_hi - r_lo,
+                                        xL + MARGIN_X - scroll_x, y, lh, lf,
+                                        draw_in_fence);
                 }
 
                 /* Cursor goes on the row where it falls; for non-last rows
@@ -7427,6 +7670,8 @@ static void action_plugins        (App* a);
 static void action_outline       (App* a);
 static void action_backlinks     (App* a);
 static void action_tags          (App* a);
+static void action_graph         (App* a);
+static void action_toggle_spellcheck(App* a);
 static void action_keybindings   (App* a);
 static void action_colors        (App* a);
 
@@ -7463,6 +7708,8 @@ static const MenuItem MENU_VIEW[] = {
     { "Outline\xe2\x80\xa6",  NULL,     action_outline },
     { "Backlinks\xe2\x80\xa6",NULL,    action_backlinks },
     { "Tags\xe2\x80\xa6",     NULL,    action_tags },
+    { "Graph\xe2\x80\xa6",    "Ctrl+Shift+M", action_graph },
+    { "Toggle Spell Check",  NULL,    action_toggle_spellcheck },
     { "Settings\xe2\x80\xa6", NULL,    action_settings },
     { NULL, NULL, NULL }
 };
@@ -10356,7 +10603,7 @@ static bool overlay_floating_active(const App* a)
     return a->switcher_active || a->cmdp_active     || a->plugins_active ||
            a->backlinks_active || a->tags_active    || a->vsearch_active ||
            a->outline_active   || a->tpl_active     || a->picker_active  ||
-           a->keybind_active   || a->settings_active ||
+           a->keybind_active   || a->settings_active || a->graph_active  ||
            a->ctx_menu_active  || a->menu_open >= 0;
 }
 
@@ -12399,6 +12646,357 @@ static void app_animate(App* a)
     a->wants_anim_frame = moving;
 }
 
+/* ------------------------------ graph view ------------------------------
+ * A force-directed map of the vault's wiki-link graph (Ctrl+Shift+M). Built
+ * on open from every note + its `[[links]]`, laid out once, then pan/zoom
+ * interactively. Click a node to open that note. */
+
+#define GRAPH_INSET 28
+
+/* Reduce a wiki target to its note name: drop a `|alias` and `#heading`, trim. */
+static void graph_wiki_name(const char* s, size_t n, char* out, size_t cap)
+{
+    size_t end = 0;
+    while (end < n && s[end] != '|' && s[end] != '#') end++;
+    size_t b = 0;
+    while (b < end && (s[b] == ' ' || s[b] == '\t')) b++;
+    while (end > b && (s[end-1] == ' ' || s[end-1] == '\t')) end--;
+    size_t m = end - b;
+    if (m >= cap) m = cap - 1;
+    memcpy(out, s + b, m);
+    out[m] = 0;
+}
+
+/* A vault item's note name (basename sans .md). */
+static void graph_note_name(const App* a, int vi, char* out, size_t cap)
+{
+    snprintf(out, cap, "%s", a->vault.items[vi].name);
+    size_t bl = strlen(out);
+    if (bl > 3 && out[bl-3] == '.' &&
+        (out[bl-2] == 'm' || out[bl-2] == 'M') &&
+        (out[bl-1] == 'd' || out[bl-1] == 'D'))
+        out[bl-3] = 0;
+}
+
+static int graph_node_for_name(const App* a, const int* node_of_vault,
+                               const char* name)
+{
+    for (size_t v = 0; v < a->vault.count; ++v) {
+        if (node_of_vault[v] < 0) continue;
+        char base[256];
+        graph_note_name(a, (int)v, base, sizeof base);
+        if (strieq(base, name)) return node_of_vault[v];
+    }
+    return -1;
+}
+
+static void graph_build(App* a)
+{
+    graph_clear(&a->graph);
+    int vc = (int)a->vault.count;
+    int* node_of_vault = malloc((vc > 0 ? vc : 1) * sizeof(int));
+    for (int i = 0; i < vc; ++i) node_of_vault[i] = -1;
+
+    for (int v = 0; v < vc; ++v) {
+        if (a->vault.items[v].is_dir || a->vault.items[v].is_image) continue;
+        node_of_vault[v] = graph_add_node(&a->graph, v);
+    }
+
+    for (int v = 0; v < vc; ++v) {
+        int src_node = node_of_vault[v];
+        if (src_node < 0) continue;
+        size_t len = 0;
+        char* src = slurp(a->vault.items[v].path, &len);
+        if (!src) continue;
+        for (size_t i = 0; i + 1 < len; ++i) {
+            if (src[i] != '[' || src[i+1] != '[') continue;
+            size_t e = i + 2;
+            while (e + 1 < len && !(src[e] == ']' && src[e+1] == ']')) {
+                if (src[e] == '\n') break;
+                e++;
+            }
+            if (e + 1 >= len || !(src[e] == ']' && src[e+1] == ']')) continue;
+            char name[256];
+            graph_wiki_name(src + i + 2, e - (i + 2), name, sizeof name);
+            if (*name) {
+                int tgt = graph_node_for_name(a, node_of_vault, name);
+                if (tgt >= 0) graph_add_edge(&a->graph, src_node, tgt);
+            }
+            i = e + 1;
+        }
+        free(src);
+    }
+    free(node_of_vault);
+    graph_layout(&a->graph, 1400.0f, 1000.0f);
+}
+
+static void graph_open(App* a)
+{
+    graph_build(a);
+    a->graph_active     = true;
+    a->graph_zoom       = 1.0f;
+    a->graph_pan_x      = 0;
+    a->graph_pan_y      = 0;
+    a->graph_hover_node = -1;
+    a->graph_panning    = false;
+    fprintf(stderr, "graph: %d nodes, %d edges\n",
+            a->graph.node_count, a->graph.edge_count);
+}
+
+static void graph_close(App* a) { a->graph_active = false; }
+
+static void action_graph(App* a)
+{
+    if (a->graph_active) graph_close(a);
+    else                 graph_open(a);
+}
+
+static void notify_now(App* a, const char* msg, uint32_t ms)
+{
+    free(a->notification_msg);
+    a->notification_msg   = strdup(msg);
+    a->notification_until = SDL_GetTicks() + ms;
+}
+
+static void action_toggle_spellcheck(App* a)
+{
+    if (!spell_ready(&a->spell)) {
+        a->spellcheck_on = false;
+        notify_now(a, "Spell check: no dictionary "
+                      "(set spellcheck=true + dictionary_path in settings.lua)", 4500);
+        return;
+    }
+    a->spellcheck_on = !a->spellcheck_on;
+    notify_now(a, a->spellcheck_on ? "Spell check: on" : "Spell check: off", 2200);
+}
+
+/* Add the word under the cursor to the personal dictionary (data/.dictionary_
+ * user) and the live set, so its underline clears immediately. */
+static void action_add_word_to_dict(App* a)
+{
+    Buffer* b = &a->buf;
+    size_t s = b->cursor, e = b->cursor;
+    #define WORDCH(c) ((c)=='\'' || ((c)>='A'&&(c)<='Z') || \
+                       ((c)>='a'&&(c)<='z') || (c)>=0x80 || ((c)>='0'&&(c)<='9'))
+    while (s > 0      && WORDCH((unsigned char)b->data[s-1])) s--;
+    while (e < b->len && WORDCH((unsigned char)b->data[e]))   e++;
+    #undef WORDCH
+    while (s < e && b->data[s]   == '\'') s++;
+    while (e > s && b->data[e-1] == '\'') e--;
+    if (e <= s) { notify_now(a, "No word under the cursor", 2000); return; }
+
+    spell_add(&a->spell, b->data + s, e - s);
+    FILE* f = fopen("data/.dictionary_user", "ab");
+    if (f) { fwrite(b->data + s, 1, e - s, f); fputc('\n', f); fclose(f); }
+
+    char msg[160];
+    snprintf(msg, sizeof msg, "Added \"%.*s\" to dictionary",
+             (int)(e - s), b->data + s);
+    notify_now(a, msg, 2500);
+}
+
+/* The inset content area the graph draws into (below chrome, above status). */
+static SDL_Rect graph_view_rect(const App* a)
+{
+    int top = doc_y_top(a);
+    SDL_Rect r = { GRAPH_INSET, top + GRAPH_INSET,
+                   a->win_w - 2 * GRAPH_INSET,
+                   a->win_h - top - 2 * GRAPH_INSET - 26 };
+    if (r.w < 80) r.w = 80;
+    if (r.h < 80) r.h = 80;
+    return r;
+}
+
+/* world→screen: fit the node bounding box into the view, then apply zoom+pan. */
+static void graph_transform(const App* a, SDL_Rect view,
+                            float* out_scale, float* out_ox, float* out_oy)
+{
+    const GraphModel* g = &a->graph;
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    if (g->node_count == 0) { minx = miny = -1; maxx = maxy = 1; }
+    for (int i = 0; i < g->node_count; ++i) {
+        if (g->nodes[i].x < minx) minx = g->nodes[i].x;
+        if (g->nodes[i].y < miny) miny = g->nodes[i].y;
+        if (g->nodes[i].x > maxx) maxx = g->nodes[i].x;
+        if (g->nodes[i].y > maxy) maxy = g->nodes[i].y;
+    }
+    float spanx = maxx - minx; if (spanx < 1) spanx = 1;
+    float spany = maxy - miny; if (spany < 1) spany = 1;
+    float pad = 64.0f;
+    float sx = (view.w - 2 * pad) / spanx;
+    float sy = (view.h - 2 * pad) / spany;
+    float fit = sx < sy ? sx : sy;
+    if (fit <= 0) fit = 0.1f;
+    *out_scale = fit * a->graph_zoom;
+    *out_ox = view.x + view.w * 0.5f + a->graph_pan_x;  /* centroid ≈ origin */
+    *out_oy = view.y + view.h * 0.5f + a->graph_pan_y;
+}
+
+static float graph_node_radius(int degree)
+{
+    float r = 4.0f + 1.6f * sqrtf((float)degree);
+    if (r < 4)  r = 4;
+    if (r > 22) r = 22;
+    return r;
+}
+
+static int graph_node_at(const App* a, int mx, int my)
+{
+    SDL_Rect view = graph_view_rect(a);
+    float scale, ox, oy;
+    graph_transform(a, view, &scale, &ox, &oy);
+    int best = -1;
+    float bestd = 1e9f;
+    for (int i = 0; i < a->graph.node_count; ++i) {
+        float sx = ox + a->graph.nodes[i].x * scale;
+        float sy = oy + a->graph.nodes[i].y * scale;
+        float r  = graph_node_radius(a->graph.nodes[i].degree) + 3;
+        float dx = mx - sx, dy = my - sy;
+        float d2 = dx * dx + dy * dy;
+        if (d2 <= r * r && d2 < bestd) { bestd = d2; best = i; }
+    }
+    return best;
+}
+
+static void graph_render(App* a)
+{
+    if (!a->graph_active) return;
+    overlay_backdrop(a);
+    SDL_Rect view = graph_view_rect(a);
+    overlay_card(a, view);
+
+    char title[120];
+    snprintf(title, sizeof title, "Graph  \xe2\x80\x94  %d notes, %d links",
+             a->graph.node_count, a->graph.edge_count);
+    font_draw_line(a->font_ide, title, strlen(title),
+                   view.x + 16, view.y + 10 + font_ascent(a->font_ide),
+                   a->fg_heading);
+
+    SDL_Rect clip = { view.x + 2, view.y + 2, view.w - 4, view.h - 4 };
+    SDL_RenderSetClipRect(a->renderer, &clip);
+
+    float scale, ox, oy;
+    graph_transform(a, view, &scale, &ox, &oy);
+    int active_vi = a->note_path ? vault_index_of(&a->vault, a->note_path) : -1;
+
+    /* edges */
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 95);
+    for (int e = 0; e < a->graph.edge_count; ++e) {
+        GraphNode* na = &a->graph.nodes[a->graph.edges[e].a];
+        GraphNode* nb = &a->graph.nodes[a->graph.edges[e].b];
+        SDL_RenderDrawLine(a->renderer,
+            (int)(ox + na->x * scale), (int)(oy + na->y * scale),
+            (int)(ox + nb->x * scale), (int)(oy + nb->y * scale));
+    }
+
+    /* nodes */
+    for (int i = 0; i < a->graph.node_count; ++i) {
+        GraphNode* nd = &a->graph.nodes[i];
+        float sx = ox + nd->x * scale, sy = oy + nd->y * scale;
+        float r = graph_node_radius(nd->degree);
+        bool is_active = (nd->vault_idx == active_vi);
+        bool is_hover  = (i == a->graph_hover_node);
+        SDL_Color c = is_active ? a->fg_link
+                    : is_hover  ? a->fg_heading : a->fg;
+        SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, 255);
+        SDL_Rect dot = { (int)(sx - r), (int)(sy - r), (int)(2 * r), (int)(2 * r) };
+        fill_rrect(a->renderer, dot, (int)r);
+    }
+
+    /* labels: the active and hovered node always; everything once zoomed in. */
+    bool label_all = scale > 26.0f;
+    for (int i = 0; i < a->graph.node_count; ++i) {
+        GraphNode* nd = &a->graph.nodes[i];
+        bool is_active = (nd->vault_idx == active_vi);
+        bool is_hover  = (i == a->graph_hover_node);
+        if (!label_all && !is_active && !is_hover) continue;
+        char nm[160];
+        graph_note_name(a, nd->vault_idx, nm, sizeof nm);
+        float sx = ox + nd->x * scale, sy = oy + nd->y * scale;
+        float r  = graph_node_radius(nd->degree);
+        SDL_Color lc = is_active ? a->fg_link
+                     : is_hover  ? a->fg_heading : a->fg_muted;
+        font_draw_line(a->font_ide, nm, strlen(nm),
+            (int)(sx + r + 4),
+            (int)(sy - font_line_height(a->font_ide) / 2 + font_ascent(a->font_ide)),
+            lc);
+    }
+    SDL_RenderSetClipRect(a->renderer, NULL);
+
+    if (a->graph.node_count == 0) {
+        const char* empty = "(no notes with wiki-links in this vault)";
+        font_draw_line(a->font_ide, empty, strlen(empty),
+                       view.x + 16, view.y + view.h / 2, a->fg_muted);
+    }
+
+    const char* hint =
+        "drag to pan  \xc2\xb7  scroll to zoom  \xc2\xb7  click a node to open  \xc2\xb7  Esc to close";
+    font_draw_line(a->font_ide, hint, strlen(hint), view.x + 16,
+        view.y + view.h - 8 - font_line_height(a->font_ide) + font_ascent(a->font_ide),
+        a->fg_muted);
+}
+
+/* Returns true when the event was consumed by the graph overlay. */
+static bool graph_handle_event(App* a, const SDL_Event* e)
+{
+    switch (e->type) {
+        case SDL_KEYDOWN:
+            if (e->key.keysym.sym == SDLK_ESCAPE) { graph_close(a); return true; }
+            return true;     /* modal: swallow other keys */
+
+        case SDL_MOUSEMOTION:
+            if (a->graph_panning) {
+                a->graph_pan_x = a->graph_drag_px + (e->motion.x - a->graph_drag_mx);
+                a->graph_pan_y = a->graph_drag_py + (e->motion.y - a->graph_drag_my);
+            } else {
+                a->graph_hover_node = graph_node_at(a, e->motion.x, e->motion.y);
+            }
+            return true;
+
+        case SDL_MOUSEWHEEL: {
+            float f = e->wheel.y > 0 ? 1.12f : (e->wheel.y < 0 ? 1.0f / 1.12f : 1.0f);
+            a->graph_zoom *= f;
+            if (a->graph_zoom < 0.15f) a->graph_zoom = 0.15f;
+            if (a->graph_zoom > 12.0f) a->graph_zoom = 12.0f;
+            return true;
+        }
+
+        case SDL_MOUSEBUTTONDOWN:
+            if (e->button.button == SDL_BUTTON_LEFT) {
+                a->graph_panning = true;
+                a->graph_drag_mx = e->button.x;
+                a->graph_drag_my = e->button.y;
+                a->graph_drag_px = a->graph_pan_x;
+                a->graph_drag_py = a->graph_pan_y;
+            }
+            return true;
+
+        case SDL_MOUSEBUTTONUP:
+            if (e->button.button == SDL_BUTTON_LEFT) {
+                a->graph_panning = false;
+                int dx = e->button.x - a->graph_drag_mx;
+                int dy = e->button.y - a->graph_drag_my;
+                if (dx * dx + dy * dy <= 25) {   /* a click, not a drag */
+                    int ni = graph_node_at(a, e->button.x, e->button.y);
+                    if (ni >= 0) {
+                        int vi = a->graph.nodes[ni].vault_idx;
+                        if (vi >= 0 && vi < (int)a->vault.count) {
+                            char* path = strdup(a->vault.items[vi].path);
+                            graph_close(a);
+                            if (confirm_discard(a)) load_note(a, path);
+                            free(path);
+                        }
+                    }
+                }
+            }
+            return true;
+
+        default:
+            return false;    /* QUIT, window resize, etc. still process */
+    }
+}
+
 static void app_render(App* a)
 {
     app_animate(a);
@@ -12467,6 +13065,7 @@ static void app_render(App* a)
     render_outline(a);
     render_backlinks(a);
     render_tags(a);
+    graph_render(a);
     render_template_picker(a);
     render_dnd_ghost(a);
     render_status(a);
@@ -12711,6 +13310,7 @@ static int save_note_with_eol(App* a, const char* path)
      * a fresh op instead of extending the pre-save one. Without this
      * op_head never moves past saved_head and dirty stays false. */
     a->buf.coalesce = OP_NONE;
+    lua_host_fire_event(a->lua, "save");
     return 0;
 }
 
@@ -15334,6 +15934,7 @@ static const ActionEntry ACTIONS[] = {
     { "outline_pin",     "Navigation", action_outline_pin     },
     { "backlinks",       "Navigation", action_backlinks       },
     { "tags",            "Navigation", action_tags            },
+    { "graph",           "Navigation", action_graph           },
     { "daily_note",      "Navigation", action_daily           },
     { "export_html",     "File",       action_export_html     },
     { "align_table",     "Edit",       action_align_table     },
@@ -15343,6 +15944,8 @@ static const ActionEntry ACTIONS[] = {
     { "toggle_sidebar",  "View",       action_toggle_sidebar  },
     { "toggle_wrap",     "View",       action_toggle_wrap     },
     { "toggle_split",    "View",       action_toggle_split    },
+    { "toggle_spellcheck","View",      action_toggle_spellcheck },
+    { "add_to_dictionary","Edit",      action_add_word_to_dict },
 
     { "settings",        "App",        action_settings        },
     { "keybindings",     "App",        action_keybindings     },
@@ -15368,6 +15971,7 @@ static const struct { const char* keystr; const char* action; } DEFAULT_KEYS[] =
     { "ctrl+alt+o",   "outline_pin"    },
     { "ctrl+shift+b", "backlinks"      },
     { "ctrl+shift+g", "tags"           },
+    { "ctrl+shift+m", "graph"          },
     { "ctrl+d",       "daily_note"     },
     { "ctrl+shift+e", "export_html"    },
     { "ctrl+alt+t",   "align_table"    },
@@ -15509,6 +16113,10 @@ static void app_event(App* a, const SDL_Event* e)
     int line_px   = font_line_height(a->font_ide);
     int page_step = viewport_h(a) - line_px;
     if (page_step < line_px) page_step = line_px;
+
+    /* The graph map is a modal overlay: it eats its own mouse/keys (but lets
+     * window resize + quit fall through). */
+    if (a->graph_active && graph_handle_event(a, e)) return;
 
     switch (e->type) {
         case SDL_QUIT:
@@ -17727,6 +18335,13 @@ int main(int argc, char** argv)
             do { app_event(&app, &e); } while (SDL_PollEvent(&e));
         }
         drop_flush(&app);     /* prompt + copy any OS file-drop, once per drop */
+        /* Fire the plugin "text_change" event when the document mutated this
+         * frame. buf.seq bumps on every insert/delete/undo/redo; loads and
+         * tab switches resync fired_seq so they don't count as edits. */
+        if (app.lua && app.buf.seq != app.fired_seq) {
+            app.fired_seq = app.buf.seq;
+            lua_host_fire_event(app.lua, "text_change");
+        }
         app_render(&app);
     }
     app_shutdown(&app);

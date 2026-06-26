@@ -19,6 +19,10 @@ preview rendering, plugin host — without the Electron tax.
   selection, smart Enter for lists, auto-pairs, find/replace). Soft
   word wrap on by default; toggle off (Alt+Z) for a horizontal
   scrollbar with arrow buttons.
+- **Tabs** — several files open at once, lossless switching (each tab
+  keeps its text, cursor, scroll, and undo), reopened on next launch.
+  A toggleable **split live-preview** (Ctrl+\\) renders the active file
+  source-left / preview-right.
 - **Vault sidebar** with collapsible folders, drag-and-drop reorder,
   right-click context menu, recents tracking, and **image files** that
   open straight into the preview pane.
@@ -36,10 +40,23 @@ preview rendering, plugin host — without the Electron tax.
   Lua-registered plugin action with a category chip and bound
   shortcut.
 - **Plugin host** — drop `*.lua` in `data/plugins/`, register actions
-  with `descry.register_action("name", fn)`, surface UI with
-  `descry.notify` and `descry.dialog`. Plugins overlay lists every
-  loaded file and the actions each registered, with a hot-reload
-  button.
+  with `descry.register_action("name", fn)`, and do real work: read and
+  edit the open document (`descry.buffer.*`), list/open vault notes
+  (`descry.vault.list`, `descry.open`), and subscribe to `open` / `save`
+  / `text_change` events (`descry.on`). Surface output with
+  `descry.notify` / `descry.dialog`. The Plugins overlay lists every
+  loaded file and the actions each registered, with a hot-reload button.
+- **LaTeX math** — inline `$…$` and display `$$…$$` spans render
+  typographically: Greek letters, operators, `\frac{a}{b}`, roots, and
+  simple super/subscripts become real Unicode glyphs (`$\sum_{i=1}^{n}
+  x_i^2$` → `∑ᵢ₌₁ⁿ xᵢ²`). A typographic pass, not a full TeX engine.
+- **Graph view** (Ctrl+Shift+M) — a force-directed map of the vault's
+  wiki-link graph. Node size scales with degree, the current note is
+  highlighted; drag to pan, scroll to zoom, click a node to open it.
+- **Spell check** — opt-in (`spellcheck = true` in `settings.lua`),
+  dictionary-driven red squiggles under unknown words in the editor.
+  Points at a system word list or your own `dictionary_path`; "Add to
+  dictionary" remembers words in `data/.dictionary_user`.
 - **In-app modals** for Save / Save As / Rename / New File — no
   native Win32 dialogs, full keyboard nav, sidebar-style file
   browser.
@@ -179,10 +196,15 @@ src/             - C sources (single-binary)
   markdown.c/h   - md4c wrapper, line/style/wiki/link extraction
   font.c/h       - FreeType+HarfBuzz glyph cache, fallback chain
   icons.c/h      - nanosvg icon raster + SDF pill rasterizer
-  lua_host.c/h   - Lua state, plugin loader, action registry
+  lua_host.c/h   - Lua state, plugin loader, action registry, buffer/
+                   vault/event bridge for plugins
   vault.c/h      - recursive directory scan + native dialogs
   image.c/h      - PNG/JPG decode -> SDL_Texture cache
   regex.c/h      - in-house regex engine (find/replace)
+  mermaid.c/h    - mermaid diagram parse + layout
+  graph.c/h      - force-directed wiki-link graph layout
+  spell.c/h      - hash-set spell dictionary
+  tabs.c/h       - open-file tab list + park/restore
 data/            - default vault: sample notes, init.lua, plugins/
 vendor/          - lua 5.4, md4c, nanosvg
 ```
@@ -234,6 +256,7 @@ Keybindings` and persists to `settings.lua` next to the exe.
 | Outline               | Ctrl+Shift+O      |
 | Backlinks             | Ctrl+Shift+B      |
 | Tags                  | Ctrl+Shift+G      |
+| Graph view            | Ctrl+Shift+M      |
 | Daily note            | Ctrl+D            |
 | Toggle sidebar        | Ctrl+B            |
 | Toggle word wrap      | Alt+Z             |

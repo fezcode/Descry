@@ -11,6 +11,7 @@
 
 #define CFG_KEY     "descry.config"
 #define ACTIONS_KEY "descry.actions"
+#define EVENTS_KEY  "descry.events"
 
 /* Per-plugin record. Built as plugins are loaded so the host can later
  * report "this file registered these actions" without re-walking Lua. */
@@ -30,6 +31,7 @@ struct LuaHost {
     int         plugin_count;
     int         plugin_cap;
     int         current_plugin;   /* -1 outside a load, else plugins[i]  */
+    LuaAppBridge bridge;          /* document/vault accessors (app-filled) */
 };
 
 /* The host pointer is stashed in the Lua extra-space so callbacks can find
@@ -313,20 +315,221 @@ static int l_register_action(lua_State* L)
     return 0;
 }
 
+/* ---- document / vault bridge (descry.buffer.*, descry.vault.*) -------- */
+
+void lua_host_set_bridge(LuaHost* h, const LuaAppBridge* b)
+{
+    if (!h || !b) return;
+    h->bridge = *b;
+}
+
+static int l_buf_text(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_text) {
+        size_t n = 0;
+        char* s = h->bridge.buf_text(h->bridge.ud, &n);
+        if (s) { lua_pushlstring(L, s, n); free(s); return 1; }
+    }
+    lua_pushliteral(L, "");
+    return 1;
+}
+
+static int l_buf_set_text(lua_State* L)
+{
+    size_t n = 0;
+    const char* s = luaL_checklstring(L, 1, &n);
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_set_text) h->bridge.buf_set_text(h->bridge.ud, s, n);
+    return 0;
+}
+
+static int l_buf_selection(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_selection) {
+        size_t n = 0;
+        char* s = h->bridge.buf_selection(h->bridge.ud, &n);
+        if (s) { lua_pushlstring(L, s, n); free(s); return 1; }
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+static int l_buf_replace_sel(lua_State* L)
+{
+    size_t n = 0;
+    const char* s = luaL_checklstring(L, 1, &n);
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_replace_sel) h->bridge.buf_replace_sel(h->bridge.ud, s, n);
+    return 0;
+}
+
+static int l_buf_insert(lua_State* L)
+{
+    size_t n = 0;
+    const char* s = luaL_checklstring(L, 1, &n);
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_insert) h->bridge.buf_insert(h->bridge.ud, s, n);
+    return 0;
+}
+
+static int l_buf_cursor(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    size_t pos = (h && h->bridge.buf_cursor) ? h->bridge.buf_cursor(h->bridge.ud) : 0;
+    lua_pushinteger(L, (lua_Integer)pos);
+    return 1;
+}
+
+static int l_buf_set_cursor(lua_State* L)
+{
+    lua_Integer pos = luaL_checkinteger(L, 1);
+    if (pos < 0) pos = 0;
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.buf_set_cursor) h->bridge.buf_set_cursor(h->bridge.ud, (size_t)pos);
+    return 0;
+}
+
+static int l_buf_len(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    size_t n = (h && h->bridge.buf_len) ? h->bridge.buf_len(h->bridge.ud) : 0;
+    lua_pushinteger(L, (lua_Integer)n);
+    return 1;
+}
+
+static int l_buf_path(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    const char* p = (h && h->bridge.note_path) ? h->bridge.note_path(h->bridge.ud) : NULL;
+    if (p) lua_pushstring(L, p); else lua_pushnil(L);
+    return 1;
+}
+
+static int l_vault_list(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    lua_newtable(L);
+    if (h && h->bridge.vault_count && h->bridge.vault_path) {
+        int n = h->bridge.vault_count(h->bridge.ud);
+        for (int i = 0; i < n; ++i) {
+            const char* p = h->bridge.vault_path(h->bridge.ud, i);
+            if (!p) continue;
+            lua_pushstring(L, p);
+            lua_rawseti(L, -2, i + 1);
+        }
+    }
+    return 1;
+}
+
+static int l_open(lua_State* L)
+{
+    const char* p = luaL_checkstring(L, 1);
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.open_path) h->bridge.open_path(h->bridge.ud, p);
+    return 0;
+}
+
+static int l_save(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.save) h->bridge.save(h->bridge.ud);
+    return 0;
+}
+
+/* ---- events: descry.on(event, fn) ------------------------------------- */
+
+static int l_on(lua_State* L)
+{
+    const char* ev = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_getfield(L, LUA_REGISTRYINDEX, EVENTS_KEY);   /* [events] */
+    if (!lua_istable(L, -1)) {                        /* defensive: recreate */
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, EVENTS_KEY);
+    }
+    lua_getfield(L, -1, ev);                          /* [events, events[ev]] */
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -3, ev);                      /* events[ev] = {} */
+    }
+    lua_Integer len = (lua_Integer)lua_rawlen(L, -1);
+    lua_pushvalue(L, 2);                              /* the fn */
+    lua_rawseti(L, -2, len + 1);                      /* events[ev][#+1] = fn */
+    lua_pop(L, 2);                                    /* events[ev], events */
+    return 0;
+}
+
+void lua_host_fire_event(LuaHost* h, const char* event)
+{
+    if (!h || !event) return;
+    lua_State* L = h->L;
+    lua_getfield(L, LUA_REGISTRYINDEX, EVENTS_KEY);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    lua_getfield(L, -1, event);
+    if (!lua_istable(L, -1)) { lua_pop(L, 2); return; }
+    int n = (int)lua_rawlen(L, -1);
+    for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L, -1, i);                        /* fn */
+        if (lua_isfunction(L, -1)) {
+            if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                fprintf(stderr, "[lua] event '%s': %s\n",
+                        event, lua_tostring(L, -1));
+                lua_pop(L, 1);                         /* error message */
+            }
+        } else {
+            lua_pop(L, 1);                             /* non-function entry */
+        }
+    }
+    lua_pop(L, 2);                                    /* event array + events */
+}
+
 static const luaL_Reg DESCRY_LIB[] = {
     { "notify",          l_notify },
     { "dialog",          l_dialog },
     { "register_action", l_register_action },
+    { "on",              l_on },
+    { "open",            l_open },
+    { "save",            l_save },
+    { NULL, NULL },
+};
+
+static const luaL_Reg DESCRY_BUFFER_LIB[] = {
+    { "text",              l_buf_text },
+    { "set_text",          l_buf_set_text },
+    { "selection",         l_buf_selection },
+    { "replace_selection", l_buf_replace_sel },
+    { "insert",            l_buf_insert },
+    { "cursor",            l_buf_cursor },
+    { "set_cursor",        l_buf_set_cursor },
+    { "length",            l_buf_len },
+    { "path",              l_buf_path },
+    { NULL, NULL },
+};
+
+static const luaL_Reg DESCRY_VAULT_LIB[] = {
+    { "list", l_vault_list },
     { NULL, NULL },
 };
 
 void lua_host_setup_api(LuaHost* h)
 {
-    luaL_newlib(h->L, DESCRY_LIB);
+    luaL_newlib(h->L, DESCRY_LIB);                /* [descry] */
+    luaL_newlib(h->L, DESCRY_BUFFER_LIB);         /* [descry, buffer] */
+    lua_setfield(h->L, -2, "buffer");             /* descry.buffer = … */
+    luaL_newlib(h->L, DESCRY_VAULT_LIB);          /* [descry, vault] */
+    lua_setfield(h->L, -2, "vault");              /* descry.vault = … */
     lua_setglobal(h->L, "descry");
-    /* pre-create the actions registry so plugins don't need to */
+    /* pre-create the actions + events registries so plugins don't need to */
     lua_newtable(h->L);
     lua_setfield(h->L, LUA_REGISTRYINDEX, ACTIONS_KEY);
+    lua_newtable(h->L);
+    lua_setfield(h->L, LUA_REGISTRYINDEX, EVENTS_KEY);
 }
 
 int lua_host_load_plugins(LuaHost* h, const char* dir)
@@ -414,9 +617,12 @@ int lua_host_each_plugin(LuaHost* h, LuaPluginEachCb cb, void* ud)
 int lua_host_reload_plugins(LuaHost* h, const char* dir)
 {
     if (!h) return 0;
-    /* Reset the actions table so removed plugins' actions disappear. */
+    /* Reset the actions + events tables so removed plugins' actions and
+     * event handlers disappear; survivors re-register on their re-run. */
     lua_newtable(h->L);
     lua_setfield(h->L, LUA_REGISTRYINDEX, ACTIONS_KEY);
+    lua_newtable(h->L);
+    lua_setfield(h->L, LUA_REGISTRYINDEX, EVENTS_KEY);
     return lua_host_load_plugins(h, dir);
 }
 
