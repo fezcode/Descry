@@ -636,6 +636,12 @@ typedef struct {
     Spell    spell;
     bool     spellcheck_on;
 
+    /* Rainbow mode: tint every rendered row a cycling spectrum color. Toggled
+     * by the bundled rainbow.lua plugin via descry.rainbow(). rainbow_row is a
+     * transient set per line during render so pick_color can hue it. */
+    bool     rainbow_mode;
+    int      rainbow_row;
+
     /* Graph view (Ctrl+Shift+M): a force-directed map of the vault's
      * wiki-link graph. Built + laid out on open; pan/zoom interactively. */
     bool       graph_active;

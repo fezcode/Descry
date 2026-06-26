@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.77.0"
+#define DESCRY_VERSION "0.77.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1273,6 +1273,12 @@ static void br_open_path(void* ud, const char* path)
 
 static void br_save(void* ud) { save_note((App*)ud); }
 
+static void br_set_rainbow(void* ud, int mode)
+{
+    App* a = ud;
+    a->rainbow_mode = (mode < 0) ? !a->rainbow_mode : (mode != 0);
+}
+
 static void bridge_install(App* a)
 {
     LuaAppBridge b = {
@@ -1290,6 +1296,7 @@ static void bridge_install(App* a)
         .vault_path      = br_vault_path,
         .open_path       = br_open_path,
         .save            = br_save,
+        .set_rainbow     = br_set_rainbow,
     };
     lua_host_set_bridge(a->lua, &b);
 }
@@ -4139,8 +4146,30 @@ static Font* pick_font(const App* a, LineKind kind, unsigned char style)
     return a->font_body;
 }
 
+/* Spectrum color for row `idx` — the hue steps per row so adjacent rows differ.
+ * Bright + moderately saturated so it reads on the dark themes. */
+static SDL_Color rainbow_color(int idx)
+{
+    float h = (float)(((idx * 32) % 360 + 360) % 360);   /* step hue per row */
+    float s = 0.72f, v = 1.0f;
+    float c = v * s;
+    float x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    float r = 0, g = 0, b = 0;
+    if      (h <  60) { r = c; g = x; }
+    else if (h < 120) { r = x; g = c; }
+    else if (h < 180) { g = c; b = x; }
+    else if (h < 240) { g = x; b = c; }
+    else if (h < 300) { r = x; b = c; }
+    else              { r = c; b = x; }
+    SDL_Color out = { (Uint8)((r + m) * 255), (Uint8)((g + m) * 255),
+                      (Uint8)((b + m) * 255), 255 };
+    return out;
+}
+
 static SDL_Color pick_color(const App* a, LineKind kind, unsigned char style)
 {
+    if (a->rainbow_mode) return rainbow_color(a->rainbow_row);
     if (kind >= LINE_H1 && kind <= LINE_H6) return a->fg_heading;
     if (kind == LINE_CODE)                   return a->fg_muted;
     if (style & STYLE_LINK)                  return a->fg_link;
@@ -5128,6 +5157,7 @@ static int render_preview(App* a, bool draw)
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
     for (size_t i = 0; i < a->doc.line_count; ++i) {
         MdLine* l = &a->doc.lines[i];
+        a->rainbow_row = (int)i;          /* hue source for pick_color */
         if (l->kind == LINE_MERMAID) {
             size_t end = i + 1;
             while (end < a->doc.line_count &&
@@ -5832,7 +5862,9 @@ static int render_editor(App* a)
         b->line_rows[li] = n_rows;
 
         bool is_h = (lf == a->font_h1 || lf == a->font_h2 || lf == a->font_h3);
-        SDL_Color text_c = is_h ? a->fg_heading : a->fg;
+        SDL_Color text_c = a->rainbow_mode ? rainbow_color((int)li)
+                         : is_h            ? a->fg_heading
+                                           : a->fg;
 
         for (int r = 0; r < n_rows; ++r) {
             size_t r_lo = (r == 0)       ? 0    : (size_t)breaks[r - 1];

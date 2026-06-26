@@ -161,6 +161,9 @@ end)
   loses work.
 - **`descry.save()`** — save the active document to its file (a no-op for an
   unsaved scratch buffer with no path yet).
+- **`descry.rainbow([on])`** — toggle (no arg) or set (boolean) the rainbow
+  render mode, which tints every rendered row a cycling spectrum color. A small
+  example of a render-side bridge hook; see the bundled `rainbow.lua`.
 
 ## Events: `descry.on(event, fn)`
 

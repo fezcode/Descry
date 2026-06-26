@@ -438,6 +438,17 @@ static int l_save(lua_State* L)
     return 0;
 }
 
+/* descry.rainbow([on]) — no/`nil` arg toggles; a boolean sets it explicitly. */
+static int l_rainbow(lua_State* L)
+{
+    int mode = -1;   /* toggle */
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1))
+        mode = lua_toboolean(L, 1) ? 1 : 0;
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.set_rainbow) h->bridge.set_rainbow(h->bridge.ud, mode);
+    return 0;
+}
+
 /* ---- events: descry.on(event, fn) ------------------------------------- */
 
 static int l_on(lua_State* L)
@@ -496,6 +507,7 @@ static const luaL_Reg DESCRY_LIB[] = {
     { "on",              l_on },
     { "open",            l_open },
     { "save",            l_save },
+    { "rainbow",         l_rainbow },
     { NULL, NULL },
 };
 

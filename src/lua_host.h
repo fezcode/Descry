@@ -112,6 +112,7 @@ typedef struct {
     const char* (*vault_path)(void* ud, int i);
     void   (*open_path)      (void* ud, const char* path);
     void   (*save)           (void* ud);
+    void   (*set_rainbow)    (void* ud, int mode);   /* 1 on, 0 off, -1 toggle */
 } LuaAppBridge;
 
 /* Install the document/vault bridge. Copies the struct; the app keeps no
