@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.79.0"
+#define DESCRY_VERSION "0.79.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1167,6 +1167,8 @@ static int load_note(App* a, const char* path)
  * mutate exactly what the user sees. Every mutation routes through the real
  * buffer ops so it lands on the undo stack, then re-derives the preview. */
 static void save_note(App* a);   /* defined far below; bridge needs its addr */
+static void enter_edit_mode(App* a);
+static void enter_preview_mode(App* a);
 
 static void bridge_after_edit(App* a)
 {
@@ -1343,6 +1345,14 @@ static void plugin_cfg_load_cb(const char* k, const char* v, void* ud)
     if (e) snprintf(e->val, sizeof e->val, "%s", v);
 }
 
+static void br_set_edit_mode(void* ud, int on)
+{
+    App* a = ud;
+    if (a->viewing_image) return;     /* image views are preview-only */
+    if (on) enter_edit_mode(a);
+    else    enter_preview_mode(a);
+}
+
 static void br_decor_clear(void* ud) { decor_clear(&((App*)ud)->decor); }
 
 static void br_decor_add(void* ud, size_t start, size_t end,
@@ -1376,6 +1386,7 @@ static void bridge_install(App* a)
         .decor_clear     = br_decor_clear,
         .decor_add       = br_decor_add,
         .config_get      = br_config_get,
+        .set_edit_mode   = br_set_edit_mode,
     };
     lua_host_set_bridge(a->lua, &b);
 }

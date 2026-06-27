@@ -438,6 +438,16 @@ static int l_save(lua_State* L)
     return 0;
 }
 
+/* descry.set_edit_mode([on]) — no/`nil` arg → edit; boolean sets explicitly. */
+static int l_set_edit_mode(lua_State* L)
+{
+    int on = 1;
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) on = lua_toboolean(L, 1);
+    LuaHost* h = host_self(L);
+    if (h && h->bridge.set_edit_mode) h->bridge.set_edit_mode(h->bridge.ud, on);
+    return 0;
+}
+
 /* descry.config(key [, default]) -> string. Reading a key registers it for the
  * Plugins overlay's config list. Values are strings; use tonumber() as needed. */
 static int l_config(lua_State* L)
@@ -557,6 +567,7 @@ static const luaL_Reg DESCRY_LIB[] = {
     { "open",            l_open },
     { "save",            l_save },
     { "config",          l_config },
+    { "set_edit_mode",   l_set_edit_mode },
     { NULL, NULL },
 };
 

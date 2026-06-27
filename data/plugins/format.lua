@@ -85,12 +85,16 @@ local function format_doc()
     local result = table.concat(out, "\n")
     if ends_nl then result = result .. "\n" end
     descry.buffer.set_text(result)
+    return #out
 end
 
 descry.register_action("format_document", function()
-    format_doc()
+    local lines = format_doc()
+    -- The wrap is a SOURCE change; markdown preview reflows it back into one
+    -- paragraph, so switch to edit mode where the wrapping is actually visible.
+    descry.set_edit_mode(true)
     local maxw = tonumber(descry.config("format.max_line", "80")) or 80
-    descry.notify("formatted to " .. maxw .. " columns")
+    descry.notify("formatted to " .. maxw .. " cols (" .. lines .. " lines)")
 end)
 
 descry.notify("[format] loaded -- run 'format document' from the palette")

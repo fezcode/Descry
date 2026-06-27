@@ -161,6 +161,9 @@ end)
   loses work.
 - **`descry.save()`** — save the active document to its file (a no-op for an
   unsaved scratch buffer with no path yet).
+- **`descry.set_edit_mode([on])`** — switch to edit mode (no arg / `true`) or
+  preview (`false`). Handy after a whole-buffer rewrite whose effect only shows
+  in the source — e.g. line wrapping, which markdown preview reflows away.
 
 ## `descry.decorations` — styled text ranges
 
