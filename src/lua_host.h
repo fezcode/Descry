@@ -117,6 +117,9 @@ typedef struct {
     void   (*decor_clear)    (void* ud);
     void   (*decor_add)      (void* ud, size_t start, size_t end,
                               long fg, long bg, long ul);
+    /* Read a plugin config value (always a string) by key, with a default.
+     * Reading a key also registers it so the Plugins overlay can list it. */
+    const char* (*config_get)(void* ud, const char* key, const char* def);
 } LuaAppBridge;
 
 /* Install the document/vault bridge. Copies the struct; the app keeps no

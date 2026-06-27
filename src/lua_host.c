@@ -438,6 +438,19 @@ static int l_save(lua_State* L)
     return 0;
 }
 
+/* descry.config(key [, default]) -> string. Reading a key registers it for the
+ * Plugins overlay's config list. Values are strings; use tonumber() as needed. */
+static int l_config(lua_State* L)
+{
+    const char* key = luaL_checkstring(L, 1);
+    const char* def = luaL_optstring(L, 2, "");
+    LuaHost* h = host_self(L);
+    const char* v = (h && h->bridge.config_get)
+                    ? h->bridge.config_get(h->bridge.ud, key, def) : def;
+    lua_pushstring(L, v ? v : "");
+    return 1;
+}
+
 /* ---- text decorations: descry.decorations.clear/add ------------------- */
 
 static int l_decor_clear(lua_State* L)
@@ -543,6 +556,7 @@ static const luaL_Reg DESCRY_LIB[] = {
     { "on",              l_on },
     { "open",            l_open },
     { "save",            l_save },
+    { "config",          l_config },
     { NULL, NULL },
 };
 

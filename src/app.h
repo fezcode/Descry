@@ -275,6 +275,10 @@ typedef struct {
     }*       plugins_rows;
     int      plugins_count;
     int      plugins_cap;
+    /* Clickable plugin-config value rows in the Plugins overlay, rebuilt each
+     * render_plugins. idx indexes the C-side g_plugin_cfg store. */
+    struct { SDL_Rect rect; int idx; } pcfg_hits[32];
+    int      pcfg_hit_count;
 
     /* Wiki-link auto-complete (triggered by typing `[[` in edit mode). The
      * filter text is the slice of the buffer between wc_anchor and the

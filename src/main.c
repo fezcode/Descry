@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.78.0"
+#define DESCRY_VERSION "0.79.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1277,6 +1277,72 @@ static void br_open_path(void* ud, const char* path)
 
 static void br_save(void* ud) { save_note((App*)ud); }
 
+/* The active plugin directory. ONE definition so startup, reload, and the
+ * Plugins overlay never disagree (they used to: startup defaulted to
+ * "plugins", reload to "data/plugins", so reload found nothing). */
+static const char* app_plugin_dir(App* a)
+{
+    return lua_host_cfg_string(a->lua, "plugin_path", "plugins");
+}
+
+/* ---- plugin config store -------------------------------------------------
+ * Plugin config lives under a `plugins` table in settings.lua, which
+ * settings_persist PRESERVES (loose top-level keys there are clobbered on
+ * save). Values are strings; descry.config(key, default) reads one and
+ * registers the key so the Plugins overlay can list + edit it. */
+typedef struct {
+    char key[64];
+    char val[260];   /* current value (loaded or edited); empty = use def */
+    char def[260];   /* default from the first descry.config call         */
+    int  declared;   /* a plugin read this key this session               */
+} PluginCfg;
+static PluginCfg g_plugin_cfg[64];
+static int       g_plugin_cfg_count;
+
+static PluginCfg* plugin_cfg_find(const char* key)
+{
+    for (int i = 0; i < g_plugin_cfg_count; ++i)
+        if (strcmp(g_plugin_cfg[i].key, key) == 0) return &g_plugin_cfg[i];
+    return NULL;
+}
+
+static PluginCfg* plugin_cfg_intern(const char* key)
+{
+    PluginCfg* e = plugin_cfg_find(key);
+    if (e) return e;
+    if (g_plugin_cfg_count >= (int)(sizeof g_plugin_cfg / sizeof g_plugin_cfg[0]))
+        return NULL;
+    e = &g_plugin_cfg[g_plugin_cfg_count++];
+    memset(e, 0, sizeof *e);
+    snprintf(e->key, sizeof e->key, "%s", key);
+    return e;
+}
+
+/* Effective value: the edited/loaded `val` if set, else the default. */
+static const char* plugin_cfg_value(const PluginCfg* e)
+{
+    return e->val[0] ? e->val : e->def;
+}
+
+/* descry.config bridge: read (registering the key) with a default. */
+static const char* br_config_get(void* ud, const char* key, const char* def)
+{
+    (void)ud;
+    PluginCfg* e = plugin_cfg_intern(key);
+    if (!e) return def ? def : "";
+    e->declared = 1;
+    if (e->def[0] == 0 && def) snprintf(e->def, sizeof e->def, "%s", def);
+    return plugin_cfg_value(e);
+}
+
+/* Load persisted values from settings.lua's `plugins` table at boot. */
+static void plugin_cfg_load_cb(const char* k, const char* v, void* ud)
+{
+    (void)ud;
+    PluginCfg* e = plugin_cfg_intern(k);
+    if (e) snprintf(e->val, sizeof e->val, "%s", v);
+}
+
 static void br_decor_clear(void* ud) { decor_clear(&((App*)ud)->decor); }
 
 static void br_decor_add(void* ud, size_t start, size_t end,
@@ -1309,6 +1375,7 @@ static void bridge_install(App* a)
         .save            = br_save,
         .decor_clear     = br_decor_clear,
         .decor_add       = br_decor_add,
+        .config_get      = br_config_get,
     };
     lua_host_set_bridge(a->lua, &b);
 }
@@ -3490,10 +3557,12 @@ static int app_init(App* a, const char* note_path_arg)
     }
     user_kbinds_load_from_cfg(a->lua);
     recent_dirs_load(a);
+    /* Persisted plugin config (settings.lua `plugins` table) — load before
+     * plugins so their descry.config() reads see saved values. */
+    lua_host_each_in_table(a->lua, "plugins", plugin_cfg_load_cb, NULL);
 
     {
-        const char* pdir = lua_host_cfg_string(a->lua, "plugin_path",
-                                               "plugins");
+        const char* pdir = app_plugin_dir(a);
         int n = lua_host_load_plugins(a->lua, pdir);
         if (n > 0) fprintf(stderr, "descry: loaded %d plugin(s) from %s\n",
                            n, pdir);
@@ -9747,6 +9816,19 @@ static int settings_persist(App* a)
         }
         fprintf(f, "    },\n");
     }
+    /* Plugin config — preserved across saves (unlike loose top-level keys). */
+    if (g_plugin_cfg_count > 0) {
+        fprintf(f, "    plugins        = {\n");
+        for (int i = 0; i < g_plugin_cfg_count; ++i) {
+            if (!g_plugin_cfg[i].key[0]) continue;
+            fprintf(f, "        [");
+            fputs_lua_string(f, g_plugin_cfg[i].key);
+            fprintf(f, "] = ");
+            fputs_lua_string(f, plugin_cfg_value(&g_plugin_cfg[i]));
+            fprintf(f, ",\n");
+        }
+        fprintf(f, "    },\n");
+    }
     fprintf(f, "}\n");
     fclose(f);
     return 0;
@@ -14354,8 +14436,7 @@ static int plugins_reload_btn(const App* a, SDL_Rect* out)
 
 static void plugins_action_reload(App* a)
 {
-    const char* pdir = lua_host_cfg_string(a->lua, "plugin_path",
-                                           "data/plugins");
+    const char* pdir = app_plugin_dir(a);
     int n = lua_host_reload_plugins(a->lua, pdir);
     plugins_collect(a);
     char msg[160];
@@ -14451,9 +14532,63 @@ static void render_plugins(App* a)
 
     int y  = list_top - a->plugins_scroll;
     int rh = plugins_row_h(a);
+    a->pcfg_hit_count = 0;
+
+    /* Folder line: where plugins actually load from. */
+    char dirline[400];
+    snprintf(dirline, sizeof dirline, "Folder:  %s/", app_plugin_dir(a));
+    font_draw_line(a->font_ide, dirline, strlen(dirline),
+                   box.x + 20, y + font_ascent(a->font_ide), a->fg_muted);
+    y += rh;
+
+    /* Config rows: declared plugin config keys; click a value to edit it. */
+    int ndecl = 0;
+    for (int i = 0; i < g_plugin_cfg_count; ++i)
+        if (g_plugin_cfg[i].declared) ndecl++;
+    if (ndecl > 0) {
+        const char* clab = "Config  (click a value to edit)";
+        font_draw_line(a->font_ide, clab, strlen(clab),
+                       box.x + 20, y + font_ascent(a->font_ide), a->fg_heading);
+        y += rh;
+        for (int i = 0; i < g_plugin_cfg_count; ++i) {
+            PluginCfg* e = &g_plugin_cfg[i];
+            if (!e->declared) continue;
+            font_draw_line(a->font_ide, e->key, strlen(e->key),
+                           box.x + 36, y + font_ascent(a->font_ide), a->fg);
+            const char* val = plugin_cfg_value(e);
+            if (!val[0]) val = "(unset)";
+            int vw     = font_measure(a->font_ide, val, strlen(val));
+            int chip_w = vw + 16;
+            int chip_h = rh - 6;
+            int chip_x = box.x + box.w - 20 - chip_w;
+            int chip_y = y + (rh - chip_h) / 2;
+            SDL_SetRenderDrawColor(a->renderer, a->bg_sidebar_hover.r,
+                a->bg_sidebar_hover.g, a->bg_sidebar_hover.b, 200);
+            fill_rrect(a->renderer,
+                       (SDL_Rect){chip_x, chip_y, chip_w, chip_h}, 4);
+            font_draw_line(a->font_ide, val, strlen(val), chip_x + 8,
+                           row_text_baseline(a->font_ide, chip_y, chip_h),
+                           a->fg_link);
+            if (a->pcfg_hit_count <
+                (int)(sizeof a->pcfg_hits / sizeof a->pcfg_hits[0])) {
+                a->pcfg_hits[a->pcfg_hit_count].rect =
+                    (SDL_Rect){ box.x + 20, y, box.w - 40, rh };
+                a->pcfg_hits[a->pcfg_hit_count].idx = i;
+                a->pcfg_hit_count++;
+            }
+            y += rh;
+        }
+        SDL_SetRenderDrawColor(a->renderer, 60, 60, 70, 160);
+        SDL_RenderFillRect(a->renderer,
+                           &(SDL_Rect){ box.x + 12, y + 2, box.w - 24, 1 });
+        y += 10;
+    }
 
     if (a->plugins_count == 0) {
-        const char* empty = "no plugins loaded — drop a *.lua file in data/plugins/";
+        char empty[300];
+        snprintf(empty, sizeof empty,
+                 "no plugins loaded — drop a *.lua file in %s/ (next to the exe)",
+                 app_plugin_dir(a));
         font_draw_line(a->font_ide, empty, strlen(empty),
                        box.x + 20, y + font_ascent(a->font_ide),
                        a->fg_muted);
@@ -16773,6 +16908,31 @@ static void app_event(App* a, const SDL_Event* e)
                     plugins_action_reload(a);
                     break;
                 }
+                /* Click a config value → edit it (synchronous modal), then
+                 * persist. The plugin re-reads via descry.config on next use. */
+                int pcfg_handled = 0;
+                for (int ci = 0; ci < a->pcfg_hit_count; ++ci) {
+                    SDL_Rect r = a->pcfg_hits[ci].rect;
+                    if (e->button.x >= r.x && e->button.x < r.x + r.w &&
+                        e->button.y >= r.y && e->button.y < r.y + r.h) {
+                        int idx = a->pcfg_hits[ci].idx;
+                        if (idx >= 0 && idx < g_plugin_cfg_count) {
+                            PluginCfg* pe = &g_plugin_cfg[idx];
+                            char title[96];
+                            snprintf(title, sizeof title, "Set  %s", pe->key);
+                            if (app_text_modal(a, title,
+                                               plugin_cfg_value(pe), NULL)) {
+                                snprintf(pe->val, sizeof pe->val, "%s",
+                                         a->tinput_text);
+                                settings_persist(a);
+                                app_notify(a, "plugin config saved");
+                            }
+                        }
+                        pcfg_handled = 1;
+                        break;
+                    }
+                }
+                if (pcfg_handled) break;
                 SDL_Rect box = plugins_box_rect(a);
                 if (e->button.x < box.x || e->button.x >= box.x + box.w ||
                     e->button.y < box.y || e->button.y >= box.y + box.h)
