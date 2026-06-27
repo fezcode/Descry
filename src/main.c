@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.79.1"
+#define DESCRY_VERSION "0.80.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1351,6 +1351,42 @@ static void br_set_edit_mode(void* ud, int on)
     if (a->viewing_image) return;     /* image views are preview-only */
     if (on) enter_edit_mode(a);
     else    enter_preview_mode(a);
+}
+
+/* ---- disabled-plugins set ------------------------------------------------
+ * Names of plugins the user turned off (persisted in settings.lua under
+ * plugins_disabled). The host's load filter (plugin_enabled_cb) skips them;
+ * they still appear in the overlay so they can be re-enabled. */
+static char g_plugin_disabled[64][64];
+static int  g_plugin_disabled_count;
+
+static int plugin_is_disabled(const char* name)
+{
+    for (int i = 0; i < g_plugin_disabled_count; ++i)
+        if (strcmp(g_plugin_disabled[i], name) == 0) return 1;
+    return 0;
+}
+
+static void plugin_set_disabled(const char* name, int dis)
+{
+    int idx = -1, cap = (int)(sizeof g_plugin_disabled / sizeof g_plugin_disabled[0]);
+    for (int i = 0; i < g_plugin_disabled_count; ++i)
+        if (strcmp(g_plugin_disabled[i], name) == 0) { idx = i; break; }
+    if (dis && idx < 0 && g_plugin_disabled_count < cap) {
+        snprintf(g_plugin_disabled[g_plugin_disabled_count++],
+                 sizeof g_plugin_disabled[0], "%s", name);
+    } else if (!dis && idx >= 0) {
+        for (int i = idx; i + 1 < g_plugin_disabled_count; ++i)
+            snprintf(g_plugin_disabled[i], sizeof g_plugin_disabled[0], "%s",
+                     g_plugin_disabled[i + 1]);
+        g_plugin_disabled_count--;
+    }
+}
+
+static int plugin_enabled_cb(const char* name, void* ud)
+{
+    (void)ud;
+    return !plugin_is_disabled(name);
 }
 
 static void br_decor_clear(void* ud) { decor_clear(&((App*)ud)->decor); }
@@ -3571,6 +3607,18 @@ static int app_init(App* a, const char* note_path_arg)
     /* Persisted plugin config (settings.lua `plugins` table) — load before
      * plugins so their descry.config() reads see saved values. */
     lua_host_each_in_table(a->lua, "plugins", plugin_cfg_load_cb, NULL);
+    /* Disabled-plugin set + load gate, before the load below. */
+    {
+        int cap = (int)(sizeof g_plugin_disabled / sizeof g_plugin_disabled[0]);
+        int nd  = lua_host_cfg_array_length(a->lua, "plugins_disabled");
+        for (int i = 1; i <= nd && g_plugin_disabled_count < cap; ++i) {
+            const char* s = lua_host_cfg_array_string(a->lua, "plugins_disabled", i);
+            if (s && *s)
+                snprintf(g_plugin_disabled[g_plugin_disabled_count++],
+                         sizeof g_plugin_disabled[0], "%s", s);
+        }
+        lua_host_set_plugin_filter(a->lua, plugin_enabled_cb, NULL);
+    }
 
     {
         const char* pdir = app_plugin_dir(a);
@@ -9840,6 +9888,15 @@ static int settings_persist(App* a)
         }
         fprintf(f, "    },\n");
     }
+    if (g_plugin_disabled_count > 0) {
+        fprintf(f, "    plugins_disabled = {\n");
+        for (int i = 0; i < g_plugin_disabled_count; ++i) {
+            fprintf(f, "        ");
+            fputs_lua_string(f, g_plugin_disabled[i]);
+            fprintf(f, ",\n");
+        }
+        fprintf(f, "    },\n");
+    }
     fprintf(f, "}\n");
     fclose(f);
     return 0;
@@ -14387,7 +14444,10 @@ static void plugins_collect_cb(const LuaPluginView* p, void* ud)
     memset(r, 0, sizeof *r);
     snprintf(r->name,   sizeof r->name,   "%s", p->name ? p->name : "?");
     snprintf(r->path,   sizeof r->path,   "%s", p->path ? p->path : "");
-    if (p->load_failed) {
+    r->disabled = p->disabled;
+    if (p->disabled) {
+        snprintf(r->status, sizeof r->status, "disabled");
+    } else if (p->load_failed) {
         snprintf(r->status, sizeof r->status, "error");
         snprintf(r->error,  sizeof r->error,  "%s", p->error ? p->error : "");
     } else {
@@ -14544,6 +14604,7 @@ static void render_plugins(App* a)
     int y  = list_top - a->plugins_scroll;
     int rh = plugins_row_h(a);
     a->pcfg_hit_count = 0;
+    a->ptoggle_hit_count = 0;
 
     /* Folder line: where plugins actually load from. */
     char dirline[400];
@@ -14610,7 +14671,9 @@ static void render_plugins(App* a)
     for (int i = 0; i < a->plugins_count; ++i) {
         const struct PluginRow* p = &a->plugins_rows[i];
         bool failed = (p->status[0] == 'e');
-        SDL_Color name_c = failed ? (SDL_Color){230, 110, 110, 255} : a->fg_link;
+        SDL_Color name_c = failed       ? (SDL_Color){230, 110, 110, 255}
+                         : p->disabled  ? a->fg_muted
+                                        : a->fg_link;
         int baseline = y + font_ascent(a->font_ide);
 
         /* Plugin header row: bold name, status pill on the right. */
@@ -14637,6 +14700,31 @@ static void render_plugins(App* a)
                        chip_x + chip_pad_x,
                        row_text_baseline(a->font_ide, chip_y, chip_h),
                        failed ? (SDL_Color){240, 200, 200, 255} : a->fg);
+
+        /* Enable/disable toggle — far right of the header row. */
+        {
+            const char* tlab = p->disabled ? "off" : "on";
+            int tw    = font_measure(a->font_ide, tlab, strlen(tlab));
+            int tgl_w = tw + 20;
+            int tgl_h = rh - 6;
+            int tgl_x = box.x + box.w - 20 - tgl_w;
+            int tgl_y = y + (rh - tgl_h) / 2;
+            SDL_Color tbg = p->disabled ? (SDL_Color){70, 70, 80, 200}
+                                        : (SDL_Color){60, 130, 70, 230};
+            SDL_SetRenderDrawColor(a->renderer, tbg.r, tbg.g, tbg.b, tbg.a);
+            fill_rrect(a->renderer,
+                       (SDL_Rect){tgl_x, tgl_y, tgl_w, tgl_h}, tgl_h / 2);
+            font_draw_line(a->font_ide, tlab, strlen(tlab), tgl_x + 10,
+                           row_text_baseline(a->font_ide, tgl_y, tgl_h),
+                           (SDL_Color){240, 240, 245, 255});
+            if (a->ptoggle_hit_count <
+                (int)(sizeof a->ptoggle_hits / sizeof a->ptoggle_hits[0])) {
+                a->ptoggle_hits[a->ptoggle_hit_count].rect =
+                    (SDL_Rect){ tgl_x, tgl_y, tgl_w, tgl_h };
+                a->ptoggle_hits[a->ptoggle_hit_count].row = i;
+                a->ptoggle_hit_count++;
+            }
+        }
         y += rh;
 
         /* Path row (muted, smaller indent so it visually nests under name).
@@ -16919,6 +17007,25 @@ static void app_event(App* a, const SDL_Event* e)
                     plugins_action_reload(a);
                     break;
                 }
+                /* Enable/disable toggle → flip the disabled flag, persist, and
+                 * reload so the plugin is loaded/unloaded right away. */
+                int ptgl_handled = 0;
+                for (int ti = 0; ti < a->ptoggle_hit_count; ++ti) {
+                    SDL_Rect r = a->ptoggle_hits[ti].rect;
+                    if (e->button.x >= r.x && e->button.x < r.x + r.w &&
+                        e->button.y >= r.y && e->button.y < r.y + r.h) {
+                        int row = a->ptoggle_hits[ti].row;
+                        if (row >= 0 && row < a->plugins_count) {
+                            const char* nm = a->plugins_rows[row].name;
+                            plugin_set_disabled(nm, !plugin_is_disabled(nm));
+                            settings_persist(a);
+                            plugins_action_reload(a);
+                        }
+                        ptgl_handled = 1;
+                        break;
+                    }
+                }
+                if (ptgl_handled) break;
                 /* Click a config value → edit it (synchronous modal), then
                  * persist. The plugin re-reads via descry.config on next use. */
                 int pcfg_handled = 0;

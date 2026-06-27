@@ -67,9 +67,16 @@ typedef struct {
     int                action_count;
     int                load_failed;
     const char*        error;            /* empty when not load_failed */
+    int                disabled;         /* 1 = user-disabled, not run */
 } LuaPluginView;
 typedef void (*LuaPluginEachCb)(const LuaPluginView* p, void* ud);
 int lua_host_each_plugin(LuaHost* h, LuaPluginEachCb cb, void* ud);
+
+/* Install a gate consulted while loading each plugin: cb(name, ud) returns 0 to
+ * skip (disable) that plugin. It's still listed by lua_host_each_plugin with
+ * disabled=1 so the UI can offer to re-enable it. Set before load/reload. */
+void lua_host_set_plugin_filter(LuaHost* h,
+                                int (*cb)(const char* name, void* ud), void* ud);
 
 /* Re-scan + reload the plugin directory at runtime. Returns the count of
  * plugins that loaded without error. Old plugin records are freed first;

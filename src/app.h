@@ -272,6 +272,7 @@ typedef struct {
         char error[200];
         char actions[16][48];
         int  action_count;
+        int  disabled;        /* 1 = user-disabled (listed, not run) */
     }*       plugins_rows;
     int      plugins_count;
     int      plugins_cap;
@@ -279,6 +280,9 @@ typedef struct {
      * render_plugins. idx indexes the C-side g_plugin_cfg store. */
     struct { SDL_Rect rect; int idx; } pcfg_hits[32];
     int      pcfg_hit_count;
+    /* Per-plugin enable/disable toggle hit-rects (row = plugins_rows index). */
+    struct { SDL_Rect rect; int row; } ptoggle_hits[64];
+    int      ptoggle_hit_count;
 
     /* Wiki-link auto-complete (triggered by typing `[[` in edit mode). The
      * filter text is the slice of the buffer between wc_anchor and the

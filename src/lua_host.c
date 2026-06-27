@@ -23,6 +23,7 @@ typedef struct {
     int    action_cap;
     int    load_failed;   /* 1 if luaL_dofile errored; actions[] is empty */
     char   error[256];    /* lua error message (best-effort)             */
+    int    disabled;      /* 1 if skipped (user-disabled); not run        */
 } PluginInfo;
 
 struct LuaHost {
@@ -32,6 +33,9 @@ struct LuaHost {
     int         plugin_cap;
     int         current_plugin;   /* -1 outside a load, else plugins[i]  */
     LuaAppBridge bridge;          /* document/vault accessors (app-filled) */
+    /* Optional gate: returns 0 to skip (disable) a plugin by name. */
+    int        (*enabled_cb)(const char* name, void* ud);
+    void*       enabled_ud;
 };
 
 /* The host pointer is stashed in the Lua extra-space so callbacks can find
@@ -321,6 +325,14 @@ void lua_host_set_bridge(LuaHost* h, const LuaAppBridge* b)
 {
     if (!h || !b) return;
     h->bridge = *b;
+}
+
+void lua_host_set_plugin_filter(LuaHost* h,
+                                int (*cb)(const char* name, void* ud), void* ud)
+{
+    if (!h) return;
+    h->enabled_cb = cb;
+    h->enabled_ud = ud;
 }
 
 static int l_buf_text(lua_State* L)
@@ -645,7 +657,11 @@ int lua_host_load_plugins(LuaHost* h, const char* dir)
         h->current_plugin = h->plugin_count;
         h->plugin_count++;
 
-        if (luaL_dofile(h->L, path) != LUA_OK) {
+        if (h->enabled_cb && !h->enabled_cb(namebuf, h->enabled_ud)) {
+            /* Disabled by the host — listed in the overlay but not run, so its
+             * actions/events never register. */
+            p->disabled = 1;
+        } else if (luaL_dofile(h->L, path) != LUA_OK) {
             const char* msg = lua_tostring(h->L, -1);
             fprintf(stderr, "[plugin] %s: %s\n", path, msg ? msg : "?");
             p->load_failed = 1;
@@ -688,6 +704,7 @@ int lua_host_each_plugin(LuaHost* h, LuaPluginEachCb cb, void* ud)
             .action_count = p->action_count,
             .load_failed  = p->load_failed,
             .error        = p->error,
+            .disabled     = p->disabled,
         };
         cb(&v, ud);
     }
