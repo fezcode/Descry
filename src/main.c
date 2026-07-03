@@ -99,7 +99,7 @@ static void resolve_log_path(void)
     }
 }
 
-#define DESCRY_VERSION "0.80.0"
+#define DESCRY_VERSION "0.80.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -747,6 +747,13 @@ static void on_lua_notify(void* userdata, const char* msg)
 
 /* Forward decl — info_modal pumps SDL events like confirm_action does. */
 static void info_modal(App* a, const char* title, const char* msg);
+/* Forward decls — the modal renderers reuse the sidebar's pixel-elide
+ * helper and the plugin list's left-truncating path fitter so no modal
+ * text can escape its card, whatever font/size the user configured. */
+static void font_draw_elided(Font* f, const char* text, size_t len,
+                             int x, int baseline, int max_w, SDL_Color c);
+static void path_fit_left(Font* f, const char* in, int max_w,
+                          char* out, size_t cap);
 static void on_lua_dialog(void* userdata,
                           const char* title, const char* msg)
 {
@@ -1465,12 +1472,49 @@ static int confirm_msg_line_count(const App* a)
 /* Confirm-modal layout helpers. Buttons: 0 = Discard, 1 = Cancel (default).
  * Vertical layout (top → bottom): pad / title row / gap / msg row(s) /
  * large gap / hint row / small gap / button row / pad. Message can be
- * multi-line — height grows to fit. */
+ * multi-line — height grows to fit. Width grows to the widest content
+ * line (clamped to the window) so About-style prose isn't elided away;
+ * anything still wider gets pixel-elided at draw time. */
+static int confirm_btn_w(const App* a, const char* label);
+
 static SDL_Rect confirm_box_rect(const App* a)
 {
     int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
     int box_w = 480;
+
+    /* Widest of: title, each message line, hint — plus 20px side pads. */
+    int need = font_measure(a->font_ide, a->confirm_title,
+                            strlen(a->confirm_title));
+    for (const char* p = a->confirm_msg; *p; ) {
+        const char* nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        int w = font_measure(a->font_ide, p, n);
+        if (w > need) need = w;
+        if (!nl) break;
+        p = nl + 1;
+    }
+    {
+        const char* hint = "Enter / Esc cancel  -  Y confirm";
+        int w = font_measure(a->font_ide, hint, strlen(hint));
+        if (w > need) need = w;
+    }
+    if (need + 40 > box_w) box_w = need + 40;
+
+    /* Button row must fit too: 16 | btn0 | 12 | btn1 | 16. */
+    {
+        const char* lab0 = a->confirm_btn0_label[0]
+                           ? a->confirm_btn0_label : NULL;
+        const char* lab1 = a->confirm_btn1_label[0]
+                           ? a->confirm_btn1_label : "Cancel";
+        int bw = confirm_btn_w(a, lab1) + 32
+               + (lab0 ? confirm_btn_w(a, lab0) + 12 : 0);
+        if (bw > box_w) box_w = bw;
+    }
+
+    if (box_w > a->win_w - 40) box_w = a->win_w - 40;
+    if (box_w < 320)           box_w = 320;
+
     int msg_h = sz_y * confirm_msg_line_count(a);
     int box_h = 20 + sz_y + 14 + msg_h + 24 + sz_y + 12 + btn_h + 20;
     return (SDL_Rect){ (a->win_w - box_w) / 2,
@@ -1547,20 +1591,21 @@ static void render_confirm_modal(App* a)
     int b0_x  = b1_x - w0 - 12;
 
     /* Title */
-    font_draw_line(a->font_ide, a->confirm_title, strlen(a->confirm_title),
-                   box.x + 20, title_top + font_ascent(a->font_ide),
-                   a->fg_link);
+    font_draw_elided(a->font_ide, a->confirm_title, strlen(a->confirm_title),
+                     box.x + 20, title_top + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_link);
     /* Message — split on '\n' so the About dialog (and any future
-     * multi-paragraph prompt) renders each line. */
+     * multi-paragraph prompt) renders each line. Elided per line: the box
+     * already grew to fit, so this only bites when clamped to the window. */
     {
         const char* p = a->confirm_msg;
         int ly = msg_top;
         while (*p) {
             const char* nl = strchr(p, '\n');
             size_t n = nl ? (size_t)(nl - p) : strlen(p);
-            font_draw_line(a->font_ide, p, n,
-                           box.x + 20, ly + font_ascent(a->font_ide),
-                           a->fg);
+            font_draw_elided(a->font_ide, p, n,
+                             box.x + 20, ly + font_ascent(a->font_ide),
+                             box.w - 40, a->fg);
             ly += sz_y;
             if (!nl) break;
             p = nl + 1;
@@ -1606,10 +1651,10 @@ static void render_confirm_modal(App* a)
 
     /* Hint */
     const char* hint = "Enter / Esc cancel  -  Y confirm";
-    font_draw_line(a->font_ide, hint, strlen(hint),
-                   box.x + 20,
-                   hint_top + font_ascent(a->font_ide),
-                   a->fg_muted);
+    font_draw_elided(a->font_ide, hint, strlen(hint),
+                     box.x + 20,
+                     hint_top + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_muted);
 }
 
 /* Synchronous yes/no modal. lab0 is the affirmative action (returns true),
@@ -1747,6 +1792,7 @@ static SDL_Rect eol_pick_box_rect(const App* a)
     int row_h = sz + 18;
     int w = 320;
     int h = 20 + sz + 14 + row_h * 3 + 16;       /* title + 3 rows + pads */
+    if (w > a->win_w - 24) w = a->win_w - 24;
     SDL_Rect r = { (a->win_w - w) / 2, (a->win_h - h) / 3, w, h };
     return r;
 }
@@ -1774,9 +1820,9 @@ static void render_eol_picker(App* a)
     overlay_card(a, box);
 
     int sz = font_line_height(a->font_ide);
-    font_draw_line(a->font_ide, "Convert line endings", 20,
-                   box.x + 20, box.y + 20 + font_ascent(a->font_ide),
-                   a->fg_link);
+    font_draw_elided(a->font_ide, "Convert line endings", 20,
+                     box.x + 20, box.y + 20 + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_link);
 
     static const char* LABELS[3] = {
         "LF (Unix)",
@@ -1797,9 +1843,10 @@ static void render_eol_picker(App* a)
         }
         SDL_Color c = (i == 2) ? a->fg_muted
                                : (hov ? a->fg : a->fg_link);
-        font_draw_line(a->font_ide, LABELS[i], strlen(LABELS[i]),
-                       box.x + 28,
-                       y + (row_h - sz) / 2 + font_ascent(a->font_ide), c);
+        font_draw_elided(a->font_ide, LABELS[i], strlen(LABELS[i]),
+                         box.x + 28,
+                         y + (row_h - sz) / 2 + font_ascent(a->font_ide),
+                         box.w - 28 - 20, c);
     }
 }
 
@@ -1866,6 +1913,8 @@ static SDL_Rect tinput_box_rect(App* a)
 {
     int w = 560;
     int h = 480;
+    if (w > a->win_w - 24) w = a->win_w - 24;
+    if (h > a->win_h - 24) h = a->win_h - 24;
     return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
 }
 
@@ -2444,6 +2493,30 @@ static void input_render_selection(App* a, const InputField* f,
     SDL_RenderFillRect(a->renderer, &r);
 }
 
+/* Geometry of the picker's inline right-click menu (Rename/Delete),
+ * shared by the renderer and the click hit-test so they can never
+ * disagree. Width is measured from the labels (large fonts don't
+ * spill); position is clamped inside the picker card. */
+static const char* TINPUT_CTX_LABELS[2] = { "Rename...", "Delete" };
+
+static SDL_Rect tinput_ctx_menu_rect(App* a)
+{
+    SDL_Rect box = tinput_box_rect(a);
+    int rh_ctx = font_line_height(a->font_ide) + 8;
+    int mw_ctx = 140;
+    for (int i = 0; i < 2; ++i) {
+        int lw = font_measure(a->font_ide, TINPUT_CTX_LABELS[i],
+                              strlen(TINPUT_CTX_LABELS[i])) + 24;
+        if (lw > mw_ctx) mw_ctx = lw;
+    }
+    int mh_ctx = rh_ctx * 2;
+    int mx0 = a->tinput_ctx_x;
+    int my0 = a->tinput_ctx_y;
+    if (mx0 + mw_ctx > box.x + box.w - 4) mx0 = box.x + box.w - 4 - mw_ctx;
+    if (my0 + mh_ctx > box.y + box.h - 4) my0 = box.y + box.h - 4 - mh_ctx;
+    return (SDL_Rect){ mx0, my0, mw_ctx, mh_ctx };
+}
+
 static void render_tinput_modal(App* a)
 {
     if (!a->tinput_active) return;
@@ -2457,9 +2530,9 @@ static void render_tinput_modal(App* a)
     int btn_w = 120;
     bool pick = a->tinput_pick_dir;
 
-    font_draw_line(a->font_ide, a->tinput_title, strlen(a->tinput_title),
-                   box.x + 20, box.y + 20 + font_ascent(a->font_ide),
-                   a->fg_link);
+    font_draw_elided(a->font_ide, a->tinput_title, strlen(a->tinput_title),
+                     box.x + 20, box.y + 20 + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_link);
 
     /* Input field. In save/rename mode this is the filename. In dir-pick
      * mode it doubles as a path bar — typing + Enter navigates; the
@@ -2512,25 +2585,36 @@ static void render_tinput_modal(App* a)
     /* Currently-shown path label below the input ("in /some/path" or
      * "Computer" when on the drive view). Red when path errored —
      * quotes the path the user actually tried, not the one we fell
-     * back to. */
+     * back to. The path is left-truncated to the pixel width that's
+     * actually available, so deep vault paths (macOS home dirs...)
+     * can't run past the card edge and the tail — the folder you're
+     * actually in — stays visible. */
     int dir_y = in_r.y + in_r.h + 8;
-    char dir_lab[600];
+    const char* dir_pre  = NULL;
+    const char* dir_path = NULL;
     if (a->tinput_path_err) {
-        snprintf(dir_lab, sizeof dir_lab, "no such folder: %s",
-                 a->tinput_err_text[0] ? a->tinput_err_text : a->tinput_dir);
+        dir_pre  = "no such folder: ";
+        dir_path = a->tinput_err_text[0] ? a->tinput_err_text
+                                         : a->tinput_dir;
     } else if (strcmp(a->tinput_dir, COMPUTER_SENTINEL) == 0) {
-        snprintf(dir_lab, sizeof dir_lab, "in %s",
-                 "Computer  (drives)");
+        dir_pre  = "in ";
+        dir_path = "Computer  (drives)";
     } else if (a->tinput_dir[0]) {
-        snprintf(dir_lab, sizeof dir_lab, "in %s", a->tinput_dir);
-    } else {
-        dir_lab[0] = 0;
+        dir_pre  = "in ";
+        dir_path = a->tinput_dir;
     }
-    if (dir_lab[0]) {
+    if (dir_pre) {
         SDL_Color lc = a->tinput_path_err
             ? (SDL_Color){230, 110, 110, 220} : a->fg_muted;
-        font_draw_line(a->font_ide, dir_lab, strlen(dir_lab),
+        int pre_w  = font_measure(a->font_ide, dir_pre, strlen(dir_pre));
+        int avail  = box.w - 40 - pre_w;
+        char fitted[600];
+        path_fit_left(a->font_ide, dir_path, avail, fitted, sizeof fitted);
+        font_draw_line(a->font_ide, dir_pre, strlen(dir_pre),
                        box.x + 20, dir_y + font_ascent(a->font_ide), lc);
+        font_draw_line(a->font_ide, fitted, strlen(fitted),
+                       box.x + 20 + pre_w,
+                       dir_y + font_ascent(a->font_ide), lc);
     }
 
     int list_top = dir_y + sz_y + 8;
@@ -2601,15 +2685,7 @@ static void render_tinput_modal(App* a)
      * inside the modal so it floats above the file list. */
     if (a->tinput_ctx_active) {
         int rh_ctx = sz_y + 8;
-        int mw_ctx = 140;
-        int mh_ctx = rh_ctx * 2;
-        int mx0 = a->tinput_ctx_x;
-        int my0 = a->tinput_ctx_y;
-        if (mx0 + mw_ctx > box.x + box.w - 4)
-            mx0 = box.x + box.w - 4 - mw_ctx;
-        if (my0 + mh_ctx > box.y + box.h - 4)
-            my0 = box.y + box.h - 4 - mh_ctx;
-        SDL_Rect mr = { mx0, my0, mw_ctx, mh_ctx };
+        SDL_Rect mr = tinput_ctx_menu_rect(a);
         SDL_SetRenderDrawColor(a->renderer,
             a->bg_sidebar_active.r, a->bg_sidebar_active.g,
             a->bg_sidebar_active.b, 240);
@@ -2617,12 +2693,12 @@ static void render_tinput_modal(App* a)
         SDL_SetRenderDrawColor(a->renderer,
             a->fg_link.r, a->fg_link.g, a->fg_link.b, 180);
         draw_rrect(a->renderer, mr, 6);
-        const char* labels[2] = { "Rename...", "Delete" };
-        SDL_Color  colors[2]  = {
+        SDL_Color colors[2] = {
             a->fg, (SDL_Color){230, 110, 110, 255}
         };
         for (int i = 0; i < 2; ++i) {
-            font_draw_line(a->font_ide, labels[i], strlen(labels[i]),
+            font_draw_line(a->font_ide,
+                           TINPUT_CTX_LABELS[i], strlen(TINPUT_CTX_LABELS[i]),
                            mr.x + 12,
                            row_text_baseline(a->font_ide,
                                              mr.y + i * rh_ctx, rh_ctx),
@@ -2698,8 +2774,8 @@ static void render_tinput_modal(App* a)
     const char* hint = pick
         ? "Click a folder to enter  -  ..  to go up  -  Esc cancel"
         : "Enter save  -  Esc cancel";
-    font_draw_line(a->font_ide, hint, strlen(hint),
-                   box.x + 20, btn_y - 8, a->fg_muted);
+    font_draw_elided(a->font_ide, hint, strlen(hint),
+                     box.x + 20, btn_y - 8, box.w - 40, a->fg_muted);
 }
 
 /* ----------------------------- rename popup ---------------------------- */
@@ -2713,6 +2789,8 @@ static SDL_Rect renpop_box_rect(const App* a)
 {
     int w = 440;
     int h = 200;
+    if (w > a->win_w - 24) w = a->win_w - 24;
+    if (h > a->win_h - 24) h = a->win_h - 24;
     return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
 }
 
@@ -2756,13 +2834,14 @@ static void render_rename_popup(App* a)
                    a->fg_link);
 
     /* Subtitle quoting the original name so the user knows exactly
-     * what's being renamed. */
+     * what's being renamed. Elided — long filenames must not escape
+     * the card. */
     char sub[320];
     snprintf(sub, sizeof sub, "'%s' to:", a->tinput_renpop_old);
-    font_draw_line(a->font_ide, sub, strlen(sub),
-                   box.x + 20,
-                   box.y + 20 + sz_y + 6 + font_ascent(a->font_ide),
-                   a->fg_muted);
+    font_draw_elided(a->font_ide, sub, strlen(sub),
+                     box.x + 20,
+                     box.y + 20 + sz_y + 6 + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_muted);
 
     /* Input field */
     int in_y = box.y + 20 + sz_y * 2 + 16;
@@ -2807,12 +2886,12 @@ static void render_rename_popup(App* a)
 
     /* Error label below the input, if any. */
     if (a->tinput_renpop_err && a->tinput_renpop_err_text[0]) {
-        font_draw_line(a->font_ide,
-                       a->tinput_renpop_err_text,
-                       strlen(a->tinput_renpop_err_text),
-                       box.x + 20,
-                       in_r.y + in_r.h + 6 + font_ascent(a->font_ide),
-                       (SDL_Color){230, 110, 110, 255});
+        font_draw_elided(a->font_ide,
+                         a->tinput_renpop_err_text,
+                         strlen(a->tinput_renpop_err_text),
+                         box.x + 20,
+                         in_r.y + in_r.h + 6 + font_ascent(a->font_ide),
+                         box.w - 40, (SDL_Color){230, 110, 110, 255});
     }
 
     /* Buttons */
@@ -3102,15 +3181,12 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                          * through to normal handling. */
                         if (a->tinput_ctx_active) {
                             int rh_ctx = font_line_height(a->font_ide) + 8;
-                            int mw_ctx = 140;
-                            int mh_ctx = rh_ctx * 2;
-                            int mx0 = a->tinput_ctx_x;
-                            int my0 = a->tinput_ctx_y;
+                            SDL_Rect mr = tinput_ctx_menu_rect(a);
                             bool on_menu =
-                                e.button.x >= mx0 && e.button.x < mx0 + mw_ctx &&
-                                e.button.y >= my0 && e.button.y < my0 + mh_ctx;
+                                e.button.x >= mr.x && e.button.x < mr.x + mr.w &&
+                                e.button.y >= mr.y && e.button.y < mr.y + mr.h;
                             int item = on_menu
-                                ? (e.button.y - my0) / rh_ctx : -1;
+                                ? (e.button.y - mr.y) / rh_ctx : -1;
                             int rrow = a->tinput_ctx_row;
                             if (item == 0 && rrow >= 0 &&
                                 rrow < a->tinput_files_count)
@@ -11251,8 +11327,36 @@ static void render_vsearch(App* a)
     int lab_w = font_measure(a->font_ide, lab, strlen(lab));
     font_draw_line(a->font_ide, lab, strlen(lab),
                    box_x + 16, y + font_ascent(a->font_ide), a->fg_link);
-    font_draw_line(a->font_ide, a->vsearch_query, a->vsearch_qlen,
-                   box_x + 16 + lab_w, y + font_ascent(a->font_ide), a->fg);
+
+    /* Counts (or error) — built before the query draw so the query knows
+     * how much width the right-hand indicator block will take. */
+    char counts[96];
+    if (a->vsearch_regex && a->vsearch_re_err[0])
+        snprintf(counts, sizeof counts, "regex: %s", a->vsearch_re_err);
+    else if (a->vsearch_qlen == 0)
+        snprintf(counts, sizeof counts, "type to search vault");
+    else if (a->vsearch_total_hits == 0)
+        snprintf(counts, sizeof counts, "0 hits");
+    else
+        snprintf(counts, sizeof counts, "%d hits in %d files",
+                 a->vsearch_total_hits, a->vsearch_files_with_hits);
+    int cw = font_measure(a->font_ide, counts, strlen(counts));
+
+    /* Query — left-truncated to the space before the indicators so long
+     * queries can't run under them or past the card edge; the tail (what
+     * you're typing) stays visible. */
+    {
+        int reserved = font_measure(a->font_ide, "[Re]", 4) + 6
+                     + font_measure(a->font_ide, "[Aa]", 4) + 6
+                     + cw + 12;
+        int qx = box_x + 16 + lab_w;
+        int q_avail = box_x + box_w - 16 - reserved - 8 - qx;
+        char qfit[512];
+        path_fit_left(a->font_ide, a->vsearch_query, q_avail,
+                      qfit, sizeof qfit);
+        font_draw_line(a->font_ide, qfit, strlen(qfit),
+                       qx, y + font_ascent(a->font_ide), a->fg);
+    }
 
     /* Mode indicators. */
     int ind_x = box_x + box_w - 16;
@@ -11274,19 +11378,6 @@ static void render_vsearch(App* a)
         font_draw_line(a->font_ide, i_lab, 4, ind_x,
                        y + font_ascent(a->font_ide), ic);
     }
-
-    /* Counts (or error). */
-    char counts[96];
-    if (a->vsearch_regex && a->vsearch_re_err[0])
-        snprintf(counts, sizeof counts, "regex: %s", a->vsearch_re_err);
-    else if (a->vsearch_qlen == 0)
-        snprintf(counts, sizeof counts, "type to search vault");
-    else if (a->vsearch_total_hits == 0)
-        snprintf(counts, sizeof counts, "0 hits");
-    else
-        snprintf(counts, sizeof counts, "%d hits in %d files",
-                 a->vsearch_total_hits, a->vsearch_files_with_hits);
-    int cw = font_measure(a->font_ide, counts, strlen(counts));
     ind_x -= cw + 12;
     SDL_Color cc = (a->vsearch_regex && a->vsearch_re_err[0])
                    ? (SDL_Color){ 230, 110, 110, 255 } : a->fg_muted;
@@ -11576,9 +11667,9 @@ static void render_backlinks(App* a)
     else              snprintf(self, sizeof self, "(unsaved)");
     snprintf(title, sizeof title, "Backlinks to [[%s]]  (%d)",
              self, a->backlinks_count);
-    font_draw_line(a->font_ide, title, strlen(title),
-                   box_x + 16, box_y + 10 + font_ascent(a->font_ide),
-                   a->fg_link);
+    font_draw_elided(a->font_ide, title, strlen(title),
+                     box_x + 16, box_y + 10 + font_ascent(a->font_ide),
+                     box_w - 32, a->fg_link);
 
     int rows_top = box_y + rh + 12;
     int rows_bot = box_y + box_h - rh - 8;
@@ -13968,20 +14059,29 @@ static void render_switcher(App* a)
     int label_w = font_measure(a->font_ide, "Open: ", 6);
     font_draw_line(a->font_ide, "Open: ", 6,
                    box_x + 12, y + font_ascent(a->font_ide), a->fg_muted);
-    font_draw_line(a->font_ide, a->switcher_query, a->switcher_qlen,
-                   box_x + 12 + label_w, y + font_ascent(a->font_ide), a->fg);
-
-    int qw = font_measure(a->font_ide, a->switcher_query, a->switcher_qlen);
-    SDL_Rect cur = { box_x + 12 + label_w + qw, y, 2,
-                     font_line_height(a->font_ide) };
-    SDL_SetRenderDrawColor(a->renderer,
-        a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
-    SDL_RenderFillRect(a->renderer, &cur);
 
     char info[40];
     snprintf(info, sizeof info, "%d/%zu",
              a->switcher_count, a->vault.count);
     int iw = font_measure(a->font_ide, info, strlen(info));
+
+    /* Query — left-truncated to the room before the match counter so a
+     * long query can't run under it; the caret tracks the FITTED text. */
+    int qx = box_x + 12 + label_w;
+    int q_avail = (box_x + box_w - 12 - iw) - 8 - qx;
+    char qfit[512];
+    path_fit_left(a->font_ide, a->switcher_query, q_avail,
+                  qfit, sizeof qfit);
+    font_draw_line(a->font_ide, qfit, strlen(qfit),
+                   qx, y + font_ascent(a->font_ide), a->fg);
+
+    int qw = font_measure(a->font_ide, qfit, strlen(qfit));
+    SDL_Rect cur = { qx + qw, y, 2,
+                     font_line_height(a->font_ide) };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
+    SDL_RenderFillRect(a->renderer, &cur);
+
     font_draw_line(a->font_ide, info, strlen(info),
                    box_x + box_w - 12 - iw,
                    y + font_ascent(a->font_ide), a->fg_muted);
@@ -14014,10 +14114,11 @@ static void render_switcher(App* a)
             SDL_RenderFillRect(a->renderer, &r);
         }
         SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_ide, a->vault.items[vi].name,
-                       strlen(a->vault.items[vi].name),
-                       box_x + 16,
-                       row_text_baseline(a->font_ide, y, row_h), c);
+        font_draw_elided(a->font_ide, a->vault.items[vi].name,
+                         strlen(a->vault.items[vi].name),
+                         box_x + 16,
+                         row_text_baseline(a->font_ide, y, row_h),
+                         box_w - 32, c);
         y += row_h;
     }
 }
@@ -14312,18 +14413,24 @@ static void render_cmdp(App* a)
     int label_w = font_measure(a->font_ide, prompt, strlen(prompt));
     font_draw_line(a->font_ide, prompt, strlen(prompt),
                    box_x + 12, y + font_ascent(a->font_ide), a->fg_muted);
+    /* Query — left-truncated to the card's inner width so a long query
+     * can't run past the edge; the caret tracks the FITTED text. */
+    int qx = box_x + 12 + label_w;
+    int q_avail = box_x + box_w - 12 - qx;
+    char qfit[512];
+    path_fit_left(a->font_ide, a->cmdp_query, q_avail, qfit, sizeof qfit);
     if (a->cmdp_qlen > 0) {
-        font_draw_line(a->font_ide, a->cmdp_query, a->cmdp_qlen,
-                       box_x + 12 + label_w,
+        font_draw_line(a->font_ide, qfit, strlen(qfit),
+                       qx,
                        y + font_ascent(a->font_ide), a->fg);
     } else {
         const char* ph = "Run a command...";
         font_draw_line(a->font_ide, ph, strlen(ph),
-                       box_x + 12 + label_w,
+                       qx,
                        y + font_ascent(a->font_ide), a->fg_muted);
     }
-    int qw = font_measure(a->font_ide, a->cmdp_query, a->cmdp_qlen);
-    SDL_Rect cur = { box_x + 12 + label_w + qw, y, 2,
+    int qw = font_measure(a->font_ide, qfit, strlen(qfit));
+    SDL_Rect cur = { qx + qw, y, 2,
                      font_line_height(a->font_ide) };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
@@ -14980,8 +15087,9 @@ static void render_wiki_complete(App* a)
         char disp[256];
         size_t dn = wc_display_name(a->vault.items[vi].name, disp, sizeof disp);
         SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_line(a->font_ide, disp, dn,
-                       box_x + 10, y + font_ascent(a->font_ide) + 2, c);
+        font_draw_elided(a->font_ide, disp, dn,
+                         box_x + 10, y + font_ascent(a->font_ide) + 2,
+                         box_w - 20, c);
         y += row_h;
     }
 }
@@ -15426,30 +15534,8 @@ static void render_search_overlay(App* a)
     int icon_y  = input_y + (input_h - icon_sz) / 2;
     icon_draw(a->renderer, ICON_FIND, icon_x, icon_y, icon_sz, a->fg_muted);
 
-    /* Query text or placeholder. */
-    int text_x   = icon_x + icon_sz + 6;
-    int text_y   = input_y + (input_h - sz_y) / 2 + font_ascent(a->font_ide);
-    if (a->search_qlen > 0) {
-        font_draw_line(a->font_ide, a->search_query, a->search_qlen,
-                       text_x, text_y, a->fg);
-    } else {
-        const char* ph = "Search this note...";
-        font_draw_line(a->font_ide, ph, strlen(ph),
-                       text_x, text_y, a->fg_muted);
-    }
-    /* Caret in the find field — only when this field is focused, otherwise
-     * the user has no idea where their next keystroke will land. */
-    if (!a->search_focus_replace) {
-        size_t cur = a->search_qcursor;
-        if (cur > a->search_qlen) cur = a->search_qlen;
-        int cx = text_x + font_measure(a->font_ide, a->search_query, cur);
-        SDL_Rect caret = { cx, input_y + 4, 2, input_h - 8 };
-        SDL_SetRenderDrawColor(a->renderer,
-            a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
-        SDL_RenderFillRect(a->renderer, &caret);
-    }
-
-    /* Counter (or regex error) — right side INSIDE the pill. */
+    /* Counter (or regex error) — built before the query so the query clip
+     * can stop short of it. Drawn after, right side INSIDE the pill. */
     char info[96];
     if (a->search_regex && a->search_re_err[0])
         snprintf(info, sizeof info, "%s", a->search_re_err);
@@ -15460,8 +15546,45 @@ static void render_search_overlay(App* a)
         snprintf(info, sizeof info, "no match");
     else
         info[0] = 0;
+    int info_w = info[0] ? font_measure(a->font_ide, info, strlen(info)) : 0;
+
+    /* Query text or placeholder — clipped to the pill (stopping short of
+     * the counter) and scrolled so the caret stays visible when the query
+     * is wider than the pill. */
+    int text_x   = icon_x + icon_sz + 6;
+    int text_y   = input_y + (input_h - sz_y) / 2 + font_ascent(a->font_ide);
+    {
+        int clip_r = input_x + input_w - 10 - (info[0] ? info_w + 14 : 0);
+        SDL_Rect qclip = { text_x - 2, input_y + 1,
+                           clip_r - (text_x - 2), input_h - 2 };
+        if (qclip.w < 0) qclip.w = 0;
+        size_t cur = a->search_qcursor;
+        if (cur > a->search_qlen) cur = a->search_qlen;
+        int caret_w = font_measure(a->font_ide, a->search_query, cur);
+        int avail   = clip_r - text_x;
+        int off     = (caret_w > avail - 8) ? caret_w - (avail - 8) : 0;
+        SDL_RenderSetClipRect(a->renderer, &qclip);
+        if (a->search_qlen > 0) {
+            font_draw_line(a->font_ide, a->search_query, a->search_qlen,
+                           text_x - off, text_y, a->fg);
+        } else {
+            const char* ph = "Search this note...";
+            font_draw_line(a->font_ide, ph, strlen(ph),
+                           text_x, text_y, a->fg_muted);
+        }
+        /* Caret in the find field — only when this field is focused,
+         * otherwise the user has no idea where their next keystroke will
+         * land. */
+        if (!a->search_focus_replace) {
+            SDL_Rect caret = { text_x - off + caret_w, input_y + 4,
+                               2, input_h - 8 };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
+            SDL_RenderFillRect(a->renderer, &caret);
+        }
+        SDL_RenderSetClipRect(a->renderer, NULL);
+    }
     if (info[0]) {
-        int info_w = font_measure(a->font_ide, info, strlen(info));
         SDL_Color info_c = (a->search_regex && a->search_re_err[0])
                            ? (SDL_Color){230, 110, 110, 255} : a->fg_muted;
         font_draw_line(a->font_ide, info, strlen(info),
@@ -15522,29 +15645,41 @@ static void render_search_overlay(App* a)
                                 + font_ascent(a->font_ide),
                        a->fg_muted);
         int text_x2 = input_x + 12 + font_measure(a->font_ide, lab, strlen(lab)) + 8;
-        if (a->search_rlen > 0) {
-            font_draw_line(a->font_ide, a->search_replace, a->search_rlen,
-                           text_x2,
-                           input_y2 + (input_h - sz_y) / 2
-                                    + font_ascent(a->font_ide),
-                           a->fg);
-        } else {
-            const char* ph = "Replace with...";
-            font_draw_line(a->font_ide, ph, strlen(ph),
-                           text_x2,
-                           input_y2 + (input_h - sz_y) / 2
-                                    + font_ascent(a->font_ide),
-                           a->fg_muted);
-        }
-        if (a->search_focus_replace) {
+        /* Replace text — same clip + caret-scroll treatment as the find
+         * pill above so long replacements stay inside the pill. */
+        {
+            int clip_r2 = input_x + input_w - 10;
+            SDL_Rect rclip = { text_x2 - 2, input_y2 + 1,
+                               clip_r2 - (text_x2 - 2), input_h - 2 };
+            if (rclip.w < 0) rclip.w = 0;
             size_t cur = a->search_rcursor;
             if (cur > a->search_rlen) cur = a->search_rlen;
-            int cx = text_x2
-                + font_measure(a->font_ide, a->search_replace, cur);
-            SDL_Rect caret = { cx, input_y2 + 4, 2, input_h - 8 };
-            SDL_SetRenderDrawColor(a->renderer,
-                a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
-            SDL_RenderFillRect(a->renderer, &caret);
+            int caret_w = font_measure(a->font_ide, a->search_replace, cur);
+            int avail   = clip_r2 - text_x2;
+            int off     = (caret_w > avail - 8) ? caret_w - (avail - 8) : 0;
+            SDL_RenderSetClipRect(a->renderer, &rclip);
+            if (a->search_rlen > 0) {
+                font_draw_line(a->font_ide, a->search_replace, a->search_rlen,
+                               text_x2 - off,
+                               input_y2 + (input_h - sz_y) / 2
+                                        + font_ascent(a->font_ide),
+                               a->fg);
+            } else {
+                const char* ph = "Replace with...";
+                font_draw_line(a->font_ide, ph, strlen(ph),
+                               text_x2,
+                               input_y2 + (input_h - sz_y) / 2
+                                        + font_ascent(a->font_ide),
+                               a->fg_muted);
+            }
+            if (a->search_focus_replace) {
+                SDL_Rect caret = { text_x2 - off + caret_w, input_y2 + 4,
+                                   2, input_h - 8 };
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 230);
+                SDL_RenderFillRect(a->renderer, &caret);
+            }
+            SDL_RenderSetClipRect(a->renderer, NULL);
         }
 
         /* Replace / Replace All buttons. Pill-shaped, accent-filled. No
