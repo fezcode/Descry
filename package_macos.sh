@@ -3,7 +3,7 @@
 # Build a self-contained, double-clickable Descry.app on macOS — and optionally
 # a drag-to-Applications .dmg. The macOS counterpart of build_installer.ps1.
 #
-# It assembles build/Descry.app with:
+# It assembles dist/macos-arm64/Descry.app with:
 #   - the descry binary (Contents/MacOS/descry)
 #   - every linked dylib copied inside and re-pathed (Contents/Frameworks),
 #     via dylibbundler, so the app runs without Homebrew installed
@@ -64,7 +64,9 @@ fi
 [ -x build/descry ] || { echo "build/descry missing — run without --no-build." >&2; exit 1; }
 
 # --- assemble the .app skeleton ------------------------------------------
-app="build/Descry.app"
+# dist/ mirrors the Windows installer layout (and timp/tivi's bundle scripts).
+app="dist/macos-arm64/Descry.app"
+mkdir -p dist/macos-arm64
 echo "Assembling $app ..."
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"

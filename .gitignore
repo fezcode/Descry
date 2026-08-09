@@ -18,3 +18,4 @@ compile_commands.json
 # Per-vault runtime state (sidebar width, scroll position, etc.).
 .descry.state
 **/.descry.state
+/dist/
