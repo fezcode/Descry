@@ -34,11 +34,13 @@
   #include <unistd.h>
 #endif
 
-/* Absolute path of the single log file, resolved per-OS at startup. Shown to
- * the user in Settings ("Log file"). Defaults to a cwd-relative name as a
- * last resort if the per-user data dir can't be resolved. */
+/* Absolute paths of the per-user files, resolved per-OS at startup. The log is
+ * shown to the user in Settings ("Log file"). Each defaults to a cwd-relative
+ * name as a last resort if the per-user data dir can't be resolved. */
 static char g_log_path[1024]      = "descry.log";
 static char g_settings_path[1024] = "settings.lua";
+static char g_recent_path[1024]   = "data/.recent";
+static char g_dict_path[1024]     = "data/.dictionary_user";
 
 /* Create `path` and any missing parent directories. Slashes may be '/' or
  * '\\'. Best-effort: silently ignores already-exists. */
@@ -62,44 +64,50 @@ static void mkdir_p(const char* path)
     }
 }
 
-/* Resolve the per-OS, per-user location for descry.log into g_log_path and
- * make sure its directory exists:
- *   Windows : %LOCALAPPDATA%\Descry\descry.log
- *   macOS   : ~/Library/Logs/Descry/descry.log
- *   Linux   : $XDG_STATE_HOME/descry/descry.log (else ~/.local/state/...)
- * Falls back to the cwd-relative default if the environment is bare. */
-static void resolve_log_path(void)
+/* Resolve the per-OS, per-user data directory and every file inside it, then
+ * make sure the directory exists. One Fezcode-owned tree, shared with the rest
+ * of the suite:
+ *   Windows : %APPDATA%\fezcode\Descry\
+ *   macOS   : ~/Library/Application Support/fezcode/Descry/
+ *   Linux   : $XDG_CONFIG_HOME/fezcode/descry/ (else ~/.config/fezcode/descry/)
+ * Holds descry.log, settings.lua, .recent and .dictionary_user. The last two
+ * used to be written cwd-relative into the install directory, where a
+ * non-elevated user could not create them at all.
+ * Falls back to the cwd-relative defaults if the environment is bare. */
+static void resolve_data_paths(void)
 {
     char dir[1024] = {0};
 #if defined(_WIN32)
-    const char* base = getenv("LOCALAPPDATA");
-    if (!base || !base[0]) base = getenv("APPDATA");
+    const char* base = getenv("APPDATA");
+    if (!base || !base[0]) base = getenv("LOCALAPPDATA");
     if (!base || !base[0]) base = getenv("TEMP");
-    if (base && base[0]) snprintf(dir, sizeof dir, "%s\\Descry", base);
+    if (base && base[0]) snprintf(dir, sizeof dir, "%s\\fezcode\\Descry", base);
 #elif defined(__APPLE__)
     const char* home = getenv("HOME");
-    if (home && home[0]) snprintf(dir, sizeof dir, "%s/Library/Logs/Descry", home);
+    if (home && home[0])
+        snprintf(dir, sizeof dir,
+                 "%s/Library/Application Support/fezcode/Descry", home);
 #else
-    const char* xdg  = getenv("XDG_STATE_HOME");
+    const char* xdg  = getenv("XDG_CONFIG_HOME");
     const char* home = getenv("HOME");
-    if (xdg && xdg[0])        snprintf(dir, sizeof dir, "%s/descry", xdg);
-    else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.local/state/descry", home);
+    if (xdg && xdg[0])        snprintf(dir, sizeof dir, "%s/fezcode/descry", xdg);
+    else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.config/fezcode/descry", home);
 #endif
     if (dir[0]) {
-        mkdir_p(dir);
+        mkdir_p(dir);   /* creates the fezcode parent too */
 #if defined(_WIN32)
-        snprintf(g_log_path, sizeof g_log_path, "%s\\descry.log", dir);
-        snprintf(g_settings_path, sizeof g_settings_path,
-                 "%s\\settings.lua", dir);
+        const char* sep = "\\";
 #else
-        snprintf(g_log_path, sizeof g_log_path, "%s/descry.log", dir);
-        snprintf(g_settings_path, sizeof g_settings_path,
-                 "%s/settings.lua", dir);
+        const char* sep = "/";
 #endif
+        snprintf(g_log_path,      sizeof g_log_path,      "%s%sdescry.log",       dir, sep);
+        snprintf(g_settings_path, sizeof g_settings_path, "%s%ssettings.lua",     dir, sep);
+        snprintf(g_recent_path,   sizeof g_recent_path,   "%s%s.recent",          dir, sep);
+        snprintf(g_dict_path,     sizeof g_dict_path,     "%s%s.dictionary_user", dir, sep);
     }
 }
 
-#define DESCRY_VERSION "0.80.1"
+#define DESCRY_VERSION "0.80.2"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1008,7 +1016,7 @@ static void recent_push(App* a, const char* path)
 
 static void recent_save(App* a)
 {
-    FILE* f = fopen("data/.recent", "wb");
+    FILE* f = fopen(g_recent_path, "wb");
     if (!f) return;
     for (int i = 0; i < a->recent_count; ++i)
         fprintf(f, "%s\n", a->recent_paths[i]);
@@ -1017,7 +1025,7 @@ static void recent_save(App* a)
 
 static void recent_load(App* a)
 {
-    FILE* f = fopen("data/.recent", "rb");
+    FILE* f = fopen(g_recent_path, "rb");
     if (!f) return;
     char line[1024];
     while (fgets(line, sizeof line, f)) {
@@ -3644,7 +3652,7 @@ static int app_init(App* a, const char* note_path_arg)
     lua_host_on_dialog(on_lua_dialog, a);
 
     /* Settings live in ONE file in the per-OS app-data dir (same place as
-     * the log — see resolve_log_path): settings.lua. On first run (file
+     * the log — see resolve_data_paths): settings.lua. On first run (file
      * missing) we write a defaults stub WITHOUT vault_path — the user picks
      * the vault below and we save it back. Plugins still live in a `plugins/`
      * folder next to the exe by default; point elsewhere via plugin_path. */
@@ -3706,7 +3714,7 @@ static int app_init(App* a, const char* note_path_arg)
     /* Spell check (opt-in). When `spellcheck = true`, load a dictionary from
      * `dictionary_path`, else a sensible search: the bundled data/dictionary.txt
      * then a system word list (present on most macOS/Linux installs). User
-     * additions accumulate in data/.dictionary_user. The feature stays inert
+     * additions accumulate in .dictionary_user in the per-user data dir. The feature stays inert
      * if nothing loads, so it never produces noise without a dictionary. */
     spell_init(&a->spell);
     if (lua_host_cfg_number(a->lua, "spellcheck", 0) != 0) {
@@ -3717,7 +3725,7 @@ static int app_init(App* a, const char* note_path_arg)
         if (loaded < 0)  loaded = spell_load_file(&a->spell, "/usr/share/dict/words");
         if (loaded < 0)  loaded = spell_load_file(&a->spell,
                                           "/usr/share/dict/american-english");
-        spell_load_file(&a->spell, "data/.dictionary_user");   /* user words */
+        spell_load_file(&a->spell, g_dict_path);               /* user words */
         a->spellcheck_on = spell_ready(&a->spell);
         fprintf(stderr, a->spellcheck_on
                 ? "spellcheck: on (%zu words)\n"
@@ -13104,8 +13112,8 @@ static void action_toggle_spellcheck(App* a)
     notify_now(a, a->spellcheck_on ? "Spell check: on" : "Spell check: off", 2200);
 }
 
-/* Add the word under the cursor to the personal dictionary (data/.dictionary_
- * user) and the live set, so its underline clears immediately. */
+/* Add the word under the cursor to the personal dictionary (.dictionary_user
+ * in the per-user data dir) and the live set, so its underline clears immediately. */
 static void action_add_word_to_dict(App* a)
 {
     Buffer* b = &a->buf;
@@ -13120,7 +13128,7 @@ static void action_add_word_to_dict(App* a)
     if (e <= s) { notify_now(a, "No word under the cursor", 2000); return; }
 
     spell_add(&a->spell, b->data + s, e - s);
-    FILE* f = fopen("data/.dictionary_user", "ab");
+    FILE* f = fopen(g_dict_path, "ab");
     if (f) { fwrite(b->data + s, 1, e - s, f); fputc('\n', f); fclose(f); }
 
     char msg[160];
@@ -18822,9 +18830,9 @@ int main(int argc, char** argv)
 {
     /* Windows GUI-subsystem apps have no stderr — pipe it to a log file so
      * fprintf(stderr,...) diagnostics survive. ONE file in the per-user data
-     * dir (see resolve_log_path), never scattered across launch folders.
+     * dir (see resolve_data_paths), never scattered across launch folders.
      * Unbuffered so each line hits disk even on a hard kill. */
-    resolve_log_path();
+    resolve_data_paths();
     if (!freopen(g_log_path, "w", stderr)) { /* nowhere to report */ }
     setvbuf(stderr, NULL, _IONBF, 0);
     fprintf(stderr, "descry: log opened at %s\n", g_log_path);

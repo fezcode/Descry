@@ -554,8 +554,8 @@ typedef struct {
     }        fm_chip_hits[16];
     int      fm_chip_count;
 
-    /* MRU list of recently opened files (max 10). Persisted to
-     * data/.recent. Updated each time load_note succeeds. The switcher
+    /* MRU list of recently opened files (max 10). Persisted to .recent in the
+     * per-user data dir. Updated each time load_note succeeds. The switcher
      * (Ctrl+P) shows these first when its query is empty. */
     char*    recent_paths[10];
     int      recent_count;
