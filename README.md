@@ -183,7 +183,7 @@ afterwards.
 - **Reveal in Finder** uses `open -R`; external links and the log
   folder open via `open`.
 - File dialogs use AppleScript (`osascript`); logs and settings live
-  under `~/Library/Logs/Descry/`.
+  under `~/Library/Application Support/fezcode/Descry/`.
 
 ---
 
