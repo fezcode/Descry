@@ -50,6 +50,7 @@ static char g_log_path[1024]      = "descry.log";
 static char g_settings_path[1024] = "settings.lua";
 static char g_recent_path[1024]   = "data/.recent";
 static char g_dict_path[1024]     = "data/.dictionary_user";
+static char g_state_path[1024]    = "data/.state";
 
 /* Create `path` and any missing parent directories. Slashes may be '/' or
  * '\\'. Best-effort: silently ignores already-exists. */
@@ -79,9 +80,11 @@ static void mkdir_p(const char* path)
  *   Windows : %APPDATA%\fezcode\Descry\
  *   macOS   : ~/Library/Application Support/fezcode/Descry/
  *   Linux   : $XDG_CONFIG_HOME/fezcode/descry/ (else ~/.config/fezcode/descry/)
- * Holds descry.log, settings.lua, .recent and .dictionary_user. The last two
- * used to be written cwd-relative into the install directory, where a
- * non-elevated user could not create them at all.
+ * Holds descry.log, settings.lua, .recent, .dictionary_user and .state (the
+ * per-vault UI state: collapsed folders, sidebar width, open tabs). The
+ * middle two used to be written cwd-relative into the install directory,
+ * where a non-elevated user could not create them at all; .state used to be
+ * a `.descry.state` sidecar dropped into every vault.
  * Falls back to the cwd-relative defaults if the environment is bare. */
 static void resolve_data_paths(void)
 {
@@ -113,10 +116,11 @@ static void resolve_data_paths(void)
         snprintf(g_settings_path, sizeof g_settings_path, "%s%ssettings.lua",     dir, sep);
         snprintf(g_recent_path,   sizeof g_recent_path,   "%s%s.recent",          dir, sep);
         snprintf(g_dict_path,     sizeof g_dict_path,     "%s%s.dictionary_user", dir, sep);
+        snprintf(g_state_path,    sizeof g_state_path,    "%s%s.state",           dir, sep);
     }
 }
 
-#define DESCRY_VERSION "0.82.0"
+#define DESCRY_VERSION "0.82.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -809,9 +813,11 @@ static int app_reload_fonts(App* a)
         return -1;
     }
     /* Helper: add a fallback font to every face in the chain. Skips silently
-     * if the file doesn't exist (font.c logs to stderr internally). */
+     * if the file doesn't exist — the system lists below are best-effort and
+     * a missing face would otherwise log a failure 12 times per boot. */
     #define ADD_FB(path_)                                                   \
         do {                                                                \
+            if (!file_exists(path_)) break;                                 \
             font_add_fallback(a->font_ide,               (path_));          \
             font_add_fallback(a->font_body,              (path_));          \
             font_add_fallback(a->font_body_bold,         (path_));          \
@@ -841,16 +847,24 @@ static int app_reload_fonts(App* a)
      * monochrome. */
 #if defined(_WIN32)
     /* Modern Windows ships these in C:/Windows/Fonts. */
+    ADD_FB("C:/Windows/Fonts/segoeui.ttf");       /* Segoe UI: Latin ext, Greek, Cyrillic, Arabic, Hebrew */
     ADD_FB("C:/Windows/Fonts/seguisym.ttf");      /* Segoe UI Symbol */
-    ADD_FB("C:/Windows/Fonts/YuGothM.ttc");       /* Yu Gothic Medium (CJK) */
-    ADD_FB("C:/Windows/Fonts/msyh.ttc");          /* Microsoft YaHei (CJK) */
+    ADD_FB("C:/Windows/Fonts/YuGothM.ttc");       /* Yu Gothic Medium (Japanese) */
+    ADD_FB("C:/Windows/Fonts/msyh.ttc");          /* Microsoft YaHei (Chinese) */
+    ADD_FB("C:/Windows/Fonts/malgun.ttf");        /* Malgun Gothic (Korean) */
+    ADD_FB("C:/Windows/Fonts/Nirmala.ttc");       /* Nirmala UI (Indic) */
     ADD_FB("C:/Windows/Fonts/seguiemj.ttf");      /* Segoe UI Emoji (color) */
 #elif defined(__APPLE__)
+    ADD_FB("/System/Library/Fonts/Helvetica.ttc");            /* Latin ext, Greek, Cyrillic */
     ADD_FB("/System/Library/Fonts/Apple Symbols.ttf");
-    ADD_FB("/System/Library/Fonts/PingFang.ttc");
+    ADD_FB("/System/Library/Fonts/PingFang.ttc");             /* Chinese */
+    ADD_FB("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"); /* Hiragino Sans (Japanese) */
+    ADD_FB("/System/Library/Fonts/AppleSDGothicNeo.ttc");     /* Korean */
+    ADD_FB("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"); /* broad catch-all */
     ADD_FB("/System/Library/Fonts/Apple Color Emoji.ttc");
 #else
     ADD_FB("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    ADD_FB("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
     ADD_FB("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
     ADD_FB("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf");
 #endif
@@ -3864,6 +3878,92 @@ static bool app_dir_modal(App* a, const char* title, const char* start_dir,
     return ok;
 }
 
+/* ---------- per-vault UI state (.state in the app-data dir) ------------- */
+
+/* Compare two vault paths ignoring slash style, a trailing slash and (on
+ * Windows) case, so a section written from a picker path still matches the
+ * same vault typed by hand. */
+static bool vault_path_eq(const char* a, const char* b)
+{
+    if (!a || !b) return false;
+    char na[1024], nb[1024];
+    snprintf(na, sizeof na, "%s", a);
+    snprintf(nb, sizeof nb, "%s", b);
+    path_to_forward(na);
+    path_to_forward(nb);
+    size_t la = strlen(na), lb = strlen(nb);
+    while (la > 1 && na[la - 1] == '/') na[--la] = 0;
+    while (lb > 1 && nb[lb - 1] == '/') nb[--lb] = 0;
+#if defined(_WIN32)
+    return _stricmp(na, nb) == 0;
+#else
+    return strcmp(na, nb) == 0;
+#endif
+}
+
+static void blob_append(char** buf, size_t* len, size_t* cap, const char* s)
+{
+    size_t n = strlen(s);
+    if (*len + n + 2 > *cap) {
+        *cap = (*len + n + 2) * 2;
+        *buf = realloc(*buf, *cap);
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[(*len)++] = '\n';
+    (*buf)[*len] = 0;
+}
+
+/* The per-vault UI state (collapsed folders, sidebar width, open tabs) lives
+ * in ONE file in the app-data dir — `.state`, next to settings.lua — as a
+ * sequence of `@vault=PATH` sections, most recently saved first. Earlier
+ * builds dropped a `.descry.state` sidecar into every vault instead; a
+ * vault's sidecar is imported the first time that vault is opened and then
+ * deleted so the notes folder stays clean.
+ *
+ * Returns the section body for `vault_dir` as a malloc'd blob of '\n'-
+ * terminated lines (no @vault header), or NULL when nothing is stored. */
+static char* state_load_section(const char* vault_dir)
+{
+    char*  out = NULL; size_t len = 0, cap = 0;
+    char   line[1024];
+    FILE*  fp = fopen(g_state_path, "rb");
+    if (fp) {
+        bool in_section = false;
+        while (fgets(line, sizeof line, fp)) {
+            size_t n = strlen(line);
+            while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
+                line[--n] = 0;
+            if (strncmp(line, "@vault=", 7) == 0) {
+                in_section = vault_path_eq(line + 7, vault_dir);
+                continue;
+            }
+            if (!in_section || n == 0) continue;
+            blob_append(&out, &len, &cap, line);
+        }
+        fclose(fp);
+    }
+    if (!out) {
+        char legacy[1024];
+        snprintf(legacy, sizeof legacy, "%s/.descry.state", vault_dir);
+        fp = fopen(legacy, "rb");
+        if (fp) {
+            while (fgets(line, sizeof line, fp)) {
+                size_t n = strlen(line);
+                while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
+                    line[--n] = 0;
+                if (n == 0) continue;
+                blob_append(&out, &len, &cap, line);
+            }
+            fclose(fp);
+            if (remove(legacy) == 0)
+                fprintf(stderr, "descry: imported and removed legacy %s\n",
+                        legacy);
+        }
+    }
+    return out;
+}
+
 /* HiDPI plumbing. The SDL renderer's drawable (device pixels) can exceed the
  * window size in points — 2x on a Retina display. We keep ALL layout in
  * logical points (a->win_w/h stay point-sized) and let SDL_RenderSetLogicalSize
@@ -3880,6 +3980,14 @@ static void sync_renderer_logical_size(App* a)
     int dw = 0, dh = 0, ww = 0, wh = 0;
     SDL_GetRendererOutputSize(a->renderer, &dw, &dh);  /* device pixels  */
     SDL_GetWindowSize(a->window, &ww, &wh);            /* logical points */
+    /* Debug aid: DESCRY_HIDPI_SCALE=2 fakes a Retina drawable on a 1x
+     * display (the window's pixels are treated as 2x the logical size) so
+     * HiDPI text/layout bugs can be reproduced and screenshotted on Windows. */
+    {
+        const char* fake = getenv("DESCRY_HIDPI_SCALE");
+        double fk = fake ? atof(fake) : 0.0;
+        if (fk > 1.0) { ww = (int)(dw / fk); wh = (int)(dh / fk); }
+    }
     if (ww <= 0 || wh <= 0) return;
     a->win_w = ww;
     a->win_h = wh;
@@ -4335,7 +4443,7 @@ static int app_init(App* a, const char* note_path_arg)
      * the user's most-recent docs even if the start path is the default. */
     recent_load(a);
 
-    /* Note opening is deferred until after the .descry.state read below, so a
+    /* Note opening is deferred until after the state-file read below, so a
      * saved tab session can be restored first. See "Open the session". */
     /* Optional: open the settings / keybindings page on launch. Useful for
      * first-run UX and as a debug aid since SDL doesn't always receive
@@ -4355,48 +4463,46 @@ static int app_init(App* a, const char* note_path_arg)
     a->cur_kind  = 0;
 
     /* Restore folder-collapse state, sidebar width, and the open-tab session
-     * from a sidecar state file in the vault. `@`-prefixed lines are app-state
-     * directives (@sidebar_w, @tab, @active); other lines are collapsed-dir
-     * paths. Tab paths are collected here and opened after this block. */
+     * from this vault's section of the app-data state file (see
+     * state_load_section). `@`-prefixed lines are app-state directives
+     * (@sidebar_w, @tab, @active); other lines are collapsed-dir paths. Tab
+     * paths are collected here and opened after this block. */
     char restore_paths[64][1024];
     int  restore_count  = 0;
     int  restore_active = -1;
-    {
-        char st[1024];
-        snprintf(st, sizeof st, "%s/.descry.state", vault_path);
-        FILE* fp = fopen(st, "rb");
-        if (fp) {
-            char line[1024];
-            while (fgets(line, sizeof line, fp)) {
-                size_t n = strlen(line);
-                while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
-                    line[--n] = 0;
-                if (n == 0) continue;
-                char tabp[1024]; int act = -1;
-                int kind = tabs_parse_state_line(line, tabp, sizeof tabp, &act);
-                if (kind == 1) {
-                    if (restore_count < 64)
-                        snprintf(restore_paths[restore_count++], 1024, "%s", tabp);
-                    continue;
+    if (a->vault.dir) {
+        char* blob = state_load_section(a->vault.dir);
+        char* cur  = blob;
+        while (cur && *cur) {
+            char* line = cur;
+            char* nl   = strchr(cur, '\n');
+            if (nl) *nl = 0;
+            cur = nl ? nl + 1 : NULL;
+            if (!line[0]) continue;
+            char tabp[1024]; int act = -1;
+            int kind = tabs_parse_state_line(line, tabp, sizeof tabp, &act);
+            if (kind == 1) {
+                if (restore_count < 64)
+                    snprintf(restore_paths[restore_count++], 1024, "%s", tabp);
+                continue;
+            }
+            if (kind == 2) { restore_active = act; continue; }
+            if (line[0] == '@') {
+                if (strncmp(line, "@sidebar_w=", 11) == 0) {
+                    int w = atoi(line + 11);
+                    if (w >= 120 && w <= win_w / 2) a->sidebar_w = w;
                 }
-                if (kind == 2) { restore_active = act; continue; }
-                if (line[0] == '@') {
-                    if (strncmp(line, "@sidebar_w=", 11) == 0) {
-                        int w = atoi(line + 11);
-                        if (w >= 120 && w <= win_w / 2) a->sidebar_w = w;
-                    }
-                    continue;
-                }
-                for (size_t i = 0; i < a->vault.count; ++i) {
-                    if (a->vault.items[i].is_dir &&
-                        strcmp(a->vault.items[i].path, line) == 0) {
-                        a->vault.items[i].collapsed = 1;
-                        break;
-                    }
+                continue;
+            }
+            for (size_t i = 0; i < a->vault.count; ++i) {
+                if (a->vault.items[i].is_dir &&
+                    strcmp(a->vault.items[i].path, line) == 0) {
+                    a->vault.items[i].collapsed = 1;
+                    break;
                 }
             }
-            fclose(fp);
         }
+        free(blob);
     }
 
     /* Open the session: a CLI note arg overrides; otherwise restore the saved
@@ -4440,10 +4546,29 @@ static int app_init(App* a, const char* note_path_arg)
 static void save_collapse_state(App* a)
 {
     if (!a->vault.dir) return;
-    char st[1024];
-    snprintf(st, sizeof st, "%s/.descry.state", a->vault.dir);
-    FILE* fp = fopen(st, "wb");
-    if (!fp) return;
+    /* Keep every OTHER vault's section: read them out of the old file (cap
+     * at 32 vaults so the file can't grow without bound), then rewrite the
+     * file with this vault's section first. Anything before the first
+     * @vault header is stray and dropped. */
+    char*  others = NULL; size_t olen = 0, ocap = 0;
+    FILE*  fp = fopen(g_state_path, "rb");
+    if (fp) {
+        char line[1024];
+        bool skip = true;
+        int  sections = 0;
+        while (fgets(line, sizeof line, fp)) {
+            size_t n = strlen(line);
+            while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
+                line[--n] = 0;
+            if (strncmp(line, "@vault=", 7) == 0)
+                skip = vault_path_eq(line + 7, a->vault.dir) || ++sections >= 32;
+            if (!skip && n > 0) blob_append(&others, &olen, &ocap, line);
+        }
+        fclose(fp);
+    }
+    fp = fopen(g_state_path, "wb");
+    if (!fp) { free(others); return; }
+    fprintf(fp, "@vault=%s\n", a->vault.dir);
     fprintf(fp, "@sidebar_w=%d\n", a->sidebar_w);
     /* Open-tab session. The active tab's path is live in a->note_path; other
      * tabs hold theirs in their slot — no parking needed since we only read. */
@@ -4457,7 +4582,9 @@ static void save_collapse_state(App* a)
         if (a->vault.items[i].is_dir && a->vault.items[i].collapsed)
             fprintf(fp, "%s\n", a->vault.items[i].path);
     }
+    if (others) fputs(others, fp);
     fclose(fp);
+    free(others);
 }
 
 /* Forward decl — persist_vault_path is a tiny wrapper around the
@@ -11707,7 +11834,13 @@ static void outline_collect(App* a)
         o->level   = level;
         size_t text_off = (size_t)level + 1;
         size_t tlen = (llen > text_off) ? (llen - text_off) : 0;
-        if (tlen > sizeof o->text - 1) tlen = sizeof o->text - 1;
+        if (tlen > sizeof o->text - 1) {
+            tlen = sizeof o->text - 1;
+            /* Back up to a codepoint boundary so the cap never splits a
+             * multi-byte character. */
+            while (tlen > 0 &&
+                   ((unsigned char)s[text_off + tlen] & 0xC0) == 0x80) tlen--;
+        }
         memcpy(o->text, s + text_off, tlen);
         o->text[tlen] = 0;
         if (tlen > 0 && o->text[tlen - 1] == '\r') o->text[tlen - 1] = 0;
@@ -12000,17 +12133,14 @@ static void render_outline_panel(App* a)
         SDL_Color tc = sel        ? a->fg
                      : (o->level == 1) ? a->fg
                                        : a->fg_muted;
-        /* Truncate text to fit. Brutal byte-wise truncation; good enough
-         * for ASCII headings. */
-        const char* text = o->text;
-        size_t tlen = strlen(text);
+        /* Elide to fit on a codepoint boundary. The old byte-wise cut could
+         * land inside a multi-byte character (emoji, accented letters) and
+         * left U+FFFD junk at the end of the row. */
         int avail_w = pw - 16 - indent - 8;
         if (avail_w < 30) avail_w = 30;
-        while (tlen > 0 &&
-               font_measure(a->font_ide, text, tlen) > avail_w) tlen--;
-        font_draw_line(a->font_ide, text, tlen,
-                       px + 12 + indent, y + font_ascent(a->font_ide) + 2,
-                       tc);
+        font_draw_elided(a->font_ide, o->text, strlen(o->text),
+                         px + 12 + indent, y + font_ascent(a->font_ide) + 2,
+                         avail_w, tc);
     }
 
     if (a->outline_count == 0) {

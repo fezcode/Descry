@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Application manifest, embedded via descry.rc.
+
+     activeCodePage=UTF-8 makes every narrow-string Win32 / C-runtime call
+     (fopen, opendir/readdir, stat, CreateDirectoryA, the file dialogs, argv)
+     speak UTF-8 instead of the legacy ANSI code page. Without it, vault
+     folders and notes with non-ASCII names (Türkçe, 日本語, …) came back
+     from readdir as code-page bytes — rendered as tofu in the sidebar — and
+     fopen could not open them at all. Needs Windows 10 1903+. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="fezcode.Descry" version="1.0.0.0"/>
+  <application>
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>

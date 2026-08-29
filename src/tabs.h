@@ -55,7 +55,7 @@ void tab_load(Tab* slot, char** out_path, Buffer* out_buf,
  * The returned index is already adjusted for the post-removal array. */
 int  tablist_remove(TabList* t, int i);
 
-/* Parse one .descry.state line.
+/* Parse one line of a vault section in the app-data state file (.state).
  *   "@tab=PATH"  -> copies PATH into out_path (cap bytes), returns 1
  *   "@active=N"  -> sets *out_active = N, returns 2
  *   anything else -> returns 0
