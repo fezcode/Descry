@@ -64,6 +64,9 @@ preview rendering, plugin host — without the Electron tax.
   snap, drag-to-move, min/maximize/close, working under
   `SDL_WINDOW_BORDERLESS` via a WS_THICKFRAME + WM_NCCALCSIZE
   trick.
+- **Hisashi menubar** (Windows) — opt-in in Settings; File/Edit/View/Help
+  move into [Hisashi](https://github.com/fezcode/hisashi)'s macOS-style
+  menubar and the in-app strip hides while connected.
 - **Live resize indicator** — a centered `W x H` badge plus a window
   outline render while the user drags an edge. The resize loop pumps
   through an SDL event watch so the indicator animates during the
