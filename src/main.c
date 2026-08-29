@@ -35,6 +35,14 @@
   #include <unistd.h>
 #endif
 
+#ifdef _WIN32
+  /* Hisashi OS Window Layer client — vendored verbatim from
+   * Hisashi/sdk/hoswl/hoswl.h (never edit the copy; fix upstream and
+   * re-copy). This is the one TU that carries the implementation. */
+  #define HOSWL_IMPLEMENTATION
+  #include "hoswl.h"
+#endif
+
 /* Absolute paths of the per-user files, resolved per-OS at startup. The log is
  * shown to the user in Settings ("Log file"). Each defaults to a cwd-relative
  * name as a last resort if the per-user data dir can't be resolved. */
@@ -130,11 +138,16 @@ static void native_menu_refresh_recents(const App* a);
 static void native_menu_flush(App* a);
 #endif
 #if defined(_WIN32)
-/* Forward decl: Hisashi menubar (hoswl) — settings_adjust flips the
- * protocol's "enable" flag live; the block itself lives with the menu code. */
+/* Forward decls: the Hisashi menubar (hoswl) block is built from the same
+ * title-bar tables and lives next to the macOS one, but settings_adjust and
+ * menu_strip_visible reference it much earlier. */
+static void hoswl_menu_flush(App* a);
 static void hoswl_menu_set_enabled(App* a);
-/* TEMP stub until the hoswl_menu_* block lands. */
-static void hoswl_menu_set_enabled(App* a) { (void)a; }
+static void hoswl_menu_publish(App* a);
+static bool hoswl_menus_live(const App* a);
+/* The client itself lives up here because app_shutdown (also early) sends
+ * the "bye" through it; everything else about it is in the block. */
+static hoswl_t g_hoswl;
 #endif
 
 /* True if the current theme has a light background (used so overlays can
@@ -4569,6 +4582,11 @@ static void app_run_close_animation(App* a)
 
 static void app_shutdown(App* a)
 {
+#if defined(_WIN32)
+    /* Tell Hisashi we're leaving ("bye") before anything visible happens,
+     * so its menubar drops our menus in step with the window fading. */
+    if (g_hoswl.inited) hoswl_shutdown(&g_hoswl);
+#endif
     /* Goodbye animation runs FIRST so the user sees the window fade
      * before we tear down state. settings_persist below uses the live
      * config, but the animation only reads cfg_close_anim + the
@@ -6839,11 +6857,14 @@ static int titlebar_button_at(const App* a, int mx, int my)
 }
 
 /* Whether the in-app File/Edit/View/Help strip is drawn. On macOS it gives
- * way to the system menu bar unless the user turns that off. */
+ * way to the system menu bar unless the user turns that off; on Windows it
+ * gives way to Hisashi's menubar while we're connected and publishing. */
 static bool menu_strip_visible(const App* a)
 {
 #if defined(__APPLE__)
     return !a->cfg_native_menubar;
+#elif defined(_WIN32)
+    return !hoswl_menus_live(a);
 #else
     (void)a;
     return true;
@@ -9021,6 +9042,143 @@ static void native_menu_flush(App* a)
     if (fn) fn(a);
 }
 #endif  /* __APPLE__ */
+
+#if defined(_WIN32)
+/* ------------------- Hisashi OS Window Layer (hoswl) --------------------
+ * Windows twin of the macOS native menu bar above: the same MENU_TABLES are
+ * published to Hisashi's menubar over a named pipe (see src/hoswl.h and
+ * Hisashi/docs/hoswl-protocol.md). Ids are positional — "m<menu>.<row>" and
+ * "recent.<i>" — so dispatch reuses the exact function pointers the in-app
+ * dropdown calls. Clicks arrive on hoswl_poll() in the main loop, never from
+ * inside a callback, so actions that pump their own modal loop are safe. */
+
+static uint32_t g_hoswl_fingerprint;    /* g_hoswl is declared near the top */
+
+static bool hoswl_menus_live(const App* a)
+{
+    return a->cfg_hoswl && a->cfg_hoswl_menus && hoswl_connected(&g_hoswl);
+}
+
+/* Which rows carry a checkmark in Hisashi, keyed by the row's action:
+ * 1 checked, 0 checkable-but-off, -1 plain. */
+static int hoswl_row_check(const App* a, int m, int r)
+{
+    void (*fn)(App*) = MENU_TABLES[m][r].fn;
+    if (fn == action_toggle_edit)       return a->edit_mode      ? 1 : 0;
+    if (fn == action_toggle_sidebar)    return a->sidebar_open   ? 1 : 0;
+    if (fn == action_toggle_wrap)       return a->cfg_edit_wrap  ? 1 : 0;
+    if (fn == action_toggle_split)      return a->split_preview  ? 1 : 0;
+    if (fn == action_outline_pin)       return a->outline_pinned ? 1 : 0;
+    if (fn == action_toggle_spellcheck) return a->spellcheck_on  ? 1 : 0;
+    return -1;
+}
+
+/* FNV-1a over everything that changes the published menu: the checkmarks
+ * and the recent-vaults list. Cheap enough to run every frame; a change
+ * republishes the whole menu (~2 KB) rather than bookkeeping patches. */
+static uint32_t hoswl_menu_fingerprint(const App* a)
+{
+    uint32_t h = 2166136261u;
+    #define HOSWL_FNV(b) (h = (h ^ (uint32_t)(b)) * 16777619u)
+    for (int m = 0; m < 4; ++m)
+        for (int r = 0; r < menu_count_static(m); ++r) HOSWL_FNV(hoswl_row_check(a, m, r) + 2);
+    int n = app_recent_dirs_count();
+    HOSWL_FNV(n);
+    for (int i = 0; i < n; ++i)
+        for (const char* p = app_recent_dir_at(i); p && *p; ++p) HOSWL_FNV((unsigned char)*p);
+    #undef HOSWL_FNV
+    return h;
+}
+
+/* Labels pass through as UTF-8 (the "…" is fine); only '|' and newlines,
+ * the DSL's separators, are replaced. */
+static void hoswl_dsl_label(char* out, size_t cap, const char* s)
+{
+    size_t o = 0;
+    for (; *s && o + 1 < cap; ++s) out[o++] = (*s == '|' || *s == '\n' || *s == '\r') ? ' ' : *s;
+    out[o] = 0;
+}
+
+static void hoswl_menu_publish(App* a)
+{
+    static char text[HOSWL_MENU_MAX];
+    size_t o = 0;
+    #define HOSWL_PUT(...) do { \
+        int w_ = snprintf(text + o, sizeof text - o, __VA_ARGS__); \
+        if (w_ < 0 || (size_t)w_ >= sizeof text - o) { goto too_big; } \
+        o += (size_t)w_; \
+    } while (0)
+    for (int m = 0; m < 4; ++m) {
+        HOSWL_PUT("%s\n", MENU_LABELS[m]);
+        int n = menu_count_static(m);
+        for (int r = 0; r < n; ++r) {
+            char label[128];
+            hoswl_dsl_label(label, sizeof label, MENU_TABLES[m][r].label);
+            const char* key = MENU_TABLES[m][r].shortcut ? MENU_TABLES[m][r].shortcut : "";
+            int chk = hoswl_row_check(a, m, r);
+            HOSWL_PUT(" m%d.%d|%s|%s|%s\n", m, r, label, key, chk < 0 ? "" : (chk ? "x" : "c"));
+        }
+        if (m == 0 && app_recent_dirs_count() > 0) {
+            HOSWL_PUT(" -\n recent|Recent vaults|>\n");
+            for (int i = 0; i < app_recent_dirs_count(); ++i) {
+                char label[512];    /* App.recent_dirs rows are 512 wide */
+                hoswl_dsl_label(label, sizeof label, app_recent_dir_at(i));
+                HOSWL_PUT("  recent.%d|%s\n", i, label);
+            }
+        }
+    }
+    #undef HOSWL_PUT
+    if (hoswl_set_menus(&g_hoswl, text) != 0)
+        fprintf(stderr, "hoswl: menu rejected: %s\n", g_hoswl.last_error);
+    return;
+too_big:
+    fprintf(stderr, "hoswl: menu text too large, not published\n");
+}
+
+/* Push the "Hisashi menubar" setting as the protocol's enable flag. A
+ * no-op until the client exists; hoswl_menu_flush sends it on init. */
+static void hoswl_menu_set_enabled(App* a)
+{
+    if (g_hoswl.inited) hoswl_set_enabled(&g_hoswl, a->cfg_hoswl_menus ? 1 : 0);
+}
+
+static void hoswl_menu_dispatch(App* a, const char* id)
+{
+    int m = 0, r = 0;
+    if (a->menu_open >= 0 || a->ctx_menu_active) ctx_menu_close(a);
+    if (sscanf(id, "recent.%d", &r) == 1) { submenu_invoke_row(a, r); return; }
+    if (sscanf(id, "m%d.%d", &m, &r) != 2) return;
+    if (m < 0 || m >= 4 || r < 0 || r >= menu_count_static(m)) return;
+    void (*fn)(App*) = MENU_TABLES[m][r].fn;
+    if (fn) fn(a);
+}
+
+/* Once per frame from main(): connect lazily, run any clicks Hisashi sent,
+ * republish when the fingerprint moved, and tear down when the setting is
+ * off. Never blocks — hoswl_poll retries a connect every 2 s at most. */
+static void hoswl_menu_flush(App* a)
+{
+    if (!a->cfg_hoswl) {
+        if (g_hoswl.inited) hoswl_shutdown(&g_hoswl);   /* sends "bye" if connected; inited = 0 */
+        g_hoswl_fingerprint = 0;
+        return;
+    }
+    if (!g_hoswl.inited) {
+        hoswl_init(&g_hoswl, "com.fezcode.descry", "Descry", DESCRY_VERSION);
+        hoswl_set_enabled(&g_hoswl, a->cfg_hoswl_menus ? 1 : 0);
+    }
+    bool was = hoswl_connected(&g_hoswl) != 0;
+    const char* id;
+    while ((id = hoswl_poll(&g_hoswl)) != NULL) hoswl_menu_dispatch(a, id);
+    uint32_t fp = hoswl_menu_fingerprint(a);
+    if (fp != g_hoswl_fingerprint || (!was && hoswl_connected(&g_hoswl))) {
+        g_hoswl_fingerprint = fp;
+        hoswl_menu_publish(a);
+    }
+    /* The strip just disappeared under an open dropdown: close it. */
+    if (hoswl_menus_live(a) && a->menu_open >= 0) { ctx_menu_close(a); a->menu_open = -1; a->menu_hover = -1; }
+}
+#endif  /* _WIN32 */
 
 /* Translate a screen y to the row index inside the menu, or -1 if outside. */
 static int ctx_menu_row_at(const App* a, int mx, int my)
@@ -19796,6 +19954,9 @@ int main(int argc, char** argv)
         fs_watch_poll(&app);  /* did anyone else rewrite the open file? */
 #if defined(__APPLE__)
         native_menu_flush(&app);   /* run anything picked from the menu bar */
+#endif
+#if defined(_WIN32)
+        hoswl_menu_flush(&app);    /* Hisashi menubar: connect, publish, dispatch clicks */
 #endif
         /* Fire the plugin "text_change" event when the document mutated this
          * frame. buf.seq bumps on every insert/delete/undo/redo; loads and
