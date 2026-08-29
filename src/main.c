@@ -129,6 +129,13 @@ static void native_menu_install(void);
 static void native_menu_refresh_recents(const App* a);
 static void native_menu_flush(App* a);
 #endif
+#if defined(_WIN32)
+/* Forward decl: Hisashi menubar (hoswl) — settings_adjust flips the
+ * protocol's "enable" flag live; the block itself lives with the menu code. */
+static void hoswl_menu_set_enabled(App* a);
+/* TEMP stub until the hoswl_menu_* block lands. */
+static void hoswl_menu_set_enabled(App* a) { (void)a; }
+#endif
 
 /* True if the current theme has a light background (used so overlays can
  * pick a contrasting box bg). */
@@ -4035,6 +4042,10 @@ static int app_init(App* a, const char* note_path_arg)
      * in-app one. */
     a->cfg_native_menubar =
         lua_host_cfg_number(a->lua, "native_menubar", 1) != 0;
+    /* Hisashi integration is opt-in (Windows); once on, publishing the
+     * menus to its bar is the default. */
+    a->cfg_hoswl       = lua_host_cfg_number(a->lua, "hoswl", 0) != 0;
+    a->cfg_hoswl_menus = lua_host_cfg_number(a->lua, "hoswl_menus", 1) != 0;
     /* Close animation: 0 off, 1 fade, 2 dissolve. Default = fade so the
      * goodbye feels intentional rather than a crash. */
     a->cfg_close_anim = (int)lua_host_cfg_number(a->lua, "close_anim", 1);
@@ -10154,6 +10165,10 @@ typedef enum {
 #if defined(__APPLE__)
     SET_NATIVE_MENU,    /* on/off: use the system menu bar, hide ours */
 #endif
+#if defined(_WIN32)
+    SET_HOSWL,          /* on/off: connect to the Hisashi OS Window Layer */
+    SET_HOSWL_MENUS,    /* on/off: publish our menus to Hisashi's menubar */
+#endif
     SET_CLOSE_ANIM,     /* off / fade — animation when the window closes */
     SET_SIDEBAR_W,
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
@@ -10190,6 +10205,10 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Word wrap (edit)",
 #if defined(__APPLE__)
     "macOS menu bar",
+#endif
+#if defined(_WIN32)
+    "Hisashi integration",
+    "Hisashi menubar",
 #endif
     "Close animation",
     "Sidebar width",
@@ -10255,6 +10274,10 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
             snprintf(out, cap, "%s",
                      a->cfg_native_menubar ? "On" : "Off");
             break;
+#endif
+#if defined(_WIN32)
+        case SET_HOSWL:       snprintf(out, cap, "%s", a->cfg_hoswl       ? "On" : "Off"); break;
+        case SET_HOSWL_MENUS: snprintf(out, cap, "%s", a->cfg_hoswl_menus ? "On" : "Off"); break;
 #endif
         case SET_CLOSE_ANIM:
             snprintf(out, cap, "%s",
@@ -10359,6 +10382,19 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             /* The system menu bar is populated either way; this only
              * decides whether the in-app strip is drawn as well. */
             a->cfg_native_menubar = !a->cfg_native_menubar;
+            a->menu_open  = -1;
+            a->menu_hover = -1;
+            break;
+        }
+#endif
+#if defined(_WIN32)
+        case SET_HOSWL: {
+            a->cfg_hoswl = !a->cfg_hoswl;      /* connect/disconnect happens in hoswl_menu_flush */
+            break;
+        }
+        case SET_HOSWL_MENUS: {
+            a->cfg_hoswl_menus = !a->cfg_hoswl_menus;
+            hoswl_menu_set_enabled(a);         /* sends "enable" immediately when connected */
             a->menu_open  = -1;
             a->menu_hover = -1;
             break;
@@ -10646,6 +10682,12 @@ static int settings_persist(App* a)
     fprintf(f, "    native_menubar = %s,\n",
             a->cfg_native_menubar ? "true" : "false");
 #endif
+#if defined(_WIN32)
+    fprintf(f, "    hoswl          = %s,\n",
+            a->cfg_hoswl ? "true" : "false");
+    fprintf(f, "    hoswl_menus    = %s,\n",
+            a->cfg_hoswl_menus ? "true" : "false");
+#endif
     fprintf(f, "    split_preview  = %s,\n",
             a->split_preview ? "true" : "false");
     fprintf(f, "    split_ratio    = %.3f,\n", a->split_ratio);
@@ -10761,6 +10803,8 @@ typedef struct {
     int  line_endings;
     int  edit_wrap;
     int  native_menubar;
+    int  hoswl;
+    int  hoswl_menus;
     int  close_anim;
     int  sidebar_w;
     int  theme_idx;
@@ -10784,6 +10828,8 @@ static void settings_snapshot_capture(const App* a)
     s->line_endings   = a->cfg_line_endings;
     s->edit_wrap      = a->cfg_edit_wrap ? 1 : 0;
     s->native_menubar = a->cfg_native_menubar ? 1 : 0;
+    s->hoswl          = a->cfg_hoswl ? 1 : 0;
+    s->hoswl_menus    = a->cfg_hoswl_menus ? 1 : 0;
     s->close_anim     = a->cfg_close_anim;
     s->sidebar_w      = a->sidebar_w;
     s->theme_idx      = a->settings_theme_idx;
@@ -10869,6 +10915,18 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
                        a->cfg_native_menubar ? "On" : "Off");
     }
 #endif
+#if defined(_WIN32)
+    if (s->hoswl != (a->cfg_hoswl ? 1 : 0)) {
+        diff_str_named(out, cap, "Hisashi integration",
+                       s->hoswl ? "On" : "Off",
+                       a->cfg_hoswl ? "On" : "Off");
+    }
+    if (s->hoswl_menus != (a->cfg_hoswl_menus ? 1 : 0)) {
+        diff_str_named(out, cap, "Hisashi menubar",
+                       s->hoswl_menus ? "On" : "Off",
+                       a->cfg_hoswl_menus ? "On" : "Off");
+    }
+#endif
     if (s->close_anim != a->cfg_close_anim) {
         const char* A[] = { "Off", "Fade", "Dissolve" };
         diff_str_named(out, cap, "Close animation",
@@ -10900,6 +10958,8 @@ static void settings_snapshot_restore(App* a)
     a->cfg_line_endings    = s->line_endings;
     a->cfg_edit_wrap       = s->edit_wrap != 0;
     a->cfg_native_menubar  = s->native_menubar != 0;
+    a->cfg_hoswl           = s->hoswl != 0;
+    a->cfg_hoswl_menus     = s->hoswl_menus != 0;
     a->cfg_close_anim      = s->close_anim;
     a->sidebar_w           = s->sidebar_w;
     a->settings_theme_idx  = s->theme_idx;

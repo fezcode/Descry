@@ -374,6 +374,12 @@ typedef struct {
      * exists on every platform so the settings plumbing stays uniform; only
      * the macOS build shows a row for it or acts on it. */
     bool     cfg_native_menubar;
+    /* Windows only: connect to the Hisashi OS Window Layer (hoswl) and, when
+     * `cfg_hoswl_menus` is also on, publish File/Edit/View/Help to Hisashi's
+     * menubar and drop the in-app strip while connected. Fields exist on every
+     * platform so the settings plumbing stays uniform. */
+    bool     cfg_hoswl;
+    bool     cfg_hoswl_menus;
 
     /* Custom in-app confirmation modal (replaces SDL_ShowMessageBox).
      * Synchronous: confirm_discard pumps SDL events itself until the
