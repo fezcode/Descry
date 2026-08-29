@@ -27,6 +27,10 @@
 .PARAMETER Installer
     After building, also build the installer by invoking build_installer.ps1.
 
+.PARAMETER Tests
+    Configure with -DDESCRY_TESTS=ON (reconfiguring if the cache disagrees),
+    build the unit-test executables and run them with ctest.
+
 .PARAMETER MingwBin
     Path to the MSYS2 mingw64 bin directory. Auto-detected when omitted.
 
@@ -50,6 +54,7 @@ param(
     [switch]$Clean,
     [switch]$Run,
     [switch]$Installer,
+    [switch]$Tests,
     [string]$MingwBin
 )
 
@@ -99,10 +104,23 @@ if ($Clean -and (Test-Path $buildDir)) {
 # --- configure -----------------------------------------------------------
 # Re-run configure only when there is no cache (fresh or cleaned tree). Ninja
 # is single-config, so changing -Config on an existing tree needs -Clean.
+# The one exception is -Tests: if the cache's DESCRY_TESTS value disagrees
+# with the switch, reconfigure so the test targets appear (or disappear).
 $cache = Join-Path $buildDir "CMakeCache.txt"
-if (-not (Test-Path $cache)) {
+$testsWanted = if ($Tests) { "ON" } else { "OFF" }
+$needConfigure = -not (Test-Path $cache)
+if (-not $needConfigure) {
+    $cachedTests = Select-String -Path $cache -Pattern '^DESCRY_TESTS:BOOL=(\w+)' |
+        ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+    if (-not $cachedTests) { $cachedTests = "OFF" }
+    if ($cachedTests -ne $testsWanted) {
+        Write-Host "DESCRY_TESTS changed ($cachedTests -> $testsWanted); reconfiguring." -ForegroundColor Yellow
+        $needConfigure = $true
+    }
+}
+if ($needConfigure) {
     Write-Host "Configuring (cmake -G Ninja) ..." -ForegroundColor Green
-    & cmake -G Ninja -B $buildDir -S $root "-DCMAKE_BUILD_TYPE=$Config"
+    & cmake -G Ninja -B $buildDir -S $root "-DCMAKE_BUILD_TYPE=$Config" "-DDESCRY_TESTS=$testsWanted"
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
 } else {
     Write-Host "Reusing CMake cache (pass -Clean to reconfigure)." -ForegroundColor DarkGray
@@ -116,6 +134,13 @@ if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 $exe = Join-Path $buildDir "descry.exe"
 if (-not (Test-Path $exe)) { throw "build reported success but $exe is missing." }
 Write-Host "Built: $exe" -ForegroundColor Green
+
+# --- optional: unit tests ------------------------------------------------
+if ($Tests) {
+    Write-Host "Running unit tests (ctest) ..." -ForegroundColor Green
+    & ctest --test-dir $buildDir --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw "unit tests failed ($LASTEXITCODE)" }
+}
 
 # --- optional: installer -------------------------------------------------
 if ($Installer) {

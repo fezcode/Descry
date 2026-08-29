@@ -91,3 +91,24 @@ if(WIN32)
     COMMENT "Bundling MinGW runtime DLLs"
     VERBATIM)
 endif()
+
+# --- unit tests (opt-in: -DDESCRY_TESTS=ON, or build.ps1 -Tests) --------
+# Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips
+# and the hoswl.h (Hisashi menubar client) DSL compiler / click parser.
+option(DESCRY_TESTS "Build unit tests" OFF)
+if(DESCRY_TESTS)
+  enable_testing()
+  add_executable(test_tabs tests/test_tabs.c src/tabs.c src/buffer.c)
+  add_executable(test_hoswl tests/test_hoswl.c)
+  foreach(t test_tabs test_hoswl)
+    target_include_directories(${t} PRIVATE src)
+    # The tests are written with assert(); Release adds -DNDEBUG, which would
+    # compile every check out and leave a test that passes by doing nothing.
+    # -U comes after the config flags on the command line, so it wins.
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(${t} PRIVATE -UNDEBUG)
+    endif()
+  endforeach()
+  add_test(NAME tabs COMMAND test_tabs)
+  add_test(NAME hoswl COMMAND test_hoswl)
+endif()
