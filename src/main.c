@@ -145,6 +145,10 @@ static void hoswl_menu_flush(App* a);
 static void hoswl_menu_set_enabled(App* a);
 static void hoswl_menu_publish(App* a);
 static bool hoswl_menus_live(const App* a);
+static void hoswl_row_key(const App* a, int m, int r, char* out, size_t cap);
+static const char* hoswl_action_name(void (*fn)(App*));
+static const char* current_keystr_for(const char* action);
+static void keystr_pretty(const char* in, char* out, size_t cap);
 /* The client itself lives up here because app_shutdown (also early) sends
  * the "bye" through it; everything else about it is in the block. */
 static hoswl_t g_hoswl;
@@ -9076,12 +9080,34 @@ static int hoswl_row_check(const App* a, int m, int r)
 /* FNV-1a over everything that changes the published menu: the checkmarks
  * and the recent-vaults list. Cheap enough to run every frame; a change
  * republishes the whole menu (~2 KB) rather than bookkeeping patches. */
+/* Shortcut hint for a row: the live keymap (user rebinds included) for the
+ * row's action, falling back to the static table text. Display only —
+ * Descry keeps handling its own keys, exactly like the command palette. */
+static void hoswl_row_key(const App* a, int m, int r, char* out, size_t cap)
+{
+    (void)a;
+    const char* an = hoswl_action_name(MENU_TABLES[m][r].fn);
+    const char* ks = an ? current_keystr_for(an) : NULL;
+    if (ks && *ks) { keystr_pretty(ks, out, cap); return; }
+    const char* s = MENU_TABLES[m][r].shortcut;
+    size_t o = 0;
+    if (s) while (s[o] && o + 1 < cap) { out[o] = s[o]; ++o; }
+    out[o] = 0;
+}
+
 static uint32_t hoswl_menu_fingerprint(const App* a)
 {
     uint32_t h = 2166136261u;
     #define HOSWL_FNV(b) (h = (h ^ (uint32_t)(b)) * 16777619u)
-    for (int m = 0; m < 4; ++m)
-        for (int r = 0; r < menu_count_static(m); ++r) HOSWL_FNV(hoswl_row_check(a, m, r) + 2);
+    for (int m = 0; m < 4; ++m) {
+        for (int r = 0; r < menu_count_static(m); ++r) {
+            char key[48];
+            HOSWL_FNV(hoswl_row_check(a, m, r) + 2);
+            hoswl_row_key(a, m, r, key, sizeof key);   /* rebinding a key republishes */
+            for (const char* p = key; *p; ++p) HOSWL_FNV((unsigned char)*p);
+            HOSWL_FNV('|');
+        }
+    }
     int n = app_recent_dirs_count();
     HOSWL_FNV(n);
     for (int i = 0; i < n; ++i)
@@ -9112,9 +9138,9 @@ static void hoswl_menu_publish(App* a)
         HOSWL_PUT("%s\n", MENU_LABELS[m]);
         int n = menu_count_static(m);
         for (int r = 0; r < n; ++r) {
-            char label[128];
+            char label[128], key[48];
             hoswl_dsl_label(label, sizeof label, MENU_TABLES[m][r].label);
-            const char* key = MENU_TABLES[m][r].shortcut ? MENU_TABLES[m][r].shortcut : "";
+            hoswl_row_key(a, m, r, key, sizeof key);
             int chk = hoswl_row_check(a, m, r);
             HOSWL_PUT(" m%d.%d|%s|%s|%s\n", m, r, label, key, chk < 0 ? "" : (chk ? "x" : "c"));
         }
@@ -17555,6 +17581,18 @@ static ActionFn find_action(const char* name)
         if (strcmp(ACTIONS[i].name, name) == 0) return ACTIONS[i].fn;
     return NULL;
 }
+
+#if defined(_WIN32)
+/* Reverse lookup for the Hisashi menubar: which ACTIONS[] entry runs `fn`,
+ * so a menu row can show the live keybinding for its action. */
+static const char* hoswl_action_name(void (*fn)(App*))
+{
+    if (!fn) return NULL;
+    for (int i = 0; ACTIONS[i].name; ++i)
+        if (ACTIONS[i].fn == fn) return ACTIONS[i].name;
+    return NULL;
+}
+#endif
 
 static const char* default_action_for(const char* keystr)
 {
