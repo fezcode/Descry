@@ -334,6 +334,222 @@ static const Theme g_themes[] = {
         { 22,  20,  32, 255}, {144, 140, 170, 255},
         { 86,  72, 130, 180}, {234, 154, 151, 255},
     },
+    /* Dracula — the classic: deep violet-gray, high-chroma accents */
+    { "Dracula",
+        { 40,  42,  54, 255}, {248, 248, 242, 255}, {255, 255, 255, 255},
+        { 80, 250, 123, 255}, {139, 233, 253, 255},
+        { 54,  57,  73, 255}, { 98, 114, 164, 255},
+        { 33,  34,  44, 255}, { 54,  57,  73, 255}, { 68,  71,  90, 255},
+        { 30,  31,  40, 255}, { 98, 114, 164, 255},
+        { 68,  71,  90, 180}, {255, 121, 198, 255},
+    },
+    /* Tokyo Night — cool indigo night with a blue accent */
+    { "Tokyo Night",
+        { 26,  27,  38, 255}, {169, 177, 214, 255}, {192, 202, 245, 255},
+        {158, 206, 106, 255}, {122, 162, 247, 255},
+        { 36,  40,  59, 255}, { 86,  95, 137, 255},
+        { 22,  22,  30, 255}, { 41,  46,  66, 255}, { 54,  60,  87, 255},
+        { 20,  20,  28, 255}, { 86,  95, 137, 255},
+        { 54,  60,  87, 180}, {247, 118, 142, 255},
+    },
+    /* One Dark — the Atom palette — muted slate, warm headings */
+    { "One Dark",
+        { 40,  44,  52, 255}, {171, 178, 191, 255}, {229, 192, 123, 255},
+        {152, 195, 121, 255}, { 97, 175, 239, 255},
+        { 49,  54,  63, 255}, { 92,  99, 112, 255},
+        { 33,  37,  43, 255}, { 49,  54,  63, 255}, { 62,  68,  81, 255},
+        { 30,  33,  39, 255}, { 92,  99, 112, 255},
+        { 62,  68,  81, 180}, {224, 108, 117, 255},
+    },
+    /* Monokai — olive-black ground, candy accents */
+    { "Monokai",
+        { 39,  40,  34, 255}, {248, 248, 242, 255}, {249,  38, 114, 255},
+        {166, 226,  46, 255}, {102, 217, 239, 255},
+        { 52,  53,  46, 255}, {117, 113,  94, 255},
+        { 32,  33,  28, 255}, { 52,  53,  46, 255}, { 73,  72,  62, 255},
+        { 28,  29,  24, 255}, {117, 113,  94, 255},
+        { 73,  72,  62, 180}, {253, 151,  31, 255},
+    },
+    /* Catppuccin Mocha — soft dark lavender with pastel accents */
+    { "Catppuccin Mocha",
+        { 30,  30,  46, 255}, {205, 214, 244, 255}, {245, 224, 220, 255},
+        {166, 227, 161, 255}, {137, 180, 250, 255},
+        { 49,  50,  68, 255}, {127, 132, 156, 255},
+        { 24,  24,  37, 255}, { 49,  50,  68, 255}, { 69,  71,  90, 255},
+        { 23,  23,  35, 255}, {127, 132, 156, 255},
+        { 69,  71,  90, 180}, {245, 194, 231, 255},
+    },
+    /* Everforest Dark — low-saturation forest greens, very easy on the eye */
+    { "Everforest Dark",
+        { 45,  53,  59, 255}, {211, 198, 170, 255}, {230, 216, 189, 255},
+        {167, 192, 128, 255}, {127, 187, 179, 255},
+        { 56,  66,  72, 255}, {133, 146, 137, 255},
+        { 39,  46,  51, 255}, { 56,  66,  72, 255}, { 73,  84,  86, 255},
+        { 35,  42,  46, 255}, {133, 146, 137, 255},
+        { 73,  84,  86, 180}, {230, 152, 117, 255},
+    },
+    /* Midnight Ink — near-black navy for late-night writing */
+    { "Midnight Ink",
+        { 13,  17,  28, 255}, {198, 208, 224, 255}, {232, 240, 255, 255},
+        {126, 206, 190, 255}, {120, 170, 255, 255},
+        { 21,  27,  42, 255}, {110, 124, 148, 255},
+        {  9,  12,  20, 255}, { 23,  30,  46, 255}, { 36,  48,  74, 255},
+        {  8,  10,  18, 255}, {110, 124, 148, 255},
+        { 40,  60, 110, 180}, {150, 200, 255, 255},
+    },
+    /* Pastel Night — dark, but every accent is a pastel */
+    { "Pastel Night",
+        { 42,  40,  54, 255}, {222, 216, 232, 255}, {245, 238, 250, 255},
+        {176, 224, 190, 255}, {176, 196, 244, 255},
+        { 54,  51,  70, 255}, {144, 138, 166, 255},
+        { 35,  33,  46, 255}, { 54,  51,  70, 255}, { 76,  71,  98, 255},
+        { 31,  29,  41, 255}, {144, 138, 166, 255},
+        { 86,  80, 120, 180}, {244, 190, 214, 255},
+    },
+    /* Pastel Dream — light lilac and sage — the softest of the set */
+    { "Pastel Dream",
+        {250, 247, 252, 255}, { 72,  66,  84, 255}, { 48,  42,  60, 255},
+        {128, 178, 150, 255}, {150, 130, 210, 255},
+        {240, 235, 246, 255}, {150, 144, 162, 255},
+        {244, 240, 249, 255}, {234, 228, 242, 255}, {222, 212, 240, 255},
+        {241, 236, 247, 255}, {150, 144, 162, 255},
+        {216, 206, 240, 180}, {150, 130, 210, 255},
+    },
+    /* Cotton Candy — light, pink and sky blue */
+    { "Cotton Candy",
+        {253, 248, 250, 255}, { 78,  64,  74, 255}, { 56,  42,  54, 255},
+        {120, 190, 206, 255}, {232, 124, 168, 255},
+        {247, 238, 243, 255}, {162, 146, 158, 255},
+        {250, 242, 247, 255}, {245, 231, 240, 255}, {250, 214, 232, 255},
+        {248, 240, 245, 255}, {162, 146, 158, 255},
+        {250, 214, 232, 180}, {232, 124, 168, 255},
+    },
+    /* Mint Cream — light mint with an apricot counterpoint */
+    { "Mint Cream",
+        {246, 252, 248, 255}, { 54,  72,  64, 255}, { 30,  52,  44, 255},
+        {222, 166, 110, 255}, { 46, 168, 138, 255},
+        {234, 244, 238, 255}, {134, 158, 148, 255},
+        {240, 248, 243, 255}, {226, 240, 232, 255}, {206, 236, 222, 255},
+        {238, 246, 241, 255}, {134, 158, 148, 255},
+        {206, 236, 222, 180}, { 46, 168, 138, 255},
+    },
+    /* Neon Nights — black ground, electric cyan and magenta */
+    { "Neon Nights",
+        { 12,  10,  24, 255}, {222, 226, 244, 255}, {255, 255, 255, 255},
+        { 57, 255, 176, 255}, {  0, 229, 255, 255},
+        { 22,  18,  40, 255}, {124, 120, 168, 255},
+        {  8,   7,  18, 255}, { 26,  20,  48, 255}, { 52,  30,  90, 255},
+        {  7,   6,  16, 255}, {124, 120, 168, 255},
+        { 70,  40, 130, 190}, {255,  60, 180, 255},
+    },
+    /* Synthwave — purple dusk, hot pink and cyan */
+    { "Synthwave",
+        { 30,  17,  54, 255}, {232, 216, 248, 255}, {255, 241, 118, 255},
+        {255, 126, 182, 255}, { 54, 226, 255, 255},
+        { 44,  25,  74, 255}, {154, 132, 190, 255},
+        { 24,  13,  44, 255}, { 48,  26,  80, 255}, { 78,  38, 124, 255},
+        { 21,  11,  38, 255}, {154, 132, 190, 255},
+        { 94,  44, 148, 190}, {255, 126, 182, 255},
+    },
+    /* Vivid Ocean — deep sea blue with amber and cyan */
+    { "Vivid Ocean",
+        { 10,  32,  52, 255}, {204, 226, 242, 255}, {238, 248, 255, 255},
+        {255, 183,  77, 255}, {  0, 188, 212, 255},
+        { 16,  46,  72, 255}, {114, 148, 176, 255},
+        {  7,  25,  42, 255}, { 18,  52,  80, 255}, { 26,  78, 112, 255},
+        {  6,  22,  38, 255}, {114, 148, 176, 255},
+        { 26,  78, 112, 185}, {  0, 229, 255, 255},
+    },
+    /* Tropical — deep teal, coral and turquoise */
+    { "Tropical",
+        { 24,  38,  38, 255}, {226, 236, 228, 255}, {255, 236, 179, 255},
+        {255, 138, 101, 255}, { 38, 220, 190, 255},
+        { 32,  52,  50, 255}, {128, 160, 152, 255},
+        { 19,  31,  31, 255}, { 32,  52,  50, 255}, { 44,  78,  74, 255},
+        { 16,  27,  27, 255}, {128, 160, 152, 255},
+        { 44,  78,  74, 185}, {255, 202,  64, 255},
+    },
+    /* Catppuccin Latte — the light half of Catppuccin */
+    { "Catppuccin Latte",
+        {239, 241, 245, 255}, { 76,  79, 105, 255}, { 48,  52,  70, 255},
+        { 64, 160,  43, 255}, { 30, 102, 245, 255},
+        {230, 233, 239, 255}, {140, 143, 161, 255},
+        {233, 236, 242, 255}, {220, 224, 232, 255}, {204, 208, 218, 255},
+        {230, 233, 239, 255}, {140, 143, 161, 255},
+        {204, 208, 218, 180}, {234, 118, 203, 255},
+    },
+    /* GitHub Light — plain white page, familiar blue links */
+    { "GitHub Light",
+        {255, 255, 255, 255}, { 36,  41,  47, 255}, {  0,   0,   0, 255},
+        { 26, 127,  55, 255}, {  9, 105, 218, 255},
+        {246, 248, 250, 255}, {110, 119, 129, 255},
+        {246, 248, 250, 255}, {234, 238, 242, 255}, {221, 232, 250, 255},
+        {246, 248, 250, 255}, {110, 119, 129, 255},
+        {221, 232, 250, 180}, {  9, 105, 218, 255},
+    },
+    /* Solarized Light — the light Solarized counterpart */
+    { "Solarized Light",
+        {253, 246, 227, 255}, {101, 123, 131, 255}, { 88, 110, 117, 255},
+        {133, 153,   0, 255}, { 38, 139, 210, 255},
+        {238, 232, 213, 255}, {147, 161, 161, 255},
+        {238, 232, 213, 255}, {228, 222, 203, 255}, {211, 220, 232, 255},
+        {238, 232, 213, 255}, {147, 161, 161, 255},
+        {211, 220, 232, 180}, {203,  75,  22, 255},
+    },
+    /* Paper Sepia — warm paper and ink — long-form reading */
+    { "Paper Sepia",
+        {244, 236, 220, 255}, { 66,  58,  46, 255}, { 40,  34,  26, 255},
+        {120, 140,  90, 255}, {170,  90,  50, 255},
+        {236, 227, 208, 255}, {150, 138, 118, 255},
+        {238, 229, 210, 255}, {228, 217, 196, 255}, {216, 200, 172, 255},
+        {236, 227, 208, 255}, {150, 138, 118, 255},
+        {216, 200, 172, 180}, {170,  90,  50, 255},
+    },
+    /* Ayu Light — crisp white with a signature orange accent */
+    { "Ayu Light",
+        {250, 250, 250, 255}, { 87,  96, 106, 255}, { 60,  66,  74, 255},
+        {134, 179,   0, 255}, {255, 153,  51, 255},
+        {241, 241, 241, 255}, {154, 161, 169, 255},
+        {245, 245, 245, 255}, {235, 235, 235, 255}, {255, 232, 204, 255},
+        {243, 243, 243, 255}, {154, 161, 169, 255},
+        {255, 232, 204, 180}, {255, 153,  51, 255},
+    },
+    /* High Contrast Dark — pure black and white — maximum legibility */
+    { "High Contrast Dark",
+        {  0,   0,   0, 255}, {255, 255, 255, 255}, {255, 255, 255, 255},
+        {  0, 255, 128, 255}, {  0, 204, 255, 255},
+        { 16,  16,  16, 255}, {190, 190, 190, 255},
+        {  0,   0,   0, 255}, { 32,  32,  32, 255}, {  0,  90, 140, 255},
+        {  0,   0,   0, 255}, {220, 220, 220, 255},
+        {  0, 110, 180, 200}, {255, 255,   0, 255},
+    },
+    /* High Contrast Light — pure white and black — maximum legibility */
+    { "High Contrast Light",
+        {255, 255, 255, 255}, {  0,   0,   0, 255}, {  0,   0,   0, 255},
+        {  0, 100,   0, 255}, {  0,   0, 204, 255},
+        {240, 240, 240, 255}, { 70,  70,  70, 255},
+        {255, 255, 255, 255}, {224, 224, 224, 255}, {180, 205, 255, 255},
+        {255, 255, 255, 255}, { 40,  40,  40, 255},
+        {170, 200, 255, 200}, {204,   0,   0, 255},
+    },
+    /* Amber CRT — an amber phosphor terminal */
+    { "Amber CRT",
+        { 12,   8,   0, 255}, {255, 176,   0, 255}, {255, 214, 102, 255},
+        {255, 138,   0, 255}, {255, 220, 120, 255},
+        { 26,  16,   0, 255}, {168, 116,   0, 255},
+        {  8,   5,   0, 255}, { 34,  22,   0, 255}, { 72,  46,   0, 255},
+        {  7,   4,   0, 255}, {168, 116,   0, 255},
+        { 96,  62,   0, 190}, {255, 196,   0, 255},
+    },
+    /* Matrix Green — a green phosphor terminal */
+    { "Matrix Green",
+        {  4,  12,   6, 255}, {108, 232, 132, 255}, {180, 255, 196, 255},
+        {  0, 200,  90, 255}, {140, 255, 180, 255},
+        { 10,  22,  12, 255}, { 74, 140,  90, 255},
+        {  3,   9,   4, 255}, { 14,  30,  17, 255}, { 24,  60,  32, 255},
+        {  2,   7,   3, 255}, { 74, 140,  90, 255},
+        { 24,  72,  36, 190}, {150, 255, 170, 255},
+    },
 };
 #define G_THEME_COUNT ((int)(sizeof g_themes / sizeof g_themes[0]))
 
@@ -1061,6 +1277,29 @@ static bool path_is_image(const char* path)
     return false;
 }
 
+/* Identity of a file for change detection: modification time plus size.
+ * Both come back zero when the path can't be stat'd — missing, unreadable,
+ * or a note that has never been saved. */
+static void file_stamp(const char* path, long long* mtime, long long* size)
+{
+    struct stat st;
+    if (path && *path && stat(path, &st) == 0) {
+        *mtime = (long long)st.st_mtime;
+        *size  = (long long)st.st_size;
+    } else {
+        *mtime = 0;
+        *size  = 0;
+    }
+}
+
+/* Record the active note's on-disk identity as the one we know about. Call
+ * after every read from and write to the file, so the watcher only fires on
+ * changes that came from outside Descry. */
+static void note_stamp_sync(App* a)
+{
+    file_stamp(a->note_path, &a->note_mtime, &a->note_size);
+}
+
 static int load_into_live(App* a, const char* path)
 {
     /* Image file? Synthesize a tiny markdown buffer whose only line is an
@@ -1075,8 +1314,10 @@ static int load_into_live(App* a, const char* path)
         a->buf.dirty = false;
         a->viewing_image = true;
         reparse_preview(a);
+        /* strdup before free: reload passes a->note_path straight back in. */
+        char* np          = strdup(path);
         free(a->note_path);
-        a->note_path      = strdup(path);
+        a->note_path      = np;
         path_to_forward(a->note_path);
         a->scroll_y       = 0;
         a->doc_height_px  = 0;
@@ -1087,6 +1328,7 @@ static int load_into_live(App* a, const char* path)
         update_window_title(a);
         a->fired_seq = a->buf.seq;            /* loads aren't "text_change" */
         lua_host_fire_event(a->lua, "open");
+        note_stamp_sync(a);
         fprintf(stderr, "descry: opened image %s\n", path);
         return 0;
     }
@@ -1102,8 +1344,9 @@ static int load_into_live(App* a, const char* path)
 
     reparse_preview(a);
 
+    char* np          = strdup(path);       /* see the image path above */
     free(a->note_path);
-    a->note_path      = strdup(path);
+    a->note_path      = np;
     path_to_forward(a->note_path);
     a->scroll_y       = 0;
     a->scroll_x       = 0;
@@ -1117,6 +1360,7 @@ static int load_into_live(App* a, const char* path)
     update_window_title(a);
     a->fired_seq = a->buf.seq;                /* loads aren't "text_change" */
     lua_host_fire_event(a->lua, "open");
+    note_stamp_sync(a);
     fprintf(stderr, "descry: opened %s (%zu lines)\n", path, a->doc.line_count);
     return 0;
 }
@@ -1133,7 +1377,11 @@ static void tabs_park_active(App* a)
     if (a->tabs.active < 0 || a->tabs.active >= a->tabs.count) return;
     tab_store(&a->tabs.items[a->tabs.active], a->note_path, &a->buf,
               a->scroll_y, a->scroll_x, a->edit_mode, a->viewing_image);
+    /* Park the watch stamp with the rest of the tab's state. */
+    a->tabs.items[a->tabs.active].disk_mtime = a->note_mtime;
+    a->tabs.items[a->tabs.active].disk_size  = a->note_size;
 }
+
 
 /* Make tab i active: park the current file, move slot i into the live fields,
  * and reparse the preview for the newly-active document. */
@@ -1143,6 +1391,9 @@ static void switch_to_tab(App* a, int i)
     tabs_park_active(a);
     tab_load(&a->tabs.items[i], &a->note_path, &a->buf,
              &a->scroll_y, &a->scroll_x, &a->edit_mode, &a->viewing_image);
+    a->note_mtime = a->tabs.items[i].disk_mtime;
+    a->note_size  = a->tabs.items[i].disk_size;
+    a->fs_check_next = 0;                 /* re-check this file right away */
     a->tabs.active   = i;
     a->doc_height_px = 0;
     a->doc_width_px  = 0;
@@ -1683,9 +1934,12 @@ static bool confirm_action(App* a, const char* title, const char* msg,
     a->confirm_choice = -1;
     a->confirm_hover  = 1;     /* default to the safe button */
 
+    /* Timeout rather than a bare wait: a prompt can be raised with no user
+     * input pending (the external-change watch does exactly that), and a
+     * blocking wait would leave it unpainted until the mouse moved. */
     while (a->confirm_choice < 0 && a->running) {
         SDL_Event e;
-        if (SDL_WaitEvent(&e)) {
+        if (SDL_WaitEventTimeout(&e, 16)) {
             switch (e.type) {
                 case SDL_QUIT:
                     a->confirm_choice = 1;
@@ -1771,6 +2025,8 @@ static void close_tab(App* a, int i)
         a->tabs.active = -1;
         free(a->note_path);
         a->note_path = strdup("(welcome)");
+        a->note_mtime = 0;           /* not a real file — nothing to watch */
+        a->note_size  = 0;
         buffer_free(&a->buf);
         buffer_init(&a->buf);
         a->edit_mode = false;
@@ -5655,6 +5911,44 @@ static size_t edit_wiki_link_at(const Buffer* b, size_t pos,
     return n;
 }
 
+/* Extract the href out of a `[text](href)` inline link covering `pos`.
+ * Only the cursor's own line is scanned, which is where such a link always
+ * lives. Returns the href length, or 0 when the cursor isn't inside one. */
+static size_t edit_md_link_at(const Buffer* b, size_t pos,
+                              char* out, size_t cap)
+{
+    if (pos > b->len || cap == 0) return 0;
+    size_t ls = pos;
+    while (ls > 0 && b->data[ls - 1] != '\n') ls--;
+    size_t le = pos;
+    while (le < b->len && b->data[le] != '\n') le++;
+
+    for (size_t i = ls; i < le; ++i) {
+        if (b->data[i] != '[') continue;
+        if (i + 1 < le && b->data[i + 1] == '[') { i++; continue; }  /* wiki */
+        size_t close = i + 1;
+        while (close < le && b->data[close] != ']') close++;
+        if (close + 1 >= le || b->data[close + 1] != '(') continue;
+        /* Balance nested parens so `(a(b).md)` doesn't stop at the first. */
+        size_t hs = close + 2, he = hs;
+        int depth = 1;
+        while (he < le) {
+            if (b->data[he] == '(') depth++;
+            else if (b->data[he] == ')' && --depth == 0) break;
+            he++;
+        }
+        if (he >= le || depth != 0) continue;
+        if (pos < i || pos > he) { i = he; continue; }
+        size_t n = he - hs;
+        if (n == 0) return 0;
+        if (n >= cap) n = cap - 1;
+        memcpy(out, b->data + hs, n);
+        out[n] = 0;
+        return n;
+    }
+    return 0;
+}
+
 /* Forward decl — defined later. */
 static int strieq(const char* x, const char* y);
 
@@ -6449,15 +6743,65 @@ enum TitleBarButton {
 
 static const char* MENU_LABELS[4] = { "File", "Edit", "View", "Help" };
 
+#if defined(__APPLE__)
+/* macOS keeps the window controls at the LEFT, as three round "traffic
+ * light" dots. Sizes follow the platform's own metrics; the colors do not —
+ * they are taken from the active theme so the bar stays in-palette instead
+ * of dropping a system red/yellow/green into every scheme. */
+#define TL_DOT   13                             /* dot diameter          */
+#define TL_GAP    8                             /* space between dots    */
+#define TL_LEFT  20                             /* inset of the first    */
+#define TL_SPAN  (3 * TL_DOT + 2 * TL_GAP)
+#define TL_HIT   10                             /* click radius per dot  */
+
+/* Platform order, left to right. */
+static const int TL_ORDER[3] = { TBB_CLOSE, TBB_MIN, TBB_MAX };
+
+static int tl_dot_x(int slot) { return TL_LEFT + slot * (TL_DOT + TL_GAP); }
+#endif
+
+/* Where the title bar's own content (app icon, menus) may start: after the
+ * traffic lights on macOS, at the left edge everywhere else. */
+static int titlebar_content_left(const App* a)
+{
+    (void)a;
+#if defined(__APPLE__)
+    return TL_LEFT + TL_SPAN + 14;
+#else
+    return 8;
+#endif
+}
+
+/* Rightmost x the title text may reach: macOS has nothing over there, the
+ * other platforms have the three window buttons. */
+static int titlebar_content_right(const App* a)
+{
+#if defined(__APPLE__)
+    return a->win_w - 16;
+#else
+    return a->win_w - 3 * TB_BTN_W - 16;
+#endif
+}
+
 static int titlebar_button_at(const App* a, int mx, int my)
 {
     int TBH = title_bar_h(a);
     if (my < 0 || my >= TBH) return TBB_NONE;
+#if defined(__APPLE__)
+    int cy = TBH / 2;
+    for (int s = 0; s < 3; ++s) {
+        int cx = tl_dot_x(s) + TL_DOT / 2;
+        int dx = mx - cx, dy = my - cy;
+        if (dx * dx + dy * dy <= TL_HIT * TL_HIT) return TL_ORDER[s];
+    }
+    return TBB_NONE;
+#else
     int right = a->win_w;
     if (mx >= right - TB_BTN_W       && mx < right)            return TBB_CLOSE;
     if (mx >= right - 2 * TB_BTN_W   && mx < right - TB_BTN_W) return TBB_MAX;
     if (mx >= right - 3 * TB_BTN_W   && mx < right - 2*TB_BTN_W) return TBB_MIN;
     return TBB_NONE;
+#endif
 }
 
 /* Hit-test against the menu items in the title bar. Returns 0..3 or -1.
@@ -6520,18 +6864,72 @@ static void titlebar_button_invoke(App* a, int btn)
     }
 }
 
+#if defined(__APPLE__)
+/* The three macOS window dots, tinted from the active theme: the accent
+ * (fg_link) maximizes, the secondary accent (fg_quote) closes, and muted
+ * sits between them for minimize. Hovering any one reveals the glyphs on
+ * all three, and an unfocused window dims the lot — both as macOS does. */
+static void render_traffic_lights(App* a, int TBH)
+{
+    static const IconId TL_ICONS[3] = {          /* indexed by TBB_*     */
+        ICON_WIN_MIN, ICON_WIN_MAX, ICON_WIN_CLOSE
+    };
+    const SDL_Color tint[3] = {
+        a->fg_muted,        /* TBB_MIN   */
+        a->fg_link,         /* TBB_MAX   */
+        a->fg_quote,        /* TBB_CLOSE */
+    };
+    bool focused =
+        (SDL_GetWindowFlags(a->window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+
+    float group = 0.0f;
+    for (int b = 0; b < 3; ++b)
+        if (a->tb_btn_hover_t[b] > group) group = a->tb_btn_hover_t[b];
+    float ge = ease_out_cubic(group);
+
+    int dy = (TBH - TL_DOT) / 2;
+    for (int s = 0; s < 3; ++s) {
+        int btn = TL_ORDER[s];
+        SDL_Color c = tint[btn];
+        SDL_Rect r = { tl_dot_x(s), dy, TL_DOT, TL_DOT };
+        SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b,
+                               focused ? 255 : 110);
+        fill_rrect(a->renderer, r, TL_DOT / 2);
+        if (focused && ge > 0.02f) {
+            /* Ink that survives on top of whatever the theme picked. */
+            int lum = c.r * 30 + c.g * 59 + c.b * 11;
+            SDL_Color ink = (lum > 12000)
+                ? (SDL_Color){  20,  20,  26, (Uint8)(255 * ge) }
+                : (SDL_Color){ 245, 245, 250, (Uint8)(255 * ge) };
+            IconId id = TL_ICONS[btn];
+            if (btn == TBB_MAX && window_is_maximized(a)) id = ICON_WIN_RESTORE;
+            int isz = 7;
+            icon_draw(a->renderer, id,
+                      r.x + (TL_DOT - isz) / 2,
+                      r.y + (TL_DOT - isz) / 2, isz, ink);
+        }
+    }
+}
+#endif
+
 static void render_titlebar(App* a, int TBH)
 {
     int right = a->win_w;
     int text_h = font_ascent(a->font_ide) + font_descent(a->font_ide);
     int by = (TBH - text_h) / 2 + font_ascent(a->font_ide);
 
-    /* App icon (small folder glyph) at the very left. */
+#if defined(__APPLE__)
+    render_traffic_lights(a, TBH);
+#endif
+
+    /* App icon (small folder glyph), after the window controls on macOS
+     * and at the very left everywhere else. */
     int icon_pad = 8;
     int icon_sz  = TBH - 2 * icon_pad;
+    int icon_x   = titlebar_content_left(a);
     icon_draw(a->renderer, ICON_FOLDER_OPEN,
-              icon_pad, icon_pad, icon_sz, a->fg_link);
-    int x = icon_pad + icon_sz + 10;
+              icon_x, icon_pad, icon_sz, a->fg_link);
+    int x = icon_x + icon_sz + 10;
 
     /* Menu items: File / Edit / View / Help. */
     for (int i = 0; i < 4; ++i) {
@@ -6563,7 +6961,7 @@ static void render_titlebar(App* a, int TBH)
                             : (a->note_path ? vault_basename(a->note_path) : "Descry");
         int tw = font_measure(a->font_ide, title, strlen(title));
         int min_x = x + 16;
-        int max_x = right - 3 * TB_BTN_W - 16;
+        int max_x = titlebar_content_right(a);
         int tx = (a->win_w - tw) / 2;
         if (tx < min_x) tx = min_x;
         if (tx + tw > max_x) tx = max_x - tw;
@@ -6573,6 +6971,9 @@ static void render_titlebar(App* a, int TBH)
         }
     }
 
+#if defined(__APPLE__)
+    (void)right;      /* the controls live on the left; nothing to draw here */
+#else
     /* Window controls (right edge): minimize / maximize / close.
      * Hover: bg fill (red for close); icon stays clear. */
     static const IconId TBB_ICONS[3] = {
@@ -6602,6 +7003,7 @@ static void render_titlebar(App* a, int TBH)
             ? (SDL_Color){ 250, 250, 250, 255 } : a->fg;
         icon_draw(a->renderer, id, ix, iy, isz, ic);
     }
+#endif
 }
 
 #if defined(_WIN32)
@@ -8676,6 +9078,194 @@ static void open_external_url(const char* href)
     int rc = system(cmd);
     (void)rc;
 #endif
+}
+
+
+/* --------------------------- local .md links ----------------------------
+ * `[text](./note.md)` names a note in this vault, not a web page, so it
+ * opens in Descry instead of being handed to the OS. Only `.md` targets get
+ * this treatment — a relative `.png` or `.pdf` still routes through
+ * open_external_url, which is what a document link is expected to do. */
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Copy the path part of `href` into `out`: drops a `#fragment` / `?query`
+ * and decodes %XX escapes, so `my%20note.md` finds `my note.md`. Returns
+ * false when nothing usable is left. */
+static bool href_path_part(const char* href, char* out, size_t cap)
+{
+    if (!href || !out || cap == 0) return false;
+    size_t o = 0;
+    for (const char* p = *href == '<' ? href + 1 : href; *p && o + 1 < cap; ++p) {
+        if (*p == '#' || *p == '?' || *p == '>') break;
+        int hi, lo;
+        if (*p == '%' && (hi = hex_digit(p[1])) >= 0 &&
+                         (lo = hex_digit(p[2])) >= 0)
+        {
+            out[o++] = (char)((hi << 4) | lo);
+            p += 2;
+            continue;
+        }
+        out[o++] = *p;
+    }
+    out[o] = 0;
+    return o > 0;
+}
+
+/* True if `p` is rooted: POSIX `/foo` or Windows `C:\foo`. */
+static bool path_is_absolute(const char* p)
+{
+    if (!p || !*p) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return isalpha((unsigned char)p[0]) && p[1] == ':';
+}
+
+/* Join directory `base` with `rel` and fold away `.` / `..` segments.
+ * `rel` wins outright when it is already absolute. Output uses forward
+ * slashes throughout, matching the rest of the app's path handling. */
+static void path_join_normalized(const char* base, const char* rel,
+                                 char* out, size_t cap)
+{
+    if (!out || cap == 0) return;
+    out[0] = 0;
+
+    char tmp[1024];
+    if (path_is_absolute(rel) || !base || !*base)
+        snprintf(tmp, sizeof tmp, "%s", rel ? rel : "");
+    else
+        snprintf(tmp, sizeof tmp, "%s/%s", base, rel);
+    for (char* s = tmp; *s; ++s) if (*s == '\\') *s = '/';
+
+    /* Keep a leading "/" or "C:/" root, then rebuild from the segments. */
+    char  prefix[8] = {0};
+    char* body = tmp;
+    if (tmp[0] == '/') {
+        prefix[0] = '/';
+        body = tmp + 1;
+    } else if (isalpha((unsigned char)tmp[0]) && tmp[1] == ':') {
+        prefix[0] = tmp[0]; prefix[1] = ':'; prefix[2] = '/';
+        body = tmp + 2;
+        while (*body == '/') body++;
+    }
+
+    char* seg[128];
+    int   top = 0;
+    for (char* p = body; *p; ) {
+        char* e = p;
+        while (*e && *e != '/') e++;
+        char saved = *e;
+        *e = 0;
+        if (*p == 0 || strcmp(p, ".") == 0) {
+            /* nothing to push */
+        } else if (strcmp(p, "..") == 0) {
+            if (top > 0) top--;
+        } else if (top < (int)(sizeof seg / sizeof seg[0])) {
+            seg[top++] = p;
+        }
+        if (saved == 0) break;
+        p = e + 1;
+    }
+
+    size_t o = 0;
+    if (prefix[0]) {
+        int w = snprintf(out, cap, "%s", prefix);
+        if (w < 0 || (size_t)w >= cap) { out[cap - 1] = 0; return; }
+        o = (size_t)w;
+    }
+    for (int i = 0; i < top; ++i) {
+        if (o + 1 >= cap) break;
+        if (o > 0 && out[o - 1] != '/') out[o++] = '/';
+        int w = snprintf(out + o, cap - o, "%s", seg[i]);
+        if (w < 0 || (size_t)w >= cap - o) { out[cap - 1] = 0; return; }
+        o += (size_t)w;
+    }
+    out[o] = 0;
+}
+
+/* True if `href` points at a markdown file inside the vault rather than at
+ * something the OS should open. Scheme'd URLs are never local, and only a
+ * `.md` extension counts — that is the whole of the internal-link rule. */
+static bool href_is_local_md(const char* href)
+{
+    if (!href || !*href) return false;
+    if (is_external_url(href)) return false;
+    char p[512];
+    if (!href_path_part(href, p, sizeof p)) return false;
+    size_t n = strlen(p);
+    return n > 3 && strieq(p + n - 3, ".md");
+}
+
+/* Resolve a local `.md` href to a file on disk. The folder holding the note
+ * that contains the link is tried first, then the vault root — that covers
+ * both `./sibling.md` and a `notes/deep.md` written from the root. Returns
+ * false when no such file exists, i.e. the link is broken. */
+static bool resolve_local_md(const App* a, const char* href,
+                             char* out, size_t cap)
+{
+    char rel[512];
+    if (!href_path_part(href, rel, sizeof rel)) return false;
+
+    char base[1024];
+    base[0] = 0;
+    if (a->note_path) {
+        snprintf(base, sizeof base, "%s", a->note_path);
+        size_t n = strlen(base);
+        while (n > 0 && base[n - 1] != '/' && base[n - 1] != '\\') n--;
+        while (n > 0 && (base[n - 1] == '/' || base[n - 1] == '\\')) n--;
+        base[n] = 0;
+    }
+
+    path_join_normalized(base, rel, out, cap);
+    if (file_exists(out)) return true;
+
+    if (a->vault.dir && *a->vault.dir) {
+        char alt[1024];
+        path_join_normalized(a->vault.dir, rel, alt, sizeof alt);
+        if (file_exists(alt)) {
+            snprintf(out, cap, "%s", alt);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Open the note a local `.md` link points at. Returns true when the link was
+ * ours to handle — the missing-file case included, so a broken note link
+ * never falls through to the external opener. */
+static bool follow_local_md(App* a, const char* href)
+{
+    if (!href_is_local_md(href)) return false;
+    char full[1024];
+    if (!resolve_local_md(a, href, full, sizeof full)) {
+        char msg[400];
+        snprintf(msg, sizeof msg,
+                 "This link points at a note that isn't here:\n%.300s", href);
+        info_modal(a, "Broken link", msg);
+        return true;
+    }
+    if (!confirm_discard(a)) return true;
+    load_note(a, full);
+    return true;
+}
+
+/* Follow an inline-link href from either mode: a `.md` target opens in the
+ * app, anything carrying a scheme goes to the OS after a confirm. Returns
+ * true when the href was handled. */
+static bool follow_md_href(App* a, const char* href)
+{
+    if (follow_local_md(a, href)) return true;
+    if (!is_external_url(href)) return false;
+    char msg[300];
+    snprintf(msg, sizeof msg, "Open in default browser?\n%.220s", href);
+    if (confirm_action(a, "Open link", msg, "Open", "Cancel"))
+        open_external_url(href);
+    return true;
 }
 
 /* Delete a file (or empty dir). Returns 0 on success. */
@@ -13100,6 +13690,108 @@ static void notify_now(App* a, const char* msg, uint32_t ms)
     a->notification_until = SDL_GetTicks() + ms;
 }
 
+/* ---------------------- external-change watch ---------------------------
+ * Another editor, a git checkout, or a sync client can rewrite the open file
+ * underneath us. Poll its mtime+size while the app is idle and, when it
+ * moves, ask whose copy wins instead of silently picking one. */
+
+/* True while an overlay or modal owns the screen. The watcher waits for a
+ * quiet moment rather than throwing a prompt over whatever the user opened. */
+static bool any_overlay_active(const App* a)
+{
+    return a->confirm_active   || a->tinput_active    || a->eol_pick_active ||
+           a->switcher_active  || a->cmdp_active      || a->plugins_active  ||
+           a->settings_active  || a->keybind_active   || a->picker_active   ||
+           a->ctx_menu_active  || a->backlinks_active || a->tags_active     ||
+           a->tpl_active       || a->outline_active   || a->vsearch_active  ||
+           a->graph_active     || a->wc_active        || a->dnd_active;
+}
+
+/* Re-read the active note from disk, putting the cursor and scroll back
+ * roughly where they were. Undo history does not survive a reload — the
+ * prompt says so before we ever get here. */
+static void reload_active_note(App* a)
+{
+    if (!a->note_path) return;
+    size_t cur = a->buf.cursor;
+    int    sy  = a->scroll_y, sx = a->scroll_x;
+    bool   em  = a->edit_mode;
+    if (load_into_live(a, a->note_path) != 0) {
+        notify_now(a, "Reload failed: the file could not be read.", 4000);
+        return;
+    }
+    a->edit_mode  = em;
+    a->buf.cursor = cur > a->buf.len ? a->buf.len : cur;
+    a->scroll_y   = sy;
+    a->scroll_x   = sx;
+    buffer_invalidate_row_cache(&a->buf);
+    clamp_scroll(a);
+    note_stamp_sync(a);
+    notify_now(a, "Reloaded from disk.", 2500);
+}
+
+/* One tick of the watch. Cheap enough to call every frame — the stat itself
+ * is throttled to a few times a second. */
+static void fs_watch_poll(App* a)
+{
+    if (!a->note_path || a->viewing_image) return;
+
+    uint32_t now = SDL_GetTicks();
+    if (now < a->fs_check_next) return;
+    a->fs_check_next = now + 700;
+
+    long long mt = 0, sz = 0;
+    file_stamp(a->note_path, &mt, &sz);
+    if (mt == 0 && sz == 0) return;     /* gone or unreadable — leave it be */
+    if (mt == a->note_mtime && sz == a->note_size) return;
+    if (a->note_mtime == 0 && a->note_size == 0) {
+        /* No stamp yet (the file appeared after we opened it): adopt this
+         * one silently, there is nothing to compare against. */
+        a->note_mtime = mt;
+        a->note_size  = sz;
+        return;
+    }
+    if (any_overlay_active(a)) return;      /* ask once the screen is free */
+
+    fprintf(stderr, "fs watch: %s changed on disk "
+                    "(mtime %lld -> %lld, size %lld -> %lld)\n",
+            a->note_path, a->note_mtime, mt, a->note_size, sz);
+
+    /* Adopt the new stamp BEFORE prompting: either way we have now seen this
+     * version of the file and must not ask about it a second time. */
+    a->note_mtime = mt;
+    a->note_size  = sz;
+
+    const char* base = vault_basename(a->note_path);
+    char msg[400];
+    bool reload;
+    if (a->buf.dirty) {
+        snprintf(msg, sizeof msg,
+            "%.100s changed on disk, and you have\n"
+            "unsaved edits of your own.\n"
+            "\n"
+            "Reloading discards your edits. Keeping yours\n"
+            "overwrites the file the next time you save.", base);
+        reload = confirm_action(a, "File changed outside Descry", msg,
+                                "Reload (theirs)", "Keep mine");
+        if (!reload)
+            notify_now(a, "Keeping your version -- save to overwrite the file.",
+                       4500);
+    } else {
+        snprintf(msg, sizeof msg,
+            "%.100s changed on disk.\n"
+            "\n"
+            "You have no unsaved edits here.", base);
+        reload = confirm_action(a, "File changed outside Descry", msg,
+                                "Reload (theirs)", "Keep mine");
+    }
+    if (reload) reload_active_note(a);
+
+    /* The modal ate an unknown amount of time; restart the throttle so we
+     * don't stat again the instant it closes. */
+    a->fs_check_next = SDL_GetTicks() + 700;
+}
+
 static void action_toggle_spellcheck(App* a)
 {
     if (!spell_ready(&a->spell)) {
@@ -13653,6 +14345,8 @@ static int save_note_with_eol(App* a, const char* path)
      * op_head never moves past saved_head and dirty stays false. */
     a->buf.coalesce = OP_NONE;
     lua_host_fire_event(a->lua, "save");
+    /* Our own write must not look like somebody else's. */
+    if (a->note_path && strcmp(path, a->note_path) == 0) note_stamp_sync(a);
     return 0;
 }
 
@@ -15778,6 +16472,7 @@ static void action_save_as       (App* a) {
     if (buffer_save(&a->buf, picked) == 0) {
         free(a->note_path);
         a->note_path = strdup(picked);
+        note_stamp_sync(a);          /* the watch now follows the new file */
         update_window_title(a);
         if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
         a->vault.selected = vault_index_of(&a->vault, picked);
@@ -15826,6 +16521,7 @@ static void action_rename        (App* a) {
         remove(a->note_path);
         free(a->note_path);
         a->note_path = strdup(picked);
+        note_stamp_sync(a);          /* the watch now follows the new file */
         update_window_title(a);
         if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
         a->vault.selected = vault_index_of(&a->vault, picked);
@@ -15948,9 +16644,13 @@ static void action_paste     (App* a) {
 static void action_follow_link(App* a) {
     if (!a->edit_mode) return;
     char name[256];
-    if (edit_wiki_link_at(&a->buf, a->buf.cursor, name, sizeof name) == 0)
+    if (edit_wiki_link_at(&a->buf, a->buf.cursor, name, sizeof name) > 0) {
+        follow_wiki_target(a, name);
         return;
-    follow_wiki_target(a, name);
+    }
+    char href[512];
+    if (edit_md_link_at(&a->buf, a->buf.cursor, href, sizeof href) > 0)
+        follow_md_href(a, href);
 }
 static void action_settings  (App* a) { settings_open(a); }
 static void action_keybindings(App* a) { keybind_open(a); }
@@ -16777,10 +17477,25 @@ static void app_event(App* a, const SDL_Event* e)
                         MdLink* lk = &a->doc.links[li];
                         if (h->byte_start < lk->start ||
                             h->byte_start >= lk->end) continue;
-                        snprintf(a->tip_text, sizeof a->tip_text,
-                                 "Open external -- %.220s",
-                                 lk->href ? lk->href : "");
-                        a->tip_broken = false;
+                        if (href_is_local_md(lk->href)) {
+                            char full[1024];
+                            if (resolve_local_md(a, lk->href,
+                                                 full, sizeof full)) {
+                                snprintf(a->tip_text, sizeof a->tip_text,
+                                         "Open note -- %.220s",
+                                         vault_basename(full));
+                                a->tip_broken = false;
+                            } else {
+                                snprintf(a->tip_text, sizeof a->tip_text,
+                                         "Missing note -- %.220s", lk->href);
+                                a->tip_broken = true;
+                            }
+                        } else {
+                            snprintf(a->tip_text, sizeof a->tip_text,
+                                     "Open external -- %.220s",
+                                     lk->href ? lk->href : "");
+                            a->tip_broken = false;
+                        }
                         resolved = true;
                         break;
                     }
@@ -17698,6 +18413,11 @@ static void app_event(App* a, const SDL_Event* e)
                                               name, sizeof name) > 0 &&
                             follow_wiki_target(a, name))
                             break;
+                        char href[512];
+                        if (edit_md_link_at(&a->buf, pos,
+                                            href, sizeof href) > 0 &&
+                            follow_md_href(a, href))
+                            break;
                     }
                     bool select = (SDL_GetModState() & KMOD_SHIFT) != 0;
                     /* Multi-click: 2 = word, 3 = whole line. */
@@ -17786,16 +18506,9 @@ static void app_event(App* a, const SDL_Event* e)
                                 MdLink* lk = &a->doc.links[li];
                                 if (h->byte_start < lk->start ||
                                     h->byte_start >= lk->end) continue;
-                                if (!is_external_url(lk->href)) break;
-                                char msg[300];
-                                snprintf(msg, sizeof msg,
-                                    "Open in default browser?\n%.220s",
-                                    lk->href);
-                                if (confirm_action(a, "Open link",
-                                                   msg, "Open", "Cancel"))
-                                {
-                                    open_external_url(lk->href);
-                                }
+                                /* A `.md` target is a note in this vault
+                                 * and opens here; the rest go to the OS. */
+                                if (!follow_md_href(a, lk->href)) break;
                                 handled = 1;
                                 goto out_of_hits;
                             }
@@ -18849,6 +19562,7 @@ int main(int argc, char** argv)
             do { app_event(&app, &e); } while (SDL_PollEvent(&e));
         }
         drop_flush(&app);     /* prompt + copy any OS file-drop, once per drop */
+        fs_watch_poll(&app);  /* did anyone else rewrite the open file? */
         /* Fire the plugin "text_change" event when the document mutated this
          * frame. buf.seq bumps on every insert/delete/undo/redo; loads and
          * tab switches resync fired_seq so they don't count as edits. */

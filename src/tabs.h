@@ -12,6 +12,10 @@ typedef struct {
     int    scroll_y, scroll_x;
     bool   edit_mode;
     bool   viewing_image;
+    /* File identity when this tab was last read/written, for the external-
+     * change watch. Carried across park/restore so a file edited while the
+     * tab sat in the background is still caught when you switch back. */
+    long long disk_mtime, disk_size;
 } Tab;
 
 typedef struct {

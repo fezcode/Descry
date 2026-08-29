@@ -85,6 +85,15 @@ typedef struct {
     ImageCache* imgcache;
 
     char*    note_path;
+
+    /* External-change watch. `note_mtime`/`note_size` are the file identity
+     * we last read from or wrote to disk; a background stat that disagrees
+     * means someone edited the file behind our back, and we ask the user
+     * whose copy wins. Parked tabs keep their own stamp in Tab. */
+    long long note_mtime;
+    long long note_size;
+    uint32_t  fs_check_next;   /* SDL_GetTicks() of the next allowed stat */
+
     Buffer   buf;          /* source-of-truth text */
     MdDoc    doc;          /* parsed view of buf, for preview rendering */
     bool     edit_mode;    /* false = preview, true = edit              */
