@@ -46,6 +46,14 @@ add_executable(descry
   src/tabs.c
   src/vault.c
 )
+if(APPLE)
+  # The native menu bar is the only Objective-C in the tree; ARC keeps the
+  # menu objects alive without hand-written retains.
+  enable_language(OBJC)
+  target_sources(descry PRIVATE src/macos_menu.m)
+  set_source_files_properties(src/macos_menu.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
+
 target_include_directories(descry PRIVATE src vendor/nanosvg)
 target_link_libraries(descry PRIVATE
   PkgConfig::SDL2
@@ -57,6 +65,9 @@ target_link_libraries(descry PRIVATE
   md4c
   md4c-html
 )
+if(APPLE)
+  target_link_libraries(descry PRIVATE "-framework Cocoa")
+endif()
 if(WIN32)
   # comdlg32: native file dialogs.  wininet: GET remote images in preview.
   target_link_libraries(descry PRIVATE comdlg32 wininet)

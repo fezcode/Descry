@@ -4,6 +4,7 @@
 #include "icons.h"
 #include "image.h"
 #include "lua_host.h"
+#include "macos_menu.h"
 #include "markdown.h"
 #include "regex.h"
 #include "vault.h"
@@ -119,6 +120,15 @@ enum ClickHitKind { HIT_WIKI, HIT_TASK };
 
 /* Forward decl: user-keybinding loader, called from app_init early. */
 static void user_kbinds_load_from_cfg(LuaHost* h);
+
+#if defined(__APPLE__)
+/* Forward decls: the native menu bar is built from the title-bar tables,
+ * which are declared much further down, but app_init installs it as soon as
+ * the window exists. */
+static void native_menu_install(void);
+static void native_menu_refresh_recents(const App* a);
+static void native_menu_flush(App* a);
+#endif
 
 /* True if the current theme has a light background (used so overlays can
  * pick a contrasting box bg). */
@@ -4020,6 +4030,11 @@ static int app_init(App* a, const char* note_path_arg)
         a->cfg_line_endings = 0;
     /* Default to wrap=true; matches Obsidian/VS Code default for prose. */
     a->cfg_edit_wrap = lua_host_cfg_number(a->lua, "edit_wrap", 1) != 0;
+    /* Defaults on: a Mac app that draws its own menu strip next to the real
+     * menu bar looks wrong. The setting is there for anyone who prefers the
+     * in-app one. */
+    a->cfg_native_menubar =
+        lua_host_cfg_number(a->lua, "native_menubar", 1) != 0;
     /* Close animation: 0 off, 1 fade, 2 dissolve. Default = fade so the
      * goodbye feels intentional rather than a crash. */
     a->cfg_close_anim = (int)lua_host_cfg_number(a->lua, "close_anim", 1);
@@ -4157,10 +4172,18 @@ static int app_init(App* a, const char* note_path_arg)
     a->menu_open = -1;
     a->tb_btn_hover = -1;
     a->menu_hover   = -1;
+    a->tb_icon_hover = false;
     /* Register hit-test so Windows knows what's drag area vs resize edges
      * vs normal content. SDL_HITTEST_DRAGGABLE → HTCAPTION → aero snap and
      * Win+arrow shortcuts work for free. */
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
+
+#if defined(__APPLE__)
+    /* SDL builds the menu bar when it registers the app for the first
+     * window, so this has to come after the window exists. */
+    native_menu_install();
+    native_menu_refresh_recents(a);
+#endif
 
     /* Accept files dropped onto the window from the OS file manager. */
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
@@ -6804,6 +6827,28 @@ static int titlebar_button_at(const App* a, int mx, int my)
 #endif
 }
 
+/* Whether the in-app File/Edit/View/Help strip is drawn. On macOS it gives
+ * way to the system menu bar unless the user turns that off. */
+static bool menu_strip_visible(const App* a)
+{
+#if defined(__APPLE__)
+    return !a->cfg_native_menubar;
+#else
+    (void)a;
+    return true;
+#endif
+}
+
+/* Hit-test the folder glyph at the left of the title bar. It behaves as a
+ * button on every platform: click to choose a new vault folder. */
+static bool titlebar_icon_at(const App* a, int mx, int my)
+{
+    const SDL_Rect* r = &a->tb_icon_rect;
+    return r->w > 0 &&
+           mx >= r->x && mx < r->x + r->w &&
+           my >= r->y && my < r->y + r->h;
+}
+
 /* Hit-test against the menu items in the title bar. Returns 0..3 or -1.
  * Uses the rects stashed by render_titlebar last frame. */
 static int titlebar_menu_at(const App* a, int mx, int my)
@@ -6922,16 +6967,33 @@ static void render_titlebar(App* a, int TBH)
     render_traffic_lights(a, TBH);
 #endif
 
-    /* App icon (small folder glyph), after the window controls on macOS
-     * and at the very left everywhere else. */
+    /* App icon (small folder glyph), after the window controls on macOS and
+     * at the very left everywhere else. It is a button: clicking it opens
+     * the vault picker, same as File > Open Dir. */
     int icon_pad = 8;
     int icon_sz  = TBH - 2 * icon_pad;
     int icon_x   = titlebar_content_left(a);
+    {
+        SDL_Rect ir = { icon_x - 4, 2, icon_sz + 8, TBH - 4 };
+        a->tb_icon_rect = ir;
+        float et = ease_out_cubic(a->tb_icon_hover_t);
+        if (et > 0.005f) {
+            SDL_SetRenderDrawColor(a->renderer,
+                a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+                a->bg_sidebar_hover.b, (Uint8)(160 * et));
+            fill_rrect(a->renderer, ir, 4);
+        }
+    }
     icon_draw(a->renderer, ICON_FOLDER_OPEN,
               icon_x, icon_pad, icon_sz, a->fg_link);
     int x = icon_x + icon_sz + 10;
 
-    /* Menu items: File / Edit / View / Help. */
+    /* Menu items: File / Edit / View / Help. Skipped when the system menu
+     * bar is carrying them (macOS), in which case the rects are cleared so
+     * titlebar_menu_at stops reporting hits on last frame's geometry. */
+    if (!menu_strip_visible(a)) {
+        for (int i = 0; i < 4; ++i) a->menu_rects[i] = (SDL_Rect){ 0, 0, 0, 0 };
+    } else
     for (int i = 0; i < 4; ++i) {
         const char* label = MENU_LABELS[i];
         int lw = font_measure(a->font_ide, label, strlen(label));
@@ -7066,6 +7128,7 @@ static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
 
     if (p->y < title_bar_h(a)) {
         if (titlebar_button_at(a, p->x, p->y) != TBB_NONE) return SDL_HITTEST_NORMAL;
+        if (titlebar_icon_at(a, p->x, p->y))               return SDL_HITTEST_NORMAL;
         if (titlebar_menu_at(a, p->x, p->y) != -1)         return SDL_HITTEST_NORMAL;
         return SDL_HITTEST_DRAGGABLE;
     }
@@ -8891,6 +8954,63 @@ static void submenu_invoke_row(App* a, int row)
     app_notify(a, msg);
 }
 
+#if defined(__APPLE__)
+/* ------------------------ native macOS menu bar -------------------------
+ * The same File/Edit/View/Help tables the title bar draws, mirrored into
+ * NSMenu so macOS users get the menu where the platform puts it. Labels are
+ * shared verbatim rather than duplicated; see macos_menu.h for why no key
+ * equivalents are attached. */
+
+#define NATIVE_MENU_MAX_ROWS 32
+
+static void native_menu_install(void)
+{
+    /* Static storage: NSMenu copies the strings, but the arrays are handed
+     * across as pointers and must outlive the call regardless. */
+    static MacMenuItem        rows[4][NATIVE_MENU_MAX_ROWS];
+    static const MacMenuItem* tables[4];
+    static const char*        titles[5];
+
+    for (int m = 0; m < 4; ++m) {
+        int n = menu_count_static(m);
+        if (n > NATIVE_MENU_MAX_ROWS - 1) n = NATIVE_MENU_MAX_ROWS - 1;
+        for (int r = 0; r < n; ++r) rows[m][r].label = MENU_TABLES[m][r].label;
+        rows[m][n].label = NULL;
+        tables[m] = rows[m];
+        titles[m] = MENU_LABELS[m];
+    }
+    titles[4] = NULL;
+    macos_menu_install(titles, tables);
+}
+
+/* Keep the native "Recent vaults" submenu in step with a->recent_dirs.
+ * Called from recent_dirs_push, so every path that touches the list —
+ * startup, Open Dir, picking a recent — refreshes the menu. */
+static void native_menu_refresh_recents(const App* a)
+{
+    const char* dirs[(int)(sizeof a->recent_dirs / sizeof a->recent_dirs[0])];
+    int n = a->recent_dirs_count;
+    if (n > (int)(sizeof dirs / sizeof dirs[0]))
+        n = (int)(sizeof dirs / sizeof dirs[0]);
+    for (int i = 0; i < n; ++i) dirs[i] = a->recent_dirs[i];
+    macos_menu_set_recents(dirs, n);
+}
+
+/* Run whatever the user picked from the system menu. Deferred out of the
+ * AppKit callback (see macos_menu.h) and into the main loop, where opening
+ * a modal that pumps SDL events is safe. */
+static void native_menu_flush(App* a)
+{
+    int m = 0, r = 0;
+    if (!macos_menu_take_pick(&m, &r)) return;
+    if (r >= MAC_ROW_RECENT) { submenu_invoke_row(a, r - MAC_ROW_RECENT); return; }
+    if (m < 0 || m >= 4) return;
+    if (r < 0 || r >= menu_count_static(m)) return;
+    void (*fn)(App*) = MENU_TABLES[m][r].fn;
+    if (fn) fn(a);
+}
+#endif  /* __APPLE__ */
+
 /* Translate a screen y to the row index inside the menu, or -1 if outside. */
 static int ctx_menu_row_at(const App* a, int mx, int my)
 {
@@ -10031,6 +10151,9 @@ typedef enum {
     SET_LINE_SPACING,   /* extra pixels between rendered lines */
     SET_LINE_ENDINGS,   /* preserve / LF / CRLF */
     SET_EDIT_WRAP,      /* on/off: soft-wrap long lines in edit mode */
+#if defined(__APPLE__)
+    SET_NATIVE_MENU,    /* on/off: use the system menu bar, hide ours */
+#endif
     SET_CLOSE_ANIM,     /* off / fade — animation when the window closes */
     SET_SIDEBAR_W,
     SET_KEYBINDINGS,    /* opens the keybindings overlay */
@@ -10065,6 +10188,9 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Line spacing",
     "Line endings",
     "Word wrap (edit)",
+#if defined(__APPLE__)
+    "macOS menu bar",
+#endif
     "Close animation",
     "Sidebar width",
     "Keybindings",
@@ -10124,6 +10250,12 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
                                                 "Preserve");
             break;
         case SET_EDIT_WRAP:   snprintf(out, cap, "%s", a->cfg_edit_wrap ? "On" : "Off"); break;
+#if defined(__APPLE__)
+        case SET_NATIVE_MENU:
+            snprintf(out, cap, "%s",
+                     a->cfg_native_menubar ? "On" : "Off");
+            break;
+#endif
         case SET_CLOSE_ANIM:
             snprintf(out, cap, "%s",
                      a->cfg_close_anim == 2 ? "Dissolve" :
@@ -10222,6 +10354,16 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->cfg_line_endings = v;
             break;
         }
+#if defined(__APPLE__)
+        case SET_NATIVE_MENU: {
+            /* The system menu bar is populated either way; this only
+             * decides whether the in-app strip is drawn as well. */
+            a->cfg_native_menubar = !a->cfg_native_menubar;
+            a->menu_open  = -1;
+            a->menu_hover = -1;
+            break;
+        }
+#endif
         case SET_EDIT_WRAP: {
             (void)dir;     /* binary toggle — direction doesn't matter */
             a->cfg_edit_wrap = !a->cfg_edit_wrap;
@@ -10442,6 +10584,9 @@ static void recent_dirs_push(App* a, const char* dir)
                  "%s", a->recent_dirs[i - 1]);
     snprintf(a->recent_dirs[0], sizeof a->recent_dirs[0], "%s", nd);
     if (a->recent_dirs_count < max) a->recent_dirs_count++;
+#if defined(__APPLE__)
+    native_menu_refresh_recents(a);
+#endif
 }
 
 static void recent_dirs_load(App* a)
@@ -10497,6 +10642,10 @@ static int settings_persist(App* a)
             a->cfg_line_endings);
     fprintf(f, "    edit_wrap      = %s,\n",
             a->cfg_edit_wrap ? "true" : "false");
+#if defined(__APPLE__)
+    fprintf(f, "    native_menubar = %s,\n",
+            a->cfg_native_menubar ? "true" : "false");
+#endif
     fprintf(f, "    split_preview  = %s,\n",
             a->split_preview ? "true" : "false");
     fprintf(f, "    split_ratio    = %.3f,\n", a->split_ratio);
@@ -10611,6 +10760,7 @@ typedef struct {
     int  line_spacing;
     int  line_endings;
     int  edit_wrap;
+    int  native_menubar;
     int  close_anim;
     int  sidebar_w;
     int  theme_idx;
@@ -10633,6 +10783,7 @@ static void settings_snapshot_capture(const App* a)
     s->line_spacing   = a->cfg_line_spacing;
     s->line_endings   = a->cfg_line_endings;
     s->edit_wrap      = a->cfg_edit_wrap ? 1 : 0;
+    s->native_menubar = a->cfg_native_menubar ? 1 : 0;
     s->close_anim     = a->cfg_close_anim;
     s->sidebar_w      = a->sidebar_w;
     s->theme_idx      = a->settings_theme_idx;
@@ -10711,6 +10862,13 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
                        s->edit_wrap ? "On" : "Off",
                        a->cfg_edit_wrap ? "On" : "Off");
     }
+#if defined(__APPLE__)
+    if (s->native_menubar != (a->cfg_native_menubar ? 1 : 0)) {
+        diff_str_named(out, cap, "macOS menu bar",
+                       s->native_menubar ? "On" : "Off",
+                       a->cfg_native_menubar ? "On" : "Off");
+    }
+#endif
     if (s->close_anim != a->cfg_close_anim) {
         const char* A[] = { "Off", "Fade", "Dissolve" };
         diff_str_named(out, cap, "Close animation",
@@ -10741,6 +10899,7 @@ static void settings_snapshot_restore(App* a)
     a->cfg_line_spacing    = s->line_spacing;
     a->cfg_line_endings    = s->line_endings;
     a->cfg_edit_wrap       = s->edit_wrap != 0;
+    a->cfg_native_menubar  = s->native_menubar != 0;
     a->cfg_close_anim      = s->close_anim;
     a->sidebar_w           = s->sidebar_w;
     a->settings_theme_idx  = s->theme_idx;
@@ -13547,6 +13706,12 @@ static void app_animate(App* a)
         float target = (a->menu_hover == i) ? 1.0f : 0.0f;
         a->menu_hover_t[i] = anim_step(a->menu_hover_t[i], target, dt, 18.0f);
         if (fabsf(a->menu_hover_t[i] - target) > 0.005f) moving = true;
+    }
+    /* Title-bar folder button. */
+    {
+        float target = a->tb_icon_hover ? 1.0f : 0.0f;
+        a->tb_icon_hover_t = anim_step(a->tb_icon_hover_t, target, dt, 18.0f);
+        if (fabsf(a->tb_icon_hover_t - target) > 0.005f) moving = true;
     }
 
     /* Context menu open animation. */
@@ -17320,6 +17485,7 @@ static void app_event(App* a, const SDL_Event* e)
             a->chrome_hover  = chrome_hit_test(a, e->motion.x, e->motion.y);
             a->tb_btn_hover  = titlebar_button_at(a, e->motion.x, e->motion.y);
             a->menu_hover    = titlebar_menu_at  (a, e->motion.x, e->motion.y);
+            a->tb_icon_hover = titlebar_icon_at  (a, e->motion.x, e->motion.y);
             a->sidebar_hover = sidebar_item_at(a, e->motion.x, e->motion.y);
             if (a->switcher_active) {
                 int row = switcher_row_at(a, e->motion.x, e->motion.y);
@@ -17945,6 +18111,11 @@ static void app_event(App* a, const SDL_Event* e)
              * other floating overlay first so the dropdown isn't stacked
              * on top of stale state. */
             if (e->button.button == SDL_BUTTON_LEFT && !a->ctx_menu_active) {
+                /* The folder glyph is a shortcut to File > Open Dir. */
+                if (titlebar_icon_at(a, e->button.x, e->button.y)) {
+                    action_open_dir(a);
+                    break;
+                }
                 int mi = titlebar_menu_at(a, e->button.x, e->button.y);
                 if (mi >= 0) {
                     if (a->backlinks_active) backlinks_close(a);
@@ -19563,6 +19734,9 @@ int main(int argc, char** argv)
         }
         drop_flush(&app);     /* prompt + copy any OS file-drop, once per drop */
         fs_watch_poll(&app);  /* did anyone else rewrite the open file? */
+#if defined(__APPLE__)
+        native_menu_flush(&app);   /* run anything picked from the menu bar */
+#endif
         /* Fire the plugin "text_change" event when the document mutated this
          * frame. buf.seq bumps on every insert/delete/undo/redo; loads and
          * tab switches resync fired_seq so they don't count as edits. */

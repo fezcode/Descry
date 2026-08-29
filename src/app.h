@@ -369,6 +369,11 @@ typedef struct {
      * past the viewport and a horizontal scrollbar appears. Toggleable
      * via View > Toggle Word Wrap. */
     bool     cfg_edit_wrap;
+    /* macOS only: mirror the menus into the system menu bar and drop the
+     * in-app File/Edit/View/Help strip, which is redundant there. The field
+     * exists on every platform so the settings plumbing stays uniform; only
+     * the macOS build shows a row for it or acts on it. */
+    bool     cfg_native_menubar;
 
     /* Custom in-app confirmation modal (replaces SDL_ShowMessageBox).
      * Synchronous: confirm_discard pumps SDL events itself until the
@@ -509,6 +514,12 @@ typedef struct {
     /* Top menu bar (File/Edit/View/Help). */
     int      menu_hover;             /* -1 none, 0..3 = menu index */
     float    menu_hover_t[4];        /* eased hover state per menu */
+    /* The folder glyph at the left of the title bar. It opens the vault
+     * picker (File > Open Dir), so it needs a rect to hit-test and its own
+     * hover fade, exactly like the menu labels beside it. */
+    SDL_Rect tb_icon_rect;
+    bool     tb_icon_hover;
+    float    tb_icon_hover_t;
     int      menu_open;              /* -1 closed, 0..3 = which dropdown */
     SDL_Rect menu_rects[4];          /* hit rects per menu (set by render) */
 
