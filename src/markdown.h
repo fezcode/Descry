@@ -31,6 +31,8 @@ typedef enum {
      * renderer gathers a consecutive run, rebuilds the source, and draws it
      * as a diagram instead of code text. */
     LINE_MERMAID,
+    /* `---` / `***` thematic break: no text, rendered as a rule. */
+    LINE_HR,
 } LineKind;
 
 typedef enum {

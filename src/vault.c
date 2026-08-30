@@ -49,6 +49,16 @@ static int has_md_ext(const char* name)
         (name[n-1] == 'd' || name[n-1] == 'D');
 }
 
+static int ext_eq(const char* name, const char* ext);
+
+/* Note files the sidebar lists: markdown plus plain .txt (which the
+ * preview renders like markdown). */
+static int has_note_ext(const char* name)
+{
+    return has_md_ext(name) || ext_eq(name, ".txt") ||
+           ext_eq(name, ".markdown");
+}
+
 static int ext_eq(const char* name, const char* ext)
 {
     size_t nn = strlen(name);
@@ -108,7 +118,7 @@ static void scan_recursive(Vault* v, const char* dir, int depth)
             v->count++;
             if (depth < 8) scan_recursive(v, path, depth + 1);
         } else if ((st.st_mode & S_IFMT) == S_IFREG &&
-                   (has_md_ext(ent->d_name) || has_image_ext(ent->d_name))) {
+                   (has_note_ext(ent->d_name) || has_image_ext(ent->d_name))) {
             items_reserve(v, 1);
             v->items[v->count].name      = strdup(ent->d_name);
             v->items[v->count].path      = strdup(path);
@@ -130,8 +140,12 @@ int vault_scan(Vault* v, const char* dir)
     }
     v->count = 0;
     v->selected = -1;
+    /* Callers routinely rescan with `dir == v->dir`; copy before freeing or
+     * strdup reads freed memory and the vault "changes" to garbage. */
+    char* new_dir = strdup(dir);
     free(v->dir);
-    v->dir = strdup(dir);
+    v->dir = new_dir;
+    dir = v->dir;
     /* Normalize backslashes to forward slashes so display + comparisons
      * are consistent regardless of where the path came from. */
     if (v->dir) for (char* p = v->dir; *p; ++p) if (*p == '\\') *p = '/';

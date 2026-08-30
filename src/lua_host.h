@@ -84,9 +84,15 @@ void lua_host_set_plugin_filter(LuaHost* h,
  * disappear cleanly. */
 int  lua_host_reload_plugins(LuaHost* h, const char* dir);
 
-/* Register a callback invoked whenever a plugin calls descry.notify(s).
- * Lets the app surface the notification in its UI. Single global slot. */
-typedef void (*LuaNotifyCallback)(void* userdata, const char* msg);
+/* Name of the plugin whose file is currently being executed by
+ * lua_host_load_plugins, or NULL outside a load. Lets the app attribute
+ * config keys declared at load time to their plugin. */
+const char* lua_host_current_plugin(LuaHost* h);
+
+/* Register a callback invoked whenever a plugin calls descry.notify(s[, ms]).
+ * Lets the app surface the notification in its UI. Single global slot.
+ * `ms` is the requested duration, 0 = the app's default. */
+typedef void (*LuaNotifyCallback)(void* userdata, const char* msg, int ms);
 void lua_host_on_notify(LuaNotifyCallback cb, void* userdata);
 
 /* Register a callback invoked when a plugin calls descry.dialog(title, msg).
@@ -129,6 +135,39 @@ typedef struct {
     const char* (*config_get)(void* ud, const char* key, const char* def);
     /* Switch view: on != 0 → edit mode, 0 → preview. No-op for image views. */
     void   (*set_edit_mode)  (void* ud, int on);
+
+    /* ---- v0.83 additions (every field optional, host guards NULL) ---- */
+    /* Write a config value (persisted by the app). */
+    void   (*config_set)     (void* ud, const char* key, const char* val);
+    /* Declare a config key's schema for the settings UI. `type` is one of
+     * "string" / "number" / "bool" / "choice"; `choices` is '|'-separated
+     * (choice only); min/max apply per has_range bits (1 = min, 2 = max). */
+    void   (*config_declare) (void* ud, const char* key, const char* def,
+                              const char* type, const char* desc,
+                              const char* choices,
+                              double min, double max, int has_range);
+    /* Config type as declared: 0 string, 1 number, 2 bool, 3 choice. */
+    int    (*config_type)    (void* ud, const char* key);
+    /* Run a built-in OR plugin action by name. 0 on success. */
+    int    (*invoke)         (void* ud, const char* action);
+    /* Modal yes/no. Returns 1 for yes. Labels may be NULL. */
+    int    (*confirm)        (void* ud, const char* title, const char* msg,
+                              const char* yes, const char* no);
+    /* Modal single-line text prompt. Returns 1 on OK (text in `out`). */
+    int    (*prompt)         (void* ud, const char* title, const char* desc,
+                              const char* def, char* out, size_t cap);
+    const char* (*vault_dir) (void* ud);                     /* NULL if none */
+    void   (*vault_refresh)  (void* ud);                     /* rescan sidebar */
+    int    (*buf_sel_range)  (void* ud, size_t* lo, size_t* hi); /* 1 if any */
+    void   (*buf_set_sel)    (void* ud, size_t lo, size_t hi);
+    int    (*get_edit_mode)  (void* ud);                     /* 1 = edit */
+    char*  (*clipboard_get)  (void* ud);                     /* malloc'd or NULL */
+    void   (*clipboard_set)  (void* ud, const char* s);
+    /* Theme color by slot name ("bg", "fg", "link", ...). 1 if found. */
+    int    (*theme_color)    (void* ud, const char* name, unsigned char rgb[3]);
+    /* Slot name for index i (NULL past the end) — lets Lua enumerate. */
+    const char* (*theme_slot)(void* ud, int i);
+    const char* version;                                     /* "0.83.0" */
 } LuaAppBridge;
 
 /* Install the document/vault bridge. Copies the struct; the app keeps no
@@ -138,8 +177,12 @@ void lua_host_set_bridge(LuaHost* h, const LuaAppBridge* bridge);
 /* Invoke every handler a plugin registered with descry.on(event, fn), in
  * registration order. Safe (a no-op) when no handler is registered. Handlers
  * are called with no arguments — they query the descry.buffer and descry.vault
- * tables for context. Known events: "open", "save", "text_change". A handler
- * that errors is logged and skipped; the rest still run. */
+ * tables for context. Known events: "open", "save", "text_change",
+ * "mode_change", "vault_change". A handler that errors is logged and
+ * skipped; the rest still run. */
 void lua_host_fire_event(LuaHost* h, const char* event);
+
+/* Does any plugin have a handler for `event`? */
+int  lua_host_has_event(LuaHost* h, const char* event);
 
 #endif

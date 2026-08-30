@@ -292,6 +292,10 @@ typedef struct {
     /* Per-plugin enable/disable toggle hit-rects (row = plugins_rows index). */
     struct { SDL_Rect rect; int row; } ptoggle_hits[64];
     int      ptoggle_hit_count;
+    /* Per-plugin "settings" chip hit-rects (only for plugins with config). */
+    struct { SDL_Rect rect; int row; } pset_hits[64];
+    int      pset_hit_count;
+    int      plugins_content_h;     /* body height last render, for scroll clamp */
 
     /* Wiki-link auto-complete (triggered by typing `[[` in edit mode). The
      * filter text is the slice of the buffer between wc_anchor and the
@@ -347,6 +351,11 @@ typedef struct {
     char     cfg_font_path[260];        /* preview body */
     char     cfg_font_path_ide[260];    /* chrome / sidebar / overlays */
     char     cfg_font_path_mono[260];   /* editor + inline code */
+    /* Base style per font slot: 0 regular, 1 bold, 2 italic, 3 bold italic.
+     * Inline **bold** / *italic* still layer on top of the base. */
+    int      cfg_font_style;
+    int      cfg_font_style_ide;
+    int      cfg_font_style_mono;
     int      cfg_font_size;
     int      cfg_font_size_h1;
     int      cfg_font_size_h2;
@@ -380,6 +389,9 @@ typedef struct {
      * platform so the settings plumbing stays uniform. */
     bool     cfg_hoswl;
     bool     cfg_hoswl_menus;
+    /* Windows 11: ask DWM to round the window corners (anti-aliased by the
+     * compositor). The frame outline follows the curve when on. */
+    bool     cfg_rounded_corners;
 
     /* Custom in-app confirmation modal (replaces SDL_ShowMessageBox).
      * Synchronous: confirm_discard pumps SDL events itself until the
@@ -400,6 +412,33 @@ typedef struct {
      * Set by confirm_action() for "Open link?", "Quit?" style prompts. */
     char     confirm_btn0_label[32];
     char     confirm_btn1_label[32];
+    /* Optional third button (drawn between btn0 and btn1). Empty = absent.
+     * confirm_action_n returns its index (2) when chosen. */
+    char     confirm_btn2_label[32];
+
+    /* Compact single-line prompt modal (plugin config values, descry.prompt).
+     * Same synchronous-pump pattern as confirm_action. */
+    bool     prompt_active;
+    char     prompt_title[96];
+    char     prompt_desc[240];
+    char     prompt_text[260];
+    int      prompt_len;
+    int      prompt_cursor;
+    int      prompt_sel_anchor;
+    int      prompt_choice;          /* -1 pending, 0 = OK, 1 = Cancel  */
+    int      prompt_hover;           /* 0 = OK, 1 = Cancel, -1 = none   */
+    char     prompt_err_text[200];   /* validation error, empty = none  */
+
+    /* Per-plugin config modal: every descry.config key a plugin declared,
+     * with type-aware editing (toggle / cycle / prompt). */
+    bool     pcfg_active;
+    char     pcfg_owner[64];         /* plugin name filter, "" = all     */
+    int      pcfg_selected;
+    int      pcfg_hover;
+    int      pcfg_scroll;
+    int      pcfg_choice;            /* -1 open, 0 = done               */
+    int      pcfg_btn_hover;         /* 0 Done, 1 Reset all, -1 none    */
+    int      pcfg_content_h;
 
     /* In-app text-input modal (replaces native Save As / Rename dialog).
      * Synchronous like confirm_discard: app_text_modal pumps events until
@@ -420,6 +459,7 @@ typedef struct {
     bool     tinput_ctx_active;
     int      tinput_ctx_row;
     int      tinput_ctx_x, tinput_ctx_y;
+    int      tinput_ctx_hover;         /* hovered menu row, -1 = none     */
     /* Rename popup: a small modal overlay on top of the picker with its
      * own input field and OK/Cancel buttons. Independent state so the
      * picker's path bar isn't touched while the popup is open. */
@@ -494,6 +534,9 @@ typedef struct {
     /* Chrome bar hover tracking — which top-bar button is the mouse over
      * right now? -1 if none. Indices match enum ChromeButton in main.c. */
     int      chrome_hover;
+    /* When chrome_hover last changed (SDL ticks) — the tooltip appears after
+     * the cursor has rested on one button for a moment. */
+    uint32_t chrome_hover_since;
 
     /* Breadcrumb segment hit-rects, populated each frame by render_chrome
      * so the click/motion handlers don't re-derive them. -1 in crumb_hover
@@ -532,8 +575,8 @@ typedef struct {
     /* Per-button animation level [0..1] for the chrome bar; eased toward
      * 1 when the button is hovered, 0 otherwise. Drives bg fade and the
      * animated underline. Indexed by ChromeButton enum value (0..CB_COUNT-1). */
-    float    chrome_hover_t[8];   /* one per CB_* enum value */
-    float    chrome_press_t[8];
+    float    chrome_hover_t[12];  /* one per CB_* enum value (CB_COUNT <= 12) */
+    float    chrome_press_t[12];
 
     /* Animation tick for time-stepped UI animations (chrome hover/press,
      * context menu fade-in, etc.). Updated once per frame. */

@@ -4,11 +4,14 @@ Descry can load Lua scripts at startup and expose them as named **actions**
 that the user can run from the command palette, bind to a key, or invoke
 from the menus.
 
-A plugin can register named actions, show toast notifications and modal
-dialogs, **read and edit the open document**, **list and open vault notes**,
-and **subscribe to lifecycle events** (`open` / `save` / `text_change`). The
-surface is intentionally small but no longer a dead end — a plugin can do real
-work on the text the user is looking at.
+A plugin can register named actions, show toasts, dialogs, **yes/no prompts
+and text prompts**, **read and edit the open document**, **list, refresh and
+open vault notes**, **declare typed settings** that get a real settings UI,
+**invoke other actions**, read the **theme** and the **clipboard**, and
+**subscribe to lifecycle events** (`open` / `save` / `text_change` /
+`mode_change` / `vault_change` / `config_change`). The surface is intentionally
+small but no longer a dead end — a plugin can do real work on the text the
+user is looking at.
 
 What's still missing (custom UI panels, timers, inter-plugin calls) is listed
 honestly under [What's NOT exposed](#whats-not-exposed-yet) at the bottom.
@@ -62,8 +65,9 @@ the app exits).
 
 ## The `descry` global
 
-A handful of top-level functions plus two sub-tables (`descry.buffer`,
-`descry.vault`).
+A handful of top-level functions plus four sub-tables (`descry.buffer`,
+`descry.vault`, `descry.decorations`, `descry.clipboard`) and one field,
+`descry.version` (the app version string, e.g. `"0.83.0"`).
 
 ### `descry.register_action(name, fn)`
 
@@ -84,18 +88,39 @@ when the user binds a key — your action will show in the command palette
 but won't fire from the keystroke. This is deliberate; tell the user to
 pick a different name if it matters.
 
-### `descry.notify(message)`
+### `descry.notify(message [, ms])`
 
 Push a one-line toast onto the status bar. Use this for transient
 "happened" feedback ("indexed 142 files", "selection cleaned"). Long
-messages get clipped at the right edge — keep it under ~80 chars.
+messages get clipped at the right edge — keep it under ~80 chars. The
+optional `ms` overrides how long the toast stays (default ~3.5 s).
 
 ```lua
 descry.notify("hello from a plugin")
+descry.notify("this one lingers", 8000)
 ```
 
 `message` must be a string. The text also gets logged to stderr so
 plugin authors running Descry from a terminal can see what fired.
+
+### `descry.log(...)`
+
+`print`-style logging to the log file / stderr only — no toast. Any number
+of values, tostring'd and tab-joined. Use it for diagnostics you don't want
+the user to see.
+
+### `descry.invoke(name)`
+
+Run any action by name — a built-in (`"save"`, `"toggle_edit"`,
+`"vault_search"`, …: the same ids the keybindings overlay shows) or another
+plugin's action. Returns `true` if something ran.
+
+```lua
+descry.register_action("save_and_preview", function()
+    descry.invoke("save")
+    descry.set_edit_mode(false)
+end)
+```
 
 ### `descry.dialog(message)` or `descry.dialog(title, message)`
 
@@ -109,8 +134,54 @@ descry.dialog("Reindex", "Scanned 142 files in 0.3s.")
 ```
 
 There is no Cancel button and no return value — `dialog` is purely a
-notification, not a prompt. If you need user input, you don't have it
-yet; either fall back to `notify` for now or open an issue.
+notification. For input use the two prompts below.
+
+### `descry.confirm(title, message [, yes_label, no_label])`
+
+Modal yes/no using the app's own confirm dialog. Returns `true` when the
+user picks the affirmative button (or presses `Y`), `false` on `Esc` / the
+safe button. Labels default to "Yes" / "No".
+
+```lua
+if descry.confirm("Reindex", "Rebuild the whole index? Takes a while.",
+                  "Rebuild", "Cancel") then
+    rebuild()
+end
+```
+
+### `descry.prompt(title [, default [, description]])`
+
+Modal single-line text input (the compact prompt the Plugins overlay uses
+for config values). Returns the string on OK / Enter, or `nil` on cancel.
+`default` pre-fills the field (selected, so typing replaces it);
+`description` is a muted help line under the title.
+
+```lua
+local name = descry.prompt("New note title", "Untitled", "Used as the H1.")
+if name then descry.buffer.insert("# " .. name .. "\n") end
+```
+
+### `descry.edit_mode()` / `descry.set_edit_mode([on])`
+
+`edit_mode()` returns `true` while the editor pane is shown, `false` in
+preview. `set_edit_mode` switches (see Navigation below).
+
+### `descry.theme([slot])`
+
+The current theme's colors as `{r, g, b}` tables (0–255), so decorations
+can match the palette. With a slot name returns one color; with no
+argument returns a table of every slot. Slots: `bg`, `fg`, `heading`,
+`quote`, `link`, `code_bg`, `muted`, `sidebar_bg`, `sidebar_hover`,
+`sidebar_active`, `status_bg`, `status_fg`, `selection`, `cursor`.
+
+```lua
+local link = descry.theme("link")           -- e.g. {122, 162, 247}
+descry.decorations.add(0, 10, { underline = link })
+```
+
+### `descry.clipboard.get()` / `descry.clipboard.set(text)`
+
+Read the system clipboard (string or `nil`) / replace it.
 
 ---
 
@@ -132,7 +203,10 @@ calls on it are silently ignored.
 | `descry.buffer.cursor()` | integer | caret byte offset |
 | `descry.buffer.set_cursor(pos)` | — | move the caret to byte `pos` (clamped) |
 | `descry.buffer.length()` | integer | document length in bytes |
+| `descry.buffer.line_count()` | integer | number of lines (1 + newlines) |
 | `descry.buffer.path()` | string or `nil` | the note's file path, or nil if unsaved |
+| `descry.buffer.selection_range()` | `lo, hi` or `nil` | byte range `[lo, hi)` of the selection |
+| `descry.buffer.set_selection(lo, hi)` | — | select bytes `[lo, hi)`, caret at `hi` (clamped) |
 
 ```lua
 -- Uppercase the current selection.
@@ -146,11 +220,21 @@ end)
 
 | Call | Returns | Notes |
 |------|---------|-------|
-| `descry.vault.list()` | array of strings | every markdown note's path (folders/images excluded) |
+| `descry.vault.list()` | array of strings | every note's path (`.md` / `.markdown` / `.txt`; folders and images excluded) |
+| `descry.vault.dir()` | string or `nil` | the vault root folder |
+| `descry.vault.refresh()` | — | rescan the folder so the sidebar picks up files you wrote with `io` (fires `vault_change`) |
 
 ```lua
 descry.register_action("note_count", function()
     descry.notify(#descry.vault.list() .. " notes in the vault")
+end)
+
+-- Create a note on disk, then show + open it.
+descry.register_action("scratch_note", function()
+    local p = descry.vault.dir() .. "/scratch.md"
+    local f = io.open(p, "wb"); if f then f:write("# scratch\n"); f:close() end
+    descry.vault.refresh()
+    descry.open(p)
 end)
 ```
 
@@ -223,6 +307,9 @@ on a plugin reload.
 | `"open"` | a note is loaded from disk into the active document |
 | `"save"` | the active document is written to its file |
 | `"text_change"` | the document's text changed this frame (typing, paste, undo, a plugin edit) |
+| `"mode_change"` | the view switched between edit and preview (`descry.edit_mode()` tells which) |
+| `"vault_change"` | the vault root changed or was rescanned (new/renamed/deleted files, `descry.vault.refresh()`) |
+| `"config_change"` | a config value was changed from the Plugins overlay / settings modal / `descry.config_set` |
 
 ```lua
 -- Stamp an updated-time into YAML frontmatter on every save.
@@ -236,6 +323,46 @@ the others still run, and the editor keeps going. Beware editing the buffer
 from inside `text_change` — your edit triggers another `text_change`. It is
 frame-throttled (not a hard loop), but guard against re-entrancy if your
 handler writes to the buffer.
+
+---
+
+## Settings: `descry.config`
+
+Plugins keep their settings in the app's `settings.lua` (under the
+`plugins` table) and get a settings UI for free: every declared key shows in
+the **Plugins overlay** (Ctrl+Alt+P) and in the per-plugin **settings**
+modal (the `settings` chip on the plugin's row), with a type-aware editor —
+a toggle for booleans, `‹ ›` cycling for choices, a validated prompt for
+numbers and strings, `R` to reset, `Reset all` per plugin.
+
+```lua
+-- descry.config(key [, default [, opts]]) -> value
+local width = descry.config("format.max_column", 80, {
+    type = "number", min = 20, max = 400,
+    desc = "Wrap paragraphs at this column",
+})
+local on = descry.config("rainbow.enabled", false,
+    { type = "bool", desc = "Color every line of the note" })
+local mode = descry.config("mytool.mode", "fast",
+    { type = "choice", choices = { "fast", "careful" }, desc = "Trade-off" })
+```
+
+- **Keys** are `"<plugin>.<name>"` by convention; that prefix (or the plugin
+  that declared the key at load time) is what groups keys per plugin in the
+  UI.
+- **Types**: `"string"` (default), `"number"`, `"bool"`, `"choice"`. Typed
+  keys come back as Lua numbers / booleans; untyped keys stay strings (use
+  `tonumber`). `min` / `max` bound numbers; `choices` lists the allowed
+  values.
+- **Declare at load time** (call `descry.config` at the top level of the
+  file) so the overlay lists the key before the action ever runs. Re-reading
+  the key later returns the live value, so read it inside the action rather
+  than caching it.
+- **`descry.config_set(key, value)`** writes a value (booleans and numbers
+  are accepted), persists `settings.lua` and fires `config_change` so other
+  handlers (and the plugin's own `refresh`) can react.
+
+The bundled `format.lua` and `rainbow.lua` are complete examples.
 
 ---
 
@@ -299,16 +426,16 @@ glue. If you need one, the codebase is small enough to add it in
 `src/lua_host.c` against `DESCRY_LIB[]` / the `LuaAppBridge` vtable:
 
 - **Custom UI**: no way to draw a panel, add a sidebar item, or render
-  inside the preview pane. `dialog`/`notify` is the entire output
-  surface.
-- **Inter-plugin calls**: no `descry.invoke("other_action")`.
+  inside the preview pane. `dialog` / `notify` / `confirm` / `prompt` and
+  decorations are the entire output surface.
 - **Async / timers**: no `set_timeout`, no background work.
 - **Direct keybind from Lua**: plugins register actions; users bind
   keys. There's no way for a plugin to claim a default keystroke.
-- **Vault writes**: `descry.vault.list()` is read-only — there's no
-  create/rename/delete helper (use Lua's `io` plus `descry.open`).
+- **Vault writes**: no create/rename/delete helper — use Lua's `io`, then
+  `descry.vault.refresh()` and `descry.open`.
 
-Buffer access, vault listing, file open/save, and lifecycle events —
+Buffer access, vault listing, file open/save, lifecycle events, typed
+settings, prompts, inter-plugin `invoke`, theme and clipboard access —
 all previously on this list — are now implemented (see the sections
 above).
 
@@ -321,38 +448,25 @@ around it in Lua.
 
 ## Config keys plugins commonly read
 
-Plugins share the same Lua state as the config loader, so anything in
-`init.lua` / `settings.lua` is reachable via standard Lua globals
-**only inside the file's top-level body during load** — once the
-config is stashed in the registry, the table is no longer the file's
-return value.
-
-If you need to read a config key from inside an action callback, expose
-it as a top-level `local` at load time:
-
-```lua
-local my_cfg = (descry_cfg or {}).my_plugin or {}
-
-descry.register_action("greet", function()
-    local who = my_cfg.greet_target or "world"
-    descry.notify("hello, " .. who)
-end)
-```
-
-…and in `init.lua`:
+Use `descry.config` (see **Settings** above) for anything user-tunable —
+it is persisted, editable from the UI, and typed. Values live in
+`settings.lua` under the `plugins` table, keyed by the full
+`"plugin.key"` string:
 
 ```lua
 return {
     -- ... other keys
-    my_plugin = {
-        greet_target = "descry user",
+    plugins = {
+        ["format.max_column"] = "100",
+        ["rainbow.enabled"]   = "true",
     },
 }
 ```
 
-(Note: `descry_cfg` isn't currently exposed as a global. This pattern
-will work once that hook lands; for now use Lua's built-in `require`
-for any plugin-private config.)
+Plugins share the same Lua state as the config loader, but the config
+table is stashed in the registry rather than exposed as a global, so
+read app-level keys through the `descry.*` accessors rather than poking
+at `init.lua` directly.
 
 ---
 

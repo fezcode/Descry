@@ -41,11 +41,16 @@ preview rendering, plugin host — without the Electron tax.
   shortcut.
 - **Plugin host** — drop `*.lua` in `data/plugins/`, register actions
   with `descry.register_action("name", fn)`, and do real work: read and
-  edit the open document (`descry.buffer.*`), list/open vault notes
-  (`descry.vault.list`, `descry.open`), and subscribe to `open` / `save`
-  / `text_change` events (`descry.on`). Surface output with
-  `descry.notify` / `descry.dialog`. The Plugins overlay lists every
-  loaded file and the actions each registered, with a hot-reload button.
+  edit the open document (`descry.buffer.*`), list/refresh/open vault
+  notes (`descry.vault.*`, `descry.open`), run other actions
+  (`descry.invoke`), and subscribe to `open` / `save` / `text_change` /
+  `mode_change` / `vault_change` events (`descry.on`). Surface output
+  with `descry.notify` / `descry.dialog`, ask with `descry.confirm` /
+  `descry.prompt`. Declare typed settings with `descry.config(key,
+  default, {type=…})` and they get a real editor: the Plugins overlay
+  lists every loaded file, its actions, an on/off switch, a per-plugin
+  **settings** modal (toggles, choices, validated numbers) and a
+  hot-reload button.
 - **LaTeX math** — inline `$…$` and display `$$…$$` spans render
   typographically: Greek letters, operators, `\frac{a}{b}`, roots, and
   simple super/subscripts become real Unicode glyphs (`$\sum_{i=1}^{n}

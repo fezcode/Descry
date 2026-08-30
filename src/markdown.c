@@ -183,6 +183,12 @@ static int cb_enter_block(MD_BLOCKTYPE t, void* detail, void* ud)
                 c->line_start = c->doc->len;
             }
             break;
+        case MD_BLOCK_HR:
+            /* A rule has no text: emit the line right away, framed by blanks
+             * so it doesn't glue itself to the paragraph above or below. */
+            emit_blank(c);
+            emit_line(c, LINE_HR, 0, c->doc->len, 0);
+            break;
         case MD_BLOCK_TABLE:  c->in_table = 1; c->in_thead = 0; break;
         case MD_BLOCK_THEAD:  c->in_thead = 1; break;
         case MD_BLOCK_TBODY:  c->in_thead = 0; break;
@@ -233,6 +239,9 @@ static int cb_leave_block(MD_BLOCKTYPE t, void* detail, void* ud)
             finalize_current_line(c);
             c->in_text_block = 0;
             if (c->quote_depth == 0 && c->list_depth == 0) emit_blank(c);
+            break;
+        case MD_BLOCK_HR:
+            emit_blank(c);
             break;
         case MD_BLOCK_TABLE:
             c->in_table = 0;

@@ -31,6 +31,8 @@ typedef enum {
     ICON_COMMAND,
     /* Split live-preview — panel split into two columns. */
     ICON_SPLIT,
+    /* Plugins overlay — a plug. */
+    ICON_PLUGIN,
     ICON_COUNT,
 } IconId;
 

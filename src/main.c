@@ -30,6 +30,7 @@
 
 #ifdef _WIN32
   #include <windows.h>
+  #include <shlobj.h>       /* SHChangeNotify — file-association refresh */
   #include <SDL_syswm.h>
 #else
   #include <unistd.h>
@@ -120,7 +121,7 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.82.2"
+#define DESCRY_VERSION "0.83.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -1499,18 +1500,23 @@ static int app_reload_fonts(App* a)
     int sh1 = a->cfg_font_size_h1;
     int sh2 = a->cfg_font_size_h2;
     int sh3 = a->cfg_font_size_h3;
+    /* User-chosen base style per slot; the inline bold/italic variants are
+     * layered on top so **bold** inside an italic body reads bold-italic. */
+    FontStyle sb = (FontStyle)(a->cfg_font_style      & 3);
+    FontStyle si = (FontStyle)(a->cfg_font_style_ide  & 3);
+    FontStyle sm = (FontStyle)(a->cfg_font_style_mono & 3);
 
-    a->font_ide               = font_create(a->renderer, fpi, sz, FONT_STYLE_REGULAR);
-    a->font_body              = font_create(a->renderer, fp, sz,  FONT_STYLE_REGULAR);
-    a->font_body_bold         = font_create(a->renderer, fp, sz,  FONT_STYLE_BOLD);
-    a->font_body_italic       = font_create(a->renderer, fp, sz,  FONT_STYLE_ITALIC);
+    a->font_ide               = font_create(a->renderer, fpi, sz, si);
+    a->font_body              = font_create(a->renderer, fp, sz,  sb);
+    a->font_body_bold         = font_create(a->renderer, fp, sz,  sb | FONT_STYLE_BOLD);
+    a->font_body_italic       = font_create(a->renderer, fp, sz,  sb | FONT_STYLE_ITALIC);
     a->font_body_bold_italic  = font_create(a->renderer, fp, sz,  FONT_STYLE_BOLD_ITALIC);
-    a->font_h1                = font_create(a->renderer, fp, sh1, FONT_STYLE_REGULAR);
-    a->font_h2                = font_create(a->renderer, fp, sh2, FONT_STYLE_REGULAR);
-    a->font_h3                = font_create(a->renderer, fp, sh3, FONT_STYLE_REGULAR);
-    a->font_code              = font_create(a->renderer, fpm, sz, FONT_STYLE_REGULAR);
-    a->font_code_bold         = font_create(a->renderer, fpm, sz, FONT_STYLE_BOLD);
-    a->font_code_italic       = font_create(a->renderer, fpm, sz, FONT_STYLE_ITALIC);
+    a->font_h1                = font_create(a->renderer, fp, sh1, sb);
+    a->font_h2                = font_create(a->renderer, fp, sh2, sb);
+    a->font_h3                = font_create(a->renderer, fp, sh3, sb);
+    a->font_code              = font_create(a->renderer, fpm, sz, sm);
+    a->font_code_bold         = font_create(a->renderer, fpm, sz, sm | FONT_STYLE_BOLD);
+    a->font_code_italic       = font_create(a->renderer, fpm, sz, sm | FONT_STYLE_ITALIC);
     a->font_code_bold_italic  = font_create(a->renderer, fpm, sz, FONT_STYLE_BOLD_ITALIC);
     if (!a->font_ide || !a->font_body || !a->font_body_bold ||
         !a->font_body_italic || !a->font_body_bold_italic ||
@@ -1718,12 +1724,12 @@ static void update_window_title(App* a)
 
 /* Called by the Lua host when a plugin invokes descry.notify(s). Stores
  * the message and an expiry time; the status bar shows it until expiry. */
-static void on_lua_notify(void* userdata, const char* msg)
+static void on_lua_notify(void* userdata, const char* msg, int ms)
 {
     App* a = userdata;
     free(a->notification_msg);
     a->notification_msg   = strdup(msg);
-    a->notification_until = SDL_GetTicks() + 3500;
+    a->notification_until = SDL_GetTicks() + (ms > 0 ? (uint32_t)ms : 3500u);
 }
 
 /* Forward decl — info_modal pumps SDL events like confirm_action does. */
@@ -2315,14 +2321,90 @@ static const char* app_plugin_dir(App* a)
  * settings_persist PRESERVES (loose top-level keys there are clobbered on
  * save). Values are strings; descry.config(key, default) reads one and
  * registers the key so the Plugins overlay can list + edit it. */
+enum { PCFG_STRING = 0, PCFG_NUMBER = 1, PCFG_BOOL = 2, PCFG_CHOICE = 3 };
+
 typedef struct {
     char key[64];
     char val[260];   /* current value (loaded or edited); empty = use def */
     char def[260];   /* default from the first descry.config call         */
     int  declared;   /* a plugin read this key this session               */
+    /* Schema (descry.config's opts table) for the settings UI. */
+    char   owner[64];    /* plugin that declared it ("" = unknown)        */
+    char   desc[160];    /* one-line description, may be empty           */
+    int    type;         /* PCFG_*                                        */
+    char   choices[256]; /* '|'-separated, PCFG_CHOICE only              */
+    double min, max;
+    int    has_range;    /* bit 1 = min set, bit 2 = max set             */
 } PluginCfg;
 static PluginCfg g_plugin_cfg[64];
 static int       g_plugin_cfg_count;
+
+/* Owner of a key: the loading plugin when declared during a load, else
+ * the "plugin." prefix of the key itself (the convention every bundled
+ * plugin follows). */
+static void plugin_cfg_guess_owner(PluginCfg* e, const char* loading)
+{
+    if (e->owner[0]) return;
+    if (loading && *loading) { snprintf(e->owner, sizeof e->owner, "%s", loading); return; }
+    const char* dot = strchr(e->key, '.');
+    if (dot && dot > e->key)
+        snprintf(e->owner, sizeof e->owner, "%.*s", (int)(dot - e->key), e->key);
+}
+
+/* Number of declared keys owned by `owner` (NULL/"" = every declared key). */
+static int plugin_cfg_count_for(const char* owner)
+{
+    int n = 0;
+    for (int i = 0; i < g_plugin_cfg_count; ++i) {
+        if (!g_plugin_cfg[i].declared) continue;
+        if (owner && *owner && strcmp(g_plugin_cfg[i].owner, owner) != 0) continue;
+        n++;
+    }
+    return n;
+}
+
+/* Truthiness of a PCFG_BOOL value string. */
+static int plugin_cfg_truthy(const char* v)
+{
+    return v && (strcmp(v, "true") == 0 || strcmp(v, "1") == 0 ||
+                 strcmp(v, "on") == 0   || strcmp(v, "yes") == 0);
+}
+
+/* i-th '|'-separated choice into out; 0 if out of range. */
+static int plugin_cfg_choice_at(const PluginCfg* e, int i, char* out, size_t cap)
+{
+    const char* p = e->choices;
+    int k = 0;
+    while (*p) {
+        const char* bar = strchr(p, '|');
+        size_t n = bar ? (size_t)(bar - p) : strlen(p);
+        if (k == i) {
+            if (n >= cap) n = cap - 1;
+            memcpy(out, p, n); out[n] = 0;
+            return 1;
+        }
+        k++;
+        if (!bar) break;
+        p = bar + 1;
+    }
+    return 0;
+}
+
+static int plugin_cfg_choice_count(const PluginCfg* e)
+{
+    if (!e->choices[0]) return 0;
+    int n = 1;
+    for (const char* p = e->choices; *p; ++p) if (*p == '|') n++;
+    return n;
+}
+
+static int plugin_cfg_choice_index(const PluginCfg* e, const char* v)
+{
+    char c[128];
+    for (int i = 0; plugin_cfg_choice_at(e, i, c, sizeof c); ++i)
+        if (strcmp(c, v) == 0) return i;
+    return -1;
+}
 
 static PluginCfg* plugin_cfg_find(const char* key)
 {
@@ -2352,12 +2434,56 @@ static const char* plugin_cfg_value(const PluginCfg* e)
 /* descry.config bridge: read (registering the key) with a default. */
 static const char* br_config_get(void* ud, const char* key, const char* def)
 {
-    (void)ud;
+    App* a = ud;
     PluginCfg* e = plugin_cfg_intern(key);
     if (!e) return def ? def : "";
     e->declared = 1;
     if (e->def[0] == 0 && def) snprintf(e->def, sizeof e->def, "%s", def);
+    plugin_cfg_guess_owner(e, lua_host_current_plugin(a->lua));
     return plugin_cfg_value(e);
+}
+
+static int  settings_persist(App* a);
+
+/* descry.config_set bridge: write + persist. */
+static void br_config_set(void* ud, const char* key, const char* val)
+{
+    App* a = ud;
+    PluginCfg* e = plugin_cfg_intern(key);
+    if (!e) return;
+    snprintf(e->val, sizeof e->val, "%s", val ? val : "");
+    plugin_cfg_guess_owner(e, lua_host_current_plugin(a->lua));
+    settings_persist(a);
+}
+
+/* descry.config(key, def, opts) bridge: remember the key's schema. */
+static void br_config_declare(void* ud, const char* key, const char* def,
+                              const char* type, const char* desc,
+                              const char* choices,
+                              double mn, double mx, int has_range)
+{
+    App* a = ud;
+    PluginCfg* e = plugin_cfg_intern(key);
+    if (!e) return;
+    e->declared = 1;
+    if (def && *def) snprintf(e->def, sizeof e->def, "%s", def);
+    if (type) {
+        if      (strcmp(type, "number") == 0) e->type = PCFG_NUMBER;
+        else if (strcmp(type, "bool")   == 0) e->type = PCFG_BOOL;
+        else if (strcmp(type, "choice") == 0) e->type = PCFG_CHOICE;
+        else                                  e->type = PCFG_STRING;
+    }
+    if (desc)    snprintf(e->desc,    sizeof e->desc,    "%s", desc);
+    if (choices) snprintf(e->choices, sizeof e->choices, "%s", choices);
+    e->min = mn; e->max = mx; e->has_range = has_range;
+    plugin_cfg_guess_owner(e, lua_host_current_plugin(a->lua));
+}
+
+static int br_config_type(void* ud, const char* key)
+{
+    (void)ud;
+    PluginCfg* e = plugin_cfg_find(key);
+    return e ? e->type : PCFG_STRING;
 }
 
 /* Load persisted values from settings.lua's `plugins` table at boot. */
@@ -2414,6 +2540,118 @@ static int plugin_enabled_cb(const char* name, void* ud)
 
 static void br_decor_clear(void* ud) { decor_clear(&((App*)ud)->decor); }
 
+/* ---- v0.83 bridge additions --------------------------------------------- */
+typedef void (*ActionFn)(App*);
+static ActionFn find_action(const char* name);
+static bool confirm_action(App* a, const char* title, const char* msg,
+                           const char* lab0, const char* lab1);
+static bool app_prompt_modal(App* a, const char* title, const char* desc,
+                             const char* def, char* out, size_t cap,
+                             const PluginCfg* schema);
+static void app_vault_rescan(App* a);
+
+static int br_invoke(void* ud, const char* name)
+{
+    App* a = ud;
+    ActionFn fn = find_action(name);
+    if (fn) { fn(a); return 0; }
+    return lua_host_invoke_action(a->lua, name);
+}
+
+static int br_confirm(void* ud, const char* title, const char* msg,
+                      const char* yes, const char* no)
+{
+    return confirm_action((App*)ud, title, msg,
+                          yes && *yes ? yes : "Yes",
+                          no  && *no  ? no  : "No") ? 1 : 0;
+}
+
+static int br_prompt(void* ud, const char* title, const char* desc,
+                     const char* def, char* out, size_t cap)
+{
+    return app_prompt_modal((App*)ud, title, desc, def, out, cap, NULL) ? 1 : 0;
+}
+
+static const char* br_vault_dir(void* ud)
+{
+    App* a = ud;
+    return (a->vault.dir && a->vault.dir[0]) ? a->vault.dir : NULL;
+}
+
+static void br_vault_refresh(void* ud) { app_vault_rescan((App*)ud); }
+
+static int br_buf_sel_range(void* ud, size_t* lo, size_t* hi)
+{
+    App* a = ud;
+    if (!buffer_has_selection(&a->buf)) return 0;
+    buffer_get_selection(&a->buf, lo, hi);
+    return 1;
+}
+
+static void br_buf_set_sel(void* ud, size_t lo, size_t hi)
+{
+    App* a = ud;
+    if (hi > a->buf.len) hi = a->buf.len;
+    if (lo > hi) lo = hi;
+    a->buf.sel_anchor = (lo == hi) ? -1 : (long)lo;
+    a->buf.cursor     = hi;
+}
+
+static int br_get_edit_mode(void* ud) { return ((App*)ud)->edit_mode ? 1 : 0; }
+
+static char* br_clipboard_get(void* ud)
+{
+    (void)ud;
+    char* s = SDL_GetClipboardText();
+    if (!s) return NULL;
+    char* dup = strdup(s);
+    SDL_free(s);
+    return dup;
+}
+
+static void br_clipboard_set(void* ud, const char* s)
+{
+    (void)ud;
+    if (s) SDL_SetClipboardText(s);
+}
+
+static const char* const THEME_SLOT_NAMES[] = {
+    "bg", "fg", "heading", "quote", "link", "code_bg", "muted",
+    "sidebar_bg", "sidebar_hover", "sidebar_active", "status_bg",
+    "status_fg", "selection", "cursor", NULL
+};
+
+static const char* br_theme_slot(void* ud, int i)
+{
+    (void)ud;
+    if (i < 0) return NULL;
+    for (int k = 0; THEME_SLOT_NAMES[k]; ++k) if (k == i) return THEME_SLOT_NAMES[k];
+    return NULL;
+}
+
+static int br_theme_color(void* ud, const char* name, unsigned char rgb[3])
+{
+    App* a = ud;
+    const SDL_Color* c = NULL;
+    if      (!strcmp(name, "bg"))             c = &a->bg;
+    else if (!strcmp(name, "fg"))             c = &a->fg;
+    else if (!strcmp(name, "heading"))        c = &a->fg_heading;
+    else if (!strcmp(name, "quote"))          c = &a->fg_quote;
+    else if (!strcmp(name, "link"))           c = &a->fg_link;
+    else if (!strcmp(name, "code_bg"))        c = &a->bg_code;
+    else if (!strcmp(name, "muted"))          c = &a->fg_muted;
+    else if (!strcmp(name, "sidebar_bg"))     c = &a->bg_sidebar;
+    else if (!strcmp(name, "sidebar_hover"))  c = &a->bg_sidebar_hover;
+    else if (!strcmp(name, "sidebar_active")) c = &a->bg_sidebar_active;
+    else if (!strcmp(name, "status_bg"))      c = &a->bg_status;
+    else if (!strcmp(name, "status_fg"))      c = &a->fg_status;
+    else if (!strcmp(name, "selection"))      c = &a->bg_selection;
+    else if (!strcmp(name, "cursor"))         c = &a->fg_cursor;
+    if (!c) return 0;
+    rgb[0] = c->r; rgb[1] = c->g; rgb[2] = c->b;
+    return 1;
+}
+
 static void br_decor_add(void* ud, size_t start, size_t end,
                          long fg, long bg, long ul)
 {
@@ -2446,8 +2684,54 @@ static void bridge_install(App* a)
         .decor_add       = br_decor_add,
         .config_get      = br_config_get,
         .set_edit_mode   = br_set_edit_mode,
+        .config_set      = br_config_set,
+        .config_declare  = br_config_declare,
+        .config_type     = br_config_type,
+        .invoke          = br_invoke,
+        .confirm         = br_confirm,
+        .prompt          = br_prompt,
+        .vault_dir       = br_vault_dir,
+        .vault_refresh   = br_vault_refresh,
+        .buf_sel_range   = br_buf_sel_range,
+        .buf_set_sel     = br_buf_set_sel,
+        .get_edit_mode   = br_get_edit_mode,
+        .clipboard_get   = br_clipboard_get,
+        .clipboard_set   = br_clipboard_set,
+        .theme_color     = br_theme_color,
+        .theme_slot      = br_theme_slot,
+        .version         = DESCRY_VERSION,
     };
     lua_host_set_bridge(a->lua, &b);
+}
+
+/* Rescan the vault root, keeping the sidebar's collapsed folders and the
+ * current selection intact. Every "something on disk changed" path funnels
+ * through here so the sidebar never silently forgets its state. */
+static void app_vault_rescan(App* a)
+{
+    if (!a->vault.dir || !a->vault.dir[0]) return;
+    /* Snapshot collapsed folder paths (items are freed by the scan). */
+    char** collapsed = NULL;
+    size_t ncol = 0;
+    for (size_t i = 0; i < a->vault.count; ++i) {
+        const VaultItem* it = &a->vault.items[i];
+        if (!it->is_dir || !it->collapsed) continue;
+        char** grown = realloc(collapsed, (ncol + 1) * sizeof *grown);
+        if (!grown) break;
+        collapsed = grown;
+        collapsed[ncol++] = strdup(it->path);
+    }
+    vault_scan(&a->vault, a->vault.dir);
+    for (size_t i = 0; i < a->vault.count; ++i) {
+        VaultItem* it = &a->vault.items[i];
+        if (!it->is_dir) continue;
+        for (size_t k = 0; k < ncol; ++k)
+            if (strcmp(collapsed[k], it->path) == 0) { it->collapsed = 1; break; }
+    }
+    for (size_t k = 0; k < ncol; ++k) free(collapsed[k]);
+    free(collapsed);
+    if (a->note_path) a->vault.selected = vault_index_of(&a->vault, a->note_path);
+    if (a->lua) lua_host_fire_event(a->lua, "vault_change");
 }
 
 /* Forward decl: confirm_discard's event pump calls app_render. */
@@ -2473,6 +2757,8 @@ static int  scroll_from_thumb_drag(int mouse_y, int inner_y, int inner_h,
 static void recent_dirs_push(App* a, const char* dir);
 static void recent_dirs_load(App* a);
 static int  filesystem_delete(const char* path, int is_dir);
+static void delete_prompt(char* out, size_t cap, const char* name,
+                          const char* path, int is_dir);
 static bool confirm_action(App* a, const char* title, const char* msg,
                            const char* lab0, const char* lab1);
 
@@ -2517,14 +2803,17 @@ static SDL_Rect confirm_box_rect(const App* a)
     }
     if (need + 40 > box_w) box_w = need + 40;
 
-    /* Button row must fit too: 16 | btn0 | 12 | btn1 | 16. */
+    /* Button row must fit too: 16 | btn0 | 12 | [btn2 | 12 |] btn1 | 16. */
     {
         const char* lab0 = a->confirm_btn0_label[0]
                            ? a->confirm_btn0_label : NULL;
         const char* lab1 = a->confirm_btn1_label[0]
                            ? a->confirm_btn1_label : "Cancel";
+        const char* lab2 = a->confirm_btn2_label[0]
+                           ? a->confirm_btn2_label : NULL;
         int bw = confirm_btn_w(a, lab1) + 32
-               + (lab0 ? confirm_btn_w(a, lab0) + 12 : 0);
+               + (lab0 ? confirm_btn_w(a, lab0) + 12 : 0)
+               + (lab2 ? confirm_btn_w(a, lab2) + 12 : 0);
         if (bw > box_w) box_w = bw;
     }
 
@@ -2558,21 +2847,34 @@ static int confirm_btn_w(const App* a, const char* label)
     return w < min_w ? min_w : w;
 }
 
+/* Button geometry shared by hit-test + render: btn1 (default/accent) is
+ * rightmost, the optional btn2 sits left of it, btn0 leftmost. */
+static void confirm_btn_layout(const App* a, int* b0_x, int* w0,
+                               int* b1_x, int* w1, int* b2_x, int* w2)
+{
+    SDL_Rect box = confirm_box_rect(a);
+    const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
+    const char* lab1 = a->confirm_btn1_label[0] ? a->confirm_btn1_label : "Cancel";
+    const char* lab2 = a->confirm_btn2_label[0] ? a->confirm_btn2_label : NULL;
+    *w1 = confirm_btn_w(a, lab1);
+    *w0 = lab0 ? confirm_btn_w(a, lab0) : 0;
+    *w2 = lab2 ? confirm_btn_w(a, lab2) : 0;
+    *b1_x = box.x + box.w - *w1 - 16;
+    *b2_x = lab2 ? *b1_x - *w2 - 12 : *b1_x;
+    *b0_x = *b2_x - *w0 - 12;
+}
+
 static int confirm_hit_test(const App* a, int mx, int my)
 {
     if (!a->confirm_active) return -1;
-    SDL_Rect box = confirm_box_rect(a);
     int sz_y  = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
-    const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
-    const char* lab1 = a->confirm_btn1_label[0] ? a->confirm_btn1_label : "Cancel";
-    int w1 = confirm_btn_w(a, lab1);
-    int w0 = lab0 ? confirm_btn_w(a, lab0) : 0;
+    int b0_x, w0, b1_x, w1, b2_x, w2;
+    confirm_btn_layout(a, &b0_x, &w0, &b1_x, &w1, &b2_x, &w2);
     int btn_y = confirm_btn_y(a);
-    int b1_x  = box.x + box.w - w1 - 16;
-    int b0_x  = b1_x - w0 - 12;
     if (my < btn_y || my >= btn_y + btn_h) return -1;
-    if (lab0 && mx >= b0_x && mx < b0_x + w0) return 0;
+    if (w0 && mx >= b0_x && mx < b0_x + w0) return 0;
+    if (w2 && mx >= b2_x && mx < b2_x + w2) return 2;
     if (mx >= b1_x && mx < b1_x + w1) return 1;
     return -1;
 }
@@ -2597,14 +2899,8 @@ static void render_confirm_modal(App* a)
     int msg_top   = title_top + sz_y + 14;
     int btn_y     = confirm_btn_y(a);
     int hint_top  = btn_y - 12 - sz_y;
-    const char* _lab0_for_w = a->confirm_btn0_label[0]
-                              ? a->confirm_btn0_label : NULL;
-    const char* _lab1_for_w = a->confirm_btn1_label[0]
-                              ? a->confirm_btn1_label : "Cancel";
-    int w1 = confirm_btn_w(a, _lab1_for_w);
-    int w0 = _lab0_for_w ? confirm_btn_w(a, _lab0_for_w) : 0;
-    int b1_x  = box.x + box.w - w1 - 16;
-    int b0_x  = b1_x - w0 - 12;
+    int b0_x, w0, b1_x, w1, b2_x, w2;
+    confirm_btn_layout(a, &b0_x, &w0, &b1_x, &w1, &b2_x, &w2);
 
     /* Title */
     font_draw_elided(a->font_ide, a->confirm_title, strlen(a->confirm_title),
@@ -2633,6 +2929,7 @@ static void render_confirm_modal(App* a)
     const char* lab0 = a->confirm_btn0_label[0] ? a->confirm_btn0_label : NULL;
     const char* lab1 = a->confirm_btn1_label[0]
                        ? a->confirm_btn1_label : "Cancel";
+    const char* lab2 = a->confirm_btn2_label[0] ? a->confirm_btn2_label : NULL;
 
     /* Btn0 — neutral fill, hover brightens. Pill-shaped. */
     if (lab0) {
@@ -2645,6 +2942,20 @@ static void render_confirm_modal(App* a)
         int lw = font_measure(a->font_ide, lab0, strlen(lab0));
         font_draw_line(a->font_ide, lab0, strlen(lab0),
                        b0_x + (w0 - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
+                       a->fg);
+    }
+    /* Btn2 — optional secondary choice, same neutral treatment. */
+    if (lab2) {
+        bool hover = (a->confirm_hover == 2);
+        SDL_Rect r = { b2_x, btn_y, w2, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+            a->bg_sidebar_hover.b, hover ? 255 : 180);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_ide, lab2, strlen(lab2));
+        font_draw_line(a->font_ide, lab2, strlen(lab2),
+                       b2_x + (w2 - lw) / 2,
                        btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
                        a->fg);
     }
@@ -2673,11 +2984,13 @@ static void render_confirm_modal(App* a)
                      box.w - 40, a->fg_muted);
 }
 
-/* Synchronous yes/no modal. lab0 is the affirmative action (returns true),
- * lab1 is the safe/cancel (returns false). Both labels are optional: NULL
- * falls back to "Discard" / "Cancel" so legacy callers still read right. */
-static bool confirm_action(App* a, const char* title, const char* msg,
-                           const char* lab0, const char* lab1)
+/* Synchronous modal with up to three buttons. Returns the index of the
+ * button chosen: 0 = lab0 (affirmative), 1 = lab1 (safe / Cancel, also
+ * Esc), 2 = lab2 (optional extra). lab2 may be NULL for the classic
+ * two-button prompt. */
+static int confirm_action_n(App* a, const char* title, const char* msg,
+                            const char* lab0, const char* lab1,
+                            const char* lab2)
 {
     snprintf(a->confirm_title, sizeof a->confirm_title, "%s", title ? title : "");
     snprintf(a->confirm_msg,   sizeof a->confirm_msg,   "%s", msg   ? msg   : "");
@@ -2687,6 +3000,9 @@ static bool confirm_action(App* a, const char* title, const char* msg,
     if (lab1) snprintf(a->confirm_btn1_label, sizeof a->confirm_btn1_label,
                        "%s", lab1);
     else      a->confirm_btn1_label[0] = 0;
+    if (lab2) snprintf(a->confirm_btn2_label, sizeof a->confirm_btn2_label,
+                       "%s", lab2);
+    else      a->confirm_btn2_label[0] = 0;
     a->confirm_active = true;
     a->confirm_choice = -1;
     a->confirm_hover  = 1;     /* default to the safe button */
@@ -2717,8 +3033,23 @@ static bool confirm_action(App* a, const char* title, const char* msg,
                         a->confirm_choice = a->confirm_hover < 0 ? 1 : a->confirm_hover;
                     else if (k == SDLK_y) a->confirm_choice = 0;
                     else if (k == SDLK_n) a->confirm_choice = 1;
-                    else if (k == SDLK_TAB || k == SDLK_LEFT || k == SDLK_RIGHT)
-                        a->confirm_hover = (a->confirm_hover == 0) ? 1 : 0;
+                    else if (k == SDLK_TAB || k == SDLK_LEFT || k == SDLK_RIGHT) {
+                        /* Cycle in visual order: btn0 -> btn2 -> btn1. */
+                        bool has0 = a->confirm_btn0_label[0] != 0;
+                        bool has2 = a->confirm_btn2_label[0] != 0;
+                        int  h = a->confirm_hover;
+                        int  fwd = (k != SDLK_LEFT);
+                        if (fwd) {
+                            if      (h == 0) h = has2 ? 2 : 1;
+                            else if (h == 2) h = 1;
+                            else             h = has0 ? 0 : (has2 ? 2 : 1);
+                        } else {
+                            if      (h == 1) h = has2 ? 2 : (has0 ? 0 : 1);
+                            else if (h == 2) h = has0 ? 0 : 1;
+                            else             h = 1;
+                        }
+                        a->confirm_hover = h;
+                    }
                     break;
                 }
             }
@@ -2729,7 +3060,15 @@ static bool confirm_action(App* a, const char* title, const char* msg,
     a->confirm_active = false;
     a->confirm_btn0_label[0] = 0;
     a->confirm_btn1_label[0] = 0;
-    return a->confirm_choice == 0;
+    a->confirm_btn2_label[0] = 0;
+    return a->confirm_choice;
+}
+
+/* Classic yes/no wrapper: true when lab0 (the affirmative) was chosen. */
+static bool confirm_action(App* a, const char* title, const char* msg,
+                           const char* lab0, const char* lab1)
+{
+    return confirm_action_n(a, title, msg, lab0, lab1, NULL) == 0;
 }
 
 static bool confirm_discard(App* a)
@@ -3718,12 +4057,28 @@ static void render_tinput_modal(App* a)
             a->fg, (SDL_Color){230, 110, 110, 255}
         };
         for (int i = 0; i < 2; ++i) {
+            bool hov = (i == a->tinput_ctx_hover);
+            if (hov) {
+                /* Same treatment as the main context menu: tinted row +
+                 * accent stripe on the left edge. */
+                SDL_Rect hr = { mr.x + 2, mr.y + i * rh_ctx, mr.w - 4, rh_ctx };
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+                    a->bg_sidebar_hover.b, 220);
+                fill_rrect(a->renderer, hr, 4);
+                SDL_Rect bar = { mr.x + 2, mr.y + i * rh_ctx + 2, 2, rh_ctx - 4 };
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->fg_link.r, a->fg_link.g, a->fg_link.b, 220);
+                fill_rrect(a->renderer, bar, 1);
+            }
+            SDL_Color tc = colors[i];
+            if (hov && i == 0) tc = a->fg_link;
             font_draw_line(a->font_ide,
                            TINPUT_CTX_LABELS[i], strlen(TINPUT_CTX_LABELS[i]),
                            mr.x + 12,
                            row_text_baseline(a->font_ide,
                                              mr.y + i * rh_ctx, rh_ctx),
-                           colors[i]);
+                           tc);
         }
     }
 
@@ -4131,6 +4486,19 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                 case SDL_MOUSEMOTION: {
                     a->tinput_hover = tinput_hit_test(a, e.motion.x, e.motion.y);
                     int frow = tinput_files_row_at(a, e.motion.x, e.motion.y);
+                    /* While the inline menu is up, the cursor inside it
+                     * highlights menu rows — not the file rows beneath. */
+                    a->tinput_ctx_hover = -1;
+                    if (a->tinput_ctx_active) {
+                        SDL_Rect mr = tinput_ctx_menu_rect(a);
+                        if (e.motion.x >= mr.x && e.motion.x < mr.x + mr.w &&
+                            e.motion.y >= mr.y && e.motion.y < mr.y + mr.h) {
+                            int rh_ctx = font_line_height(a->font_ide) + 8;
+                            a->tinput_ctx_hover = (e.motion.y - mr.y) / rh_ctx;
+                            if (a->tinput_ctx_hover > 1) a->tinput_ctx_hover = 1;
+                            frow = a->tinput_files_hover;   /* keep as-is */
+                        }
+                    }
                     a->tinput_files_hover = frow;
                     /* Drag the scrollbar thumb if the user grabbed it. */
                     if (a->sb_drag == SB_TINPUT) {
@@ -4190,6 +4558,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                             a->tinput_ctx_row    = frow;
                             a->tinput_ctx_x      = e.button.x;
                             a->tinput_ctx_y      = e.button.y;
+                            a->tinput_ctx_hover  = -1;
                         } else {
                             a->tinput_ctx_active = false;
                         }
@@ -4263,10 +4632,9 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
                                 bool is_dir =
                                     a->tinput_files_isdir[rrow];
                                 char prompt[1200];
-                                snprintf(prompt, sizeof prompt,
-                                    "Delete \"%s\"%s?\nThis cannot be undone.",
-                                    a->tinput_files[rrow],
-                                    is_dir ? " (folder must be empty)" : "");
+                                delete_prompt(prompt, sizeof prompt,
+                                              a->tinput_files[rrow], victim,
+                                              is_dir);
                                 a->tinput_ctx_active = false;
                                 if (confirm_action(a, "Delete", prompt,
                                                    "Delete", "Cancel"))
@@ -4587,6 +4955,652 @@ static bool app_dir_modal(App* a, const char* title, const char* start_dir,
     return ok;
 }
 
+/* ----------------------------- prompt modal ---------------------------- */
+/* A compact single-value editor: title, optional description, one input
+ * line, validation error, OK / Cancel. Used for plugin config values and
+ * descry.prompt — the folder-picker modal above is the wrong shape for a
+ * number. When `schema` is given, OK validates against its type/range. */
+
+static int wrap_text(App* a, Font* f, const char* text,
+                     int x, int y_top, int max_w, int line_h,
+                     SDL_Color color, bool draw);
+
+static int prompt_desc_lines(App* a, int box_w)
+{
+    if (!a->prompt_desc[0]) return 0;
+    int row_h = font_line_height(a->font_ide) + 2;
+    return wrap_text(a, a->font_ide, a->prompt_desc, 0, 0, box_w - 40, row_h,
+                     (SDL_Color){0, 0, 0, 0}, false);
+}
+
+static SDL_Rect prompt_box_rect(App* a)
+{
+    int sz_y = font_line_height(a->font_ide);
+    int w = 520;
+    if (w > a->win_w - 24) w = a->win_w - 24;
+    int nd = prompt_desc_lines(a, w);
+    /* pad / title / gap / desc / gap / input / gap / err / gap / hint / gap / btn / pad */
+    int h = 20 + sz_y + 10 + nd * (sz_y + 2) + (nd ? 10 : 0)
+          + (sz_y + 16) + 8 + sz_y + 12 + sz_y + 10 + (sz_y + 16) + 20;
+    if (h > a->win_h - 24) h = a->win_h - 24;
+    return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
+}
+
+static int prompt_hit_test(App* a, int mx, int my)
+{
+    if (!a->prompt_active) return -1;
+    SDL_Rect box = prompt_box_rect(a);
+    int sz_y  = font_line_height(a->font_ide);
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 20;
+    int w_ok = confirm_btn_w(a, "OK"), w_cn = confirm_btn_w(a, "Cancel");
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_cn - 12;
+    if (my < btn_y || my >= btn_y + btn_h) return -1;
+    if (mx >= b1_x && mx < b1_x + w_ok) return 0;
+    if (mx >= b0_x && mx < b0_x + w_cn) return 1;
+    return -1;
+}
+
+static void render_prompt_modal(App* a)
+{
+    if (!a->prompt_active) return;
+    overlay_backdrop(a);
+    SDL_Rect box = prompt_box_rect(a);
+    overlay_card(a, box);
+
+    int sz_y = font_line_height(a->font_ide);
+    int y = box.y + 20;
+    font_draw_elided(a->font_ide, a->prompt_title, strlen(a->prompt_title),
+                     box.x + 20, y + font_ascent(a->font_ide), box.w - 40,
+                     a->fg_link);
+    y += sz_y + 10;
+    int nd = prompt_desc_lines(a, box.w);
+    if (nd) {
+        wrap_text(a, a->font_ide, a->prompt_desc, box.x + 20, y, box.w - 40,
+                  sz_y + 2, a->fg_muted, true);
+        y += nd * (sz_y + 2) + 10;
+    }
+
+    /* Input field. */
+    int in_h = sz_y + 16;
+    SDL_Rect in_r = { box.x + 20, y, box.w - 40, in_h };
+    SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, 255);
+    fill_rrect(a->renderer, in_r, 6);
+    SDL_Color border_c = a->prompt_err_text[0]
+        ? (SDL_Color){230, 110, 110, 220}
+        : (SDL_Color){a->fg_link.r, a->fg_link.g, a->fg_link.b, 200};
+    SDL_SetRenderDrawColor(a->renderer, border_c.r, border_c.g, border_c.b, border_c.a);
+    draw_rrect(a->renderer, in_r, 6);
+    int tx = in_r.x + 10;
+    int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
+    SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
+    SDL_RenderSetClipRect(a->renderer, &clip);
+    {
+        InputField f = {
+            .buf = a->prompt_text, .cap = (int)sizeof a->prompt_text,
+            .len = &a->prompt_len, .cursor = &a->prompt_cursor,
+            .sel_anchor = &a->prompt_sel_anchor,
+        };
+        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
+    }
+    if (a->prompt_len > 0)
+        font_draw_line(a->font_ide, a->prompt_text, a->prompt_len, tx, ty, a->fg);
+    int cw = font_measure(a->font_ide, a->prompt_text, a->prompt_cursor);
+    SDL_Rect caret = { tx + cw, in_r.y + 4, 2, in_h - 8 };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_cursor.r, a->fg_cursor.g, a->fg_cursor.b, 255);
+    SDL_RenderFillRect(a->renderer, &caret);
+    SDL_RenderSetClipRect(a->renderer, NULL);
+    y += in_h + 8;
+
+    /* Validation error (red) — reserved row, so the layout never jumps. */
+    if (a->prompt_err_text[0]) {
+        font_draw_elided(a->font_ide, a->prompt_err_text, strlen(a->prompt_err_text),
+                         box.x + 20, y + font_ascent(a->font_ide), box.w - 40,
+                         (SDL_Color){230, 110, 110, 255});
+    }
+
+    /* Buttons + hint, anchored to the bottom. */
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 20;
+    const char* lab_ok = "OK";
+    const char* lab_cn = "Cancel";
+    int w_ok = confirm_btn_w(a, lab_ok), w_cn = confirm_btn_w(a, lab_cn);
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_cn - 12;
+    {
+        bool hover = (a->prompt_hover == 1);
+        SDL_Rect r = { b0_x, btn_y, w_cn, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+            a->bg_sidebar_hover.b, hover ? 255 : 180);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_ide, lab_cn, strlen(lab_cn));
+        font_draw_line(a->font_ide, lab_cn, strlen(lab_cn),
+                       b0_x + (w_cn - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
+                       a->fg);
+    }
+    {
+        bool hover = (a->prompt_hover == 0);
+        SDL_Rect r = { b1_x, btn_y, w_ok, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_ide, lab_ok, strlen(lab_ok));
+        int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
+        SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
+                                     : (SDL_Color){240, 240, 250, 255};
+        font_draw_line(a->font_ide, lab_ok, strlen(lab_ok),
+                       b1_x + (w_ok - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
+                       tc);
+    }
+    const char* hint = "Enter save  -  Esc cancel";
+    font_draw_elided(a->font_ide, hint, strlen(hint),
+                     box.x + 20, btn_y - 10 - sz_y + font_ascent(a->font_ide),
+                     box.w - 40, a->fg_muted);
+}
+
+/* Validate `text` against a config schema. Returns true if acceptable;
+ * otherwise writes a human-readable reason into err. */
+static bool pcfg_validate(const PluginCfg* e, const char* text,
+                          char* err, size_t errcap)
+{
+    err[0] = 0;
+    if (!e) return true;
+    if (e->type == PCFG_NUMBER) {
+        char* end = NULL;
+        double v = strtod(text, &end);
+        while (end && *end == ' ') end++;
+        if (!text[0] || !end || *end) {
+            snprintf(err, errcap, "must be a number");
+            return false;
+        }
+        if ((e->has_range & 1) && v < e->min) {
+            snprintf(err, errcap, "minimum is %g", e->min);
+            return false;
+        }
+        if ((e->has_range & 2) && v > e->max) {
+            snprintf(err, errcap, "maximum is %g", e->max);
+            return false;
+        }
+    } else if (e->type == PCFG_CHOICE) {
+        if (plugin_cfg_choice_index(e, text) < 0) {
+            snprintf(err, errcap, "must be one of: %.150s", e->choices);
+            for (char* p = err; *p; ++p) if (*p == '|') *p = ' ';
+            return false;
+        }
+    } else if (e->type == PCFG_BOOL) {
+        if (strcmp(text, "true") != 0 && strcmp(text, "false") != 0) {
+            snprintf(err, errcap, "must be true or false");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool app_prompt_modal(App* a, const char* title, const char* desc,
+                             const char* def, char* out, size_t cap,
+                             const PluginCfg* schema)
+{
+    snprintf(a->prompt_title, sizeof a->prompt_title, "%s", title ? title : "");
+    snprintf(a->prompt_desc,  sizeof a->prompt_desc,  "%s", desc  ? desc  : "");
+    snprintf(a->prompt_text,  sizeof a->prompt_text,  "%s", def   ? def   : "");
+    a->prompt_len        = (int)strlen(a->prompt_text);
+    a->prompt_cursor     = a->prompt_len;
+    a->prompt_sel_anchor = a->prompt_len > 0 ? 0 : -1;   /* type to replace */
+    a->prompt_choice     = -1;
+    a->prompt_hover      = 0;
+    a->prompt_err_text[0] = 0;
+    a->prompt_active     = true;
+
+    bool had_text_input = SDL_IsTextInputActive();
+    SDL_StartTextInput();
+
+    while (a->prompt_choice < 0 && a->running) {
+        SDL_Event e;
+        if (!SDL_WaitEventTimeout(&e, 16)) { app_render(a); continue; }
+        InputField f = {
+            .buf = a->prompt_text, .cap = (int)sizeof a->prompt_text,
+            .len = &a->prompt_len, .cursor = &a->prompt_cursor,
+            .sel_anchor = &a->prompt_sel_anchor,
+        };
+        switch (e.type) {
+            case SDL_QUIT: a->prompt_choice = 1; break;
+            case SDL_MOUSEMOTION:
+                a->prompt_hover = prompt_hit_test(a, e.motion.x, e.motion.y);
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+                if (e.button.button == SDL_BUTTON_LEFT) {
+                    int btn = prompt_hit_test(a, e.button.x, e.button.y);
+                    if (btn == 1) a->prompt_choice = 1;
+                    else if (btn == 0) {
+                        if (pcfg_validate(schema, a->prompt_text,
+                                          a->prompt_err_text,
+                                          sizeof a->prompt_err_text))
+                            a->prompt_choice = 0;
+                    }
+                }
+                break;
+            case SDL_TEXTINPUT:
+                input_insert(&f, e.text.text, (int)strlen(e.text.text));
+                a->prompt_err_text[0] = 0;
+                break;
+            case SDL_KEYDOWN: {
+                SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_ESCAPE) { a->prompt_choice = 1; break; }
+                if (input_handle_keydown(&f, k, e.key.keysym.scancode,
+                                         e.key.keysym.mod)) {
+                    a->prompt_err_text[0] = 0;
+                    break;
+                }
+                if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                    if (pcfg_validate(schema, a->prompt_text,
+                                      a->prompt_err_text,
+                                      sizeof a->prompt_err_text))
+                        a->prompt_choice = 0;
+                }
+                break;
+            }
+        }
+        app_render(a);
+    }
+    if (!had_text_input) SDL_StopTextInput();
+    a->prompt_active = false;
+    if (a->prompt_choice == 0 && out && cap > 0) {
+        snprintf(out, cap, "%s", a->prompt_text);
+        return true;
+    }
+    return false;
+}
+
+/* ----------------------------- plugin config modal ---------------------- */
+/* One card per plugin (or every plugin when owner == ""): each declared
+ * descry.config key with its description and a type-aware editor —
+ * bools toggle, choices cycle, numbers/strings open the prompt modal. */
+
+static void lua_config_changed(App* a)
+{
+    settings_persist(a);
+    if (a->lua) lua_host_fire_event(a->lua, "config_change");
+}
+
+/* Type-aware edit of one config entry. Returns true if the value changed. */
+static bool pcfg_edit_value(App* a, PluginCfg* e, int dir)
+{
+    char before[260];
+    snprintf(before, sizeof before, "%s", plugin_cfg_value(e));
+    if (e->type == PCFG_BOOL) {
+        snprintf(e->val, sizeof e->val, "%s",
+                 plugin_cfg_truthy(plugin_cfg_value(e)) ? "false" : "true");
+    } else if (e->type == PCFG_CHOICE && plugin_cfg_choice_count(e) > 0) {
+        int n = plugin_cfg_choice_count(e);
+        int i = plugin_cfg_choice_index(e, plugin_cfg_value(e));
+        if (i < 0) i = 0; else i = (i + (dir < 0 ? -1 : 1) + n) % n;
+        plugin_cfg_choice_at(e, i, e->val, sizeof e->val);
+    } else if (e->type == PCFG_NUMBER && dir != 0) {
+        double v = strtod(plugin_cfg_value(e), NULL) + (dir < 0 ? -1 : 1);
+        if ((e->has_range & 1) && v < e->min) v = e->min;
+        if ((e->has_range & 2) && v > e->max) v = e->max;
+        snprintf(e->val, sizeof e->val, "%.10g", v);
+    } else if (e->type == PCFG_NUMBER || e->type == PCFG_STRING) {
+        char title[120], desc[300], out[260];
+        snprintf(title, sizeof title, "%s", e->key);
+        if (e->type == PCFG_NUMBER && e->has_range == 3)
+            snprintf(desc, sizeof desc, "%.160s%s%g to %g. Default: %.80s",
+                     e->desc, e->desc[0] ? "  -  " : "", e->min, e->max, e->def);
+        else
+            snprintf(desc, sizeof desc, "%.160s%sDefault: %.100s",
+                     e->desc, e->desc[0] ? "  -  " : "", e->def[0] ? e->def : "(empty)");
+        if (!app_prompt_modal(a, title, desc, plugin_cfg_value(e),
+                              out, sizeof out, e)) return false;
+        snprintf(e->val, sizeof e->val, "%s", out);
+    } else {
+        return false;
+    }
+    if (strcmp(before, plugin_cfg_value(e)) == 0) return false;
+    lua_config_changed(a);
+    return true;
+}
+
+static int pcfg_row_h(const App* a) { return font_line_height(a->font_ide) * 2 + 12; }
+
+static SDL_Rect pcfg_box_rect(const App* a)
+{
+    int w = 640, h = 520;
+    if (w > a->win_w - 40) w = a->win_w - 40;
+    if (h > a->win_h - 60) h = a->win_h - 60;
+    return (SDL_Rect){ (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
+}
+
+/* Collect the indices (into g_plugin_cfg) shown by the open modal. */
+static int pcfg_collect(const App* a, int* out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < g_plugin_cfg_count && n < cap; ++i) {
+        if (!g_plugin_cfg[i].declared) continue;
+        if (a->pcfg_owner[0] && strcmp(g_plugin_cfg[i].owner, a->pcfg_owner) != 0)
+            continue;
+        out[n++] = i;
+    }
+    return n;
+}
+
+static int pcfg_list_top(const App* a)
+{
+    SDL_Rect box = pcfg_box_rect(a);
+    return box.y + font_line_height(a->font_ide) + 24 + 10;
+}
+
+static int pcfg_list_bot(const App* a)
+{
+    SDL_Rect box = pcfg_box_rect(a);
+    int sz_y = font_line_height(a->font_ide);
+    return box.y + box.h - 20 - (sz_y + 16) - 10 - sz_y - 8;
+}
+
+static void pcfg_clamp_scroll(App* a)
+{
+    int idx[64];
+    int n = pcfg_collect(a, idx, 64);
+    int content = n * pcfg_row_h(a);
+    int view = pcfg_list_bot(a) - pcfg_list_top(a);
+    int max_sc = content - view;
+    if (max_sc < 0) max_sc = 0;
+    if (a->pcfg_scroll > max_sc) a->pcfg_scroll = max_sc;
+    if (a->pcfg_scroll < 0) a->pcfg_scroll = 0;
+}
+
+static void pcfg_ensure_visible(App* a)
+{
+    int rh = pcfg_row_h(a);
+    int view = pcfg_list_bot(a) - pcfg_list_top(a);
+    int top = a->pcfg_selected * rh;
+    if (top < a->pcfg_scroll) a->pcfg_scroll = top;
+    else if (top + rh > a->pcfg_scroll + view) a->pcfg_scroll = top + rh - view;
+    pcfg_clamp_scroll(a);
+}
+
+static int pcfg_row_at(const App* a, int mx, int my)
+{
+    SDL_Rect box = pcfg_box_rect(a);
+    int top = pcfg_list_top(a), bot = pcfg_list_bot(a);
+    if (mx < box.x + 16 || mx >= box.x + box.w - 16) return -1;
+    if (my < top || my >= bot) return -1;
+    int idx[64];
+    int n = pcfg_collect(a, idx, 64);
+    int row = (my - top + a->pcfg_scroll) / pcfg_row_h(a);
+    return (row >= 0 && row < n) ? row : -1;
+}
+
+/* Buttons: 0 = Done (accent, right), 1 = Reset all (neutral, left of it). */
+static int pcfg_btn_at(const App* a, int mx, int my)
+{
+    SDL_Rect box = pcfg_box_rect(a);
+    int sz_y  = font_line_height(a->font_ide);
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 20;
+    int w_ok = confirm_btn_w(a, "Done"), w_rs = confirm_btn_w(a, "Reset all");
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_rs - 12;
+    if (my < btn_y || my >= btn_y + btn_h) return -1;
+    if (mx >= b1_x && mx < b1_x + w_ok) return 0;
+    if (mx >= b0_x && mx < b0_x + w_rs) return 1;
+    return -1;
+}
+
+static void render_pcfg_modal(App* a)
+{
+    if (!a->pcfg_active) return;
+    overlay_backdrop(a);
+    SDL_Rect box = pcfg_box_rect(a);
+    overlay_card(a, box);
+
+    int sz_y = font_line_height(a->font_ide);
+    int idx[64];
+    int n = pcfg_collect(a, idx, 64);
+
+    /* Header: "<plugin> settings" + count. */
+    char title[120];
+    if (a->pcfg_owner[0]) snprintf(title, sizeof title, "%s  settings", a->pcfg_owner);
+    else                  snprintf(title, sizeof title, "Plugin settings");
+    int hb = box.y + 14 + font_ascent(a->font_ide);
+    font_draw_line(a->font_ide, title, strlen(title), box.x + 20, hb, a->fg_link);
+    char cnt[48];
+    snprintf(cnt, sizeof cnt, "%d setting%s", n, n == 1 ? "" : "s");
+    int cw = font_measure(a->font_ide, cnt, strlen(cnt));
+    font_draw_line(a->font_ide, cnt, strlen(cnt), box.x + box.w - 20 - cw, hb,
+                   a->fg_muted);
+    SDL_SetRenderDrawColor(a->renderer, 60, 60, 70, 200);
+    SDL_RenderFillRect(a->renderer,
+                       &(SDL_Rect){ box.x + 12, box.y + sz_y + 24, box.w - 24, 1 });
+
+    int top = pcfg_list_top(a), bot = pcfg_list_bot(a);
+    int rh  = pcfg_row_h(a);
+    SDL_Rect list_r = { box.x + 16, top, box.w - 32, bot - top };
+    SDL_RenderSetClipRect(a->renderer, &list_r);
+    int y = top - a->pcfg_scroll;
+    if (n == 0) {
+        const char* empty = "This plugin declares no settings.";
+        font_draw_line(a->font_ide, empty, strlen(empty), box.x + 24,
+                       y + font_ascent(a->font_ide) + 6, a->fg_muted);
+    }
+    for (int r = 0; r < n; ++r, y += rh) {
+        if (y + rh < top || y > bot) continue;
+        PluginCfg* e = &g_plugin_cfg[idx[r]];
+        bool sel = (r == a->pcfg_selected);
+        bool hov = (r == a->pcfg_hover) && !sel;
+        if (sel || hov) {
+            SDL_Rect hr = { list_r.x + 2, y, list_r.w - 4, rh };
+            SDL_Color bc = sel ? a->bg_sidebar_active : a->bg_sidebar_hover;
+            SDL_SetRenderDrawColor(a->renderer, bc.r, bc.g, bc.b, sel ? 255 : 180);
+            fill_rrect(a->renderer, hr, 5);
+            if (sel) {
+                SDL_Rect bar = { list_r.x + 2, y + 4, 3, rh - 8 };
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
+                SDL_RenderFillRect(a->renderer, &bar);
+            }
+        }
+        /* Key (without the "plugin." prefix when it matches the owner). */
+        const char* shown_key = e->key;
+        size_t ol = strlen(e->owner);
+        if (ol && strncmp(e->key, e->owner, ol) == 0 && e->key[ol] == '.')
+            shown_key = e->key + ol + 1;
+        int kx = list_r.x + 16;
+        int line1 = y + 6 + font_ascent(a->font_ide);
+        font_draw_line(a->font_ide, shown_key, strlen(shown_key), kx, line1,
+                       sel ? a->fg_link : a->fg);
+        /* Changed-from-default marker. */
+        if (strcmp(plugin_cfg_value(e), e->def) != 0) {
+            int kw = font_measure(a->font_ide, shown_key, strlen(shown_key));
+            const char* dot = "\xe2\x80\xa2";
+            font_draw_line(a->font_ide, dot, 3, kx + kw + 8, line1, a->fg_link);
+        }
+        /* Description on line 2, muted. */
+        if (e->desc[0]) {
+            font_draw_elided(a->font_ide, e->desc, strlen(e->desc), kx,
+                             y + 6 + sz_y + 2 + font_ascent(a->font_ide),
+                             list_r.w - 32 - 200, a->fg_muted);
+        }
+        /* Value editor on the right. */
+        const char* val = plugin_cfg_value(e);
+        int chip_h = sz_y + 6;
+        int chip_y = y + (rh - chip_h) / 2;
+        if (e->type == PCFG_BOOL) {
+            bool on = plugin_cfg_truthy(val);
+            const char* tl = on ? "on" : "off";
+            int tw = font_measure(a->font_ide, tl, strlen(tl));
+            int tgl_w = tw + 24, tgl_x = list_r.x + list_r.w - 16 - tgl_w;
+            SDL_Color tbg = on ? (SDL_Color){60, 130, 70, 230}
+                               : (SDL_Color){70, 70, 80, 200};
+            SDL_SetRenderDrawColor(a->renderer, tbg.r, tbg.g, tbg.b, tbg.a);
+            fill_rrect(a->renderer, (SDL_Rect){tgl_x, chip_y, tgl_w, chip_h}, chip_h / 2);
+            font_draw_line(a->font_ide, tl, strlen(tl), tgl_x + 12,
+                           row_text_baseline(a->font_ide, chip_y, chip_h),
+                           (SDL_Color){240, 240, 245, 255});
+        } else {
+            char shown[200];
+            if (!val[0]) snprintf(shown, sizeof shown, "(empty)");
+            else if (e->type == PCFG_CHOICE)
+                snprintf(shown, sizeof shown, "\xe2\x80\xb9 %s \xe2\x80\xba", val);
+            else path_fit_left(a->font_ide, val, 220, shown, sizeof shown);
+            int vw = font_measure(a->font_ide, shown, strlen(shown));
+            int chip_w = vw + 20, chip_x = list_r.x + list_r.w - 16 - chip_w;
+            SDL_SetRenderDrawColor(a->renderer, a->bg_sidebar_hover.r,
+                a->bg_sidebar_hover.g, a->bg_sidebar_hover.b, sel ? 255 : 200);
+            fill_rrect(a->renderer, (SDL_Rect){chip_x, chip_y, chip_w, chip_h}, 5);
+            if (sel) {
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->fg_link.r, a->fg_link.g, a->fg_link.b, 160);
+                draw_rrect(a->renderer, (SDL_Rect){chip_x, chip_y, chip_w, chip_h}, 5);
+            }
+            font_draw_line(a->font_ide, shown, strlen(shown), chip_x + 10,
+                           row_text_baseline(a->font_ide, chip_y, chip_h),
+                           val[0] ? a->fg_link : a->fg_muted);
+        }
+    }
+    SDL_RenderSetClipRect(a->renderer, NULL);
+    a->pcfg_content_h = n * rh;
+
+    /* Footer: hint + buttons. */
+    int btn_h = sz_y + 16;
+    int btn_y = box.y + box.h - btn_h - 20;
+    const char* hint = "Enter edit  -  Left/Right adjust  -  R reset  -  Esc done";
+    font_draw_elided(a->font_ide, hint, strlen(hint), box.x + 20,
+                     btn_y - 10 - sz_y + font_ascent(a->font_ide), box.w - 40,
+                     a->fg_muted);
+    const char* lab_ok = "Done";
+    const char* lab_rs = "Reset all";
+    int w_ok = confirm_btn_w(a, lab_ok), w_rs = confirm_btn_w(a, lab_rs);
+    int b1_x = box.x + box.w - w_ok - 16;
+    int b0_x = b1_x - w_rs - 12;
+    {
+        bool hover = (a->pcfg_btn_hover == 1);
+        SDL_Rect r = { b0_x, btn_y, w_rs, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+            a->bg_sidebar_hover.b, hover ? 255 : 180);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_ide, lab_rs, strlen(lab_rs));
+        font_draw_line(a->font_ide, lab_rs, strlen(lab_rs),
+                       b0_x + (w_rs - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
+                       a->fg);
+    }
+    {
+        bool hover = (a->pcfg_btn_hover == 0);
+        SDL_Rect r = { b1_x, btn_y, w_ok, btn_h };
+        SDL_SetRenderDrawColor(a->renderer,
+            a->fg_link.r, a->fg_link.g, a->fg_link.b, hover ? 255 : 220);
+        fill_rrect(a->renderer, r, btn_h / 2);
+        int lw = font_measure(a->font_ide, lab_ok, strlen(lab_ok));
+        int lum = a->fg_link.r * 30 + a->fg_link.g * 59 + a->fg_link.b * 11;
+        SDL_Color tc = (lum > 12000) ? (SDL_Color){20, 20, 26, 255}
+                                     : (SDL_Color){240, 240, 250, 255};
+        font_draw_line(a->font_ide, lab_ok, strlen(lab_ok),
+                       b1_x + (w_ok - lw) / 2,
+                       btn_y + (btn_h - sz_y) / 2 + font_ascent(a->font_ide),
+                       tc);
+    }
+}
+
+static void pcfg_reset_all(App* a)
+{
+    int idx[64];
+    int n = pcfg_collect(a, idx, 64);
+    bool changed = false;
+    for (int r = 0; r < n; ++r) {
+        PluginCfg* e = &g_plugin_cfg[idx[r]];
+        if (e->val[0]) { e->val[0] = 0; changed = true; }
+    }
+    if (changed) lua_config_changed(a);
+}
+
+/* Synchronous per-plugin settings modal. owner == NULL/"" shows every key. */
+static void app_plugin_config_modal(App* a, const char* owner)
+{
+    snprintf(a->pcfg_owner, sizeof a->pcfg_owner, "%s", owner ? owner : "");
+    a->pcfg_active   = true;
+    a->pcfg_selected = 0;
+    a->pcfg_hover    = -1;
+    a->pcfg_scroll   = 0;
+    a->pcfg_choice   = -1;
+    a->pcfg_btn_hover = -1;
+
+    while (a->pcfg_choice < 0 && a->running) {
+        SDL_Event e;
+        if (!SDL_WaitEventTimeout(&e, 16)) { app_render(a); continue; }
+        int idx[64];
+        int n = pcfg_collect(a, idx, 64);
+        if (a->pcfg_selected >= n) a->pcfg_selected = n - 1;
+        if (a->pcfg_selected < 0)  a->pcfg_selected = 0;
+        switch (e.type) {
+            case SDL_QUIT: a->pcfg_choice = 0; break;
+            case SDL_MOUSEMOTION:
+                a->pcfg_hover     = pcfg_row_at(a, e.motion.x, e.motion.y);
+                a->pcfg_btn_hover = pcfg_btn_at(a, e.motion.x, e.motion.y);
+                break;
+            case SDL_MOUSEWHEEL:
+                a->pcfg_scroll -= e.wheel.y * pcfg_row_h(a);
+                pcfg_clamp_scroll(a);
+                break;
+            case SDL_MOUSEBUTTONDOWN: {
+                if (e.button.button != SDL_BUTTON_LEFT) break;
+                int btn = pcfg_btn_at(a, e.button.x, e.button.y);
+                if (btn == 0) { a->pcfg_choice = 0; break; }
+                if (btn == 1) {
+                    if (confirm_action(a, "Reset plugin settings",
+                                       "Restore every setting shown here to its default?",
+                                       "Reset", "Cancel"))
+                        pcfg_reset_all(a);
+                    break;
+                }
+                int row = pcfg_row_at(a, e.button.x, e.button.y);
+                if (row >= 0) {
+                    bool was_sel = (row == a->pcfg_selected);
+                    a->pcfg_selected = row;
+                    /* Click on the right half (the chip) or a second click
+                     * on the selected row edits; the first click selects. */
+                    SDL_Rect box = pcfg_box_rect(a);
+                    if (was_sel || e.button.x > box.x + box.w / 2 ||
+                        e.button.clicks >= 2)
+                        pcfg_edit_value(a, &g_plugin_cfg[idx[row]], 0);
+                    break;
+                }
+                SDL_Rect box = pcfg_box_rect(a);
+                if (e.button.x < box.x || e.button.x >= box.x + box.w ||
+                    e.button.y < box.y || e.button.y >= box.y + box.h)
+                    a->pcfg_choice = 0;
+                break;
+            }
+            case SDL_KEYDOWN: {
+                SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_ESCAPE) { a->pcfg_choice = 0; break; }
+                if (n == 0) break;
+                PluginCfg* cur = &g_plugin_cfg[idx[a->pcfg_selected]];
+                if (k == SDLK_UP)   { if (a->pcfg_selected > 0) a->pcfg_selected--; pcfg_ensure_visible(a); }
+                else if (k == SDLK_DOWN) { if (a->pcfg_selected + 1 < n) a->pcfg_selected++; pcfg_ensure_visible(a); }
+                else if (k == SDLK_HOME) { a->pcfg_selected = 0; pcfg_ensure_visible(a); }
+                else if (k == SDLK_END)  { a->pcfg_selected = n - 1; pcfg_ensure_visible(a); }
+                else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE)
+                    pcfg_edit_value(a, cur, 0);
+                else if (k == SDLK_LEFT)  pcfg_edit_value(a, cur, -1);
+                else if (k == SDLK_RIGHT) pcfg_edit_value(a, cur, +1);
+                else if (k == SDLK_r) {
+                    if (e.key.keysym.mod & KMOD_SHIFT) pcfg_reset_all(a);
+                    else if (cur->val[0]) { cur->val[0] = 0; lua_config_changed(a); }
+                }
+                break;
+            }
+        }
+        app_render(a);
+    }
+    a->pcfg_active = false;
+}
+
 /* ---------- per-vault UI state (.state in the app-data dir) ------------- */
 
 /* Compare two vault paths ignoring slash style, a trailing slash and (on
@@ -4713,6 +5727,32 @@ static void sync_renderer_logical_size(App* a)
         if (a->font_body) app_reload_fonts(a);
     }
 }
+
+#if defined(_WIN32)
+/* Ask the compositor (Windows 11+) to round the window's corners — it clips
+ * and anti-aliases the corner itself, so the edge is smooth at any DPI.
+ * Loaded dynamically: on Windows 10 the attribute is unknown and the call
+ * simply fails, leaving the square frame. */
+static void win_apply_rounded_corners(App* a)
+{
+    if (!a->window) return;
+    SDL_SysWMinfo wmi;
+    SDL_VERSION(&wmi.version);
+    if (!SDL_GetWindowWMInfo(a->window, &wmi)) return;
+    HWND hwnd = wmi.info.win.window;
+    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    if (!dwm) return;
+    typedef HRESULT (WINAPI *SetAttrFn)(HWND, DWORD, LPCVOID, DWORD);
+    SetAttrFn set_attr = (SetAttrFn)(void*)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if (set_attr) {
+        const DWORD DWMWA_WINDOW_CORNER_PREFERENCE_ = 33;
+        DWORD pref = a->cfg_rounded_corners ? 2 /* DWMWCP_ROUND */
+                                            : 1 /* DWMWCP_DONOTROUND */;
+        set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE_, &pref, sizeof pref);
+    }
+    FreeLibrary(dwm);
+}
+#endif
 
 static int app_init(App* a, const char* note_path_arg)
 {
@@ -4863,6 +5903,11 @@ static int app_init(App* a, const char* note_path_arg)
     a->cfg_font_size_h1 = sz_h1;
     a->cfg_font_size_h2 = sz_h2;
     a->cfg_font_size_h3 = sz_h3;
+    /* Base font style per slot: 0 regular, 1 bold, 2 italic, 3 bold italic. */
+    a->cfg_font_style      = (int)lua_host_cfg_number(a->lua, "font_style",      0) & 3;
+    a->cfg_font_style_ide  = (int)lua_host_cfg_number(a->lua, "font_style_ide",  0) & 3;
+    a->cfg_font_style_mono = (int)lua_host_cfg_number(a->lua, "font_style_mono", 0) & 3;
+    a->tinput_ctx_hover = -1;
     a->cfg_line_spacing = (int)lua_host_cfg_number(a->lua, "line_spacing", 0);
     if (a->cfg_line_spacing < 0)  a->cfg_line_spacing = 0;
     if (a->cfg_line_spacing > 24) a->cfg_line_spacing = 24;
@@ -4880,6 +5925,9 @@ static int app_init(App* a, const char* note_path_arg)
      * menus to its bar is the default. */
     a->cfg_hoswl       = lua_host_cfg_number(a->lua, "hoswl", 0) != 0;
     a->cfg_hoswl_menus = lua_host_cfg_number(a->lua, "hoswl_menus", 1) != 0;
+    /* Rounded window corners (Windows 11 DWM). Off keeps the classic frame. */
+    a->cfg_rounded_corners =
+        lua_host_cfg_number(a->lua, "rounded_corners", 0) != 0;
     /* Close animation: 0 off, 1 fade, 2 dissolve. Default = fade so the
      * goodbye feels intentional rather than a crash. */
     a->cfg_close_anim = (int)lua_host_cfg_number(a->lua, "close_anim", 1);
@@ -4987,6 +6035,10 @@ static int app_init(App* a, const char* note_path_arg)
                 SWP_NOZORDER     | SWP_NOACTIVATE);
         }
     }
+#endif
+
+#if defined(_WIN32)
+    win_apply_rounded_corners(a);
 #endif
 
     a->renderer = SDL_CreateRenderer(a->window, -1,
@@ -5604,6 +6656,21 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     int y            = *y_inout;
 
     if (line->kind == LINE_BLANK) { *y_inout = y + lh / 2; return; }
+
+    /* Thematic break: one crisp rule across the column, vertically centred
+     * in a normal line step. (Previously the block was dropped entirely.) */
+    if (line->kind == LINE_HR) {
+        if (draw) {
+            int ry = y + lh / 2;
+            SDL_Rect r = { xL + MARGIN_X, ry, wrap_r - (xL + MARGIN_X), 1 };
+            if (a->dpi_scale > 1.5f) r.h = 2;
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 150);
+            SDL_RenderFillRect(a->renderer, &r);
+        }
+        *y_inout = y + lh;
+        return;
+    }
 
     if (line->kind == LINE_IMAGE) {
         char src[1024];
@@ -8020,8 +9087,9 @@ enum ChromeButton {
     CB_VSEARCH   = 5,    /* vault-wide search */
     CB_CMDP      = 6,    /* command palette */
     CB_SPLIT     = 7,    /* toggle split live-preview */
+    CB_PLUGINS   = 8,    /* plugins overlay */
 };
-#define CB_COUNT 8
+#define CB_COUNT 9
 
 static int chrome_button_size(const App* a) {
     return chrome_row_h(a);     /* square buttons matching the chrome ROW height */
@@ -8039,6 +9107,8 @@ static void action_outline_pin   (App* a);
 static void action_vsearch       (App* a);
 static void search_close         (App* a);
 static void cmdp_open            (App* a);
+static void plugins_open         (App* a);
+static void plugins_close        (App* a);
 
 /* Hit-test the chrome bar. Returns one of the CB_* enum values, or
  * CB_NONE. The buttons live in the right edge of the chrome bar; the
@@ -8057,9 +9127,10 @@ static int chrome_hit_test(const App* a, int mx, int my)
     if (mx >= right - 4 * sz   && mx < right - 3 * sz) return CB_FIND;
     if (mx >= right - 5 * sz   && mx < right - 4 * sz) return CB_VSEARCH;
     if (mx >= right - 6 * sz   && mx < right - 5 * sz) return CB_CMDP;
-    if (mx >= right - 7 * sz   && mx < right - 6 * sz) return CB_SPLIT;
+    if (mx >= right - 7 * sz   && mx < right - 6 * sz) return CB_PLUGINS;
+    if (mx >= right - 8 * sz   && mx < right - 7 * sz) return CB_SPLIT;
     int pill_w = 100;
-    int pill_x = right - 7 * sz - 10 - pill_w;
+    int pill_x = right - 8 * sz - 10 - pill_w;
     if (mx >= pill_x && mx < pill_x + pill_w) return CB_MODE;
     return CB_NONE;
 }
@@ -8077,6 +9148,10 @@ static void chrome_button_invoke(App* a, int btn)
         case CB_VSEARCH:  action_vsearch(a);        break;
         case CB_CMDP:     cmdp_open(a);             break;
         case CB_SPLIT:    action_toggle_split(a);   break;
+        case CB_PLUGINS:
+            if (a->plugins_active) plugins_close(a);
+            else                   plugins_open(a);
+            break;
         case CB_MODE:     action_toggle_edit(a);    break;
         default: break;
     }
@@ -8160,7 +9235,7 @@ static void render_chrome(App* a)
      * the old title-crumb hover/click path is inert. */
     int btn_sz   = chrome_button_size(a);
     int strip_x0 = bx;
-    int strip_x1 = a->win_w - 7 * btn_sz - 110 - 8;   /* before the mode pill */
+    int strip_x1 = a->win_w - 8 * btn_sz - 110 - 8;   /* before the mode pill */
     if (strip_x1 < strip_x0) strip_x1 = strip_x0;
     a->tab_strip_x0 = strip_x0;
     a->tab_strip_x1 = strip_x1;
@@ -8305,11 +9380,17 @@ static void render_chrome(App* a)
         icon_draw(a->renderer, ICON_COMMAND,
                   right - 6 * sz + ipad, icon_off_y, icon_sz, gc);
     }
+    /* Plugins overlay: plug icon, accented while the overlay is open. */
+    {
+        SDL_Color gc = BTN_PREP(right - 7 * sz, CB_PLUGINS, a->plugins_active);
+        icon_draw(a->renderer, ICON_PLUGIN,
+                  right - 7 * sz + ipad, icon_off_y, icon_sz, gc);
+    }
     /* Split live-preview toggle: two-column icon, accented when active. */
     {
-        SDL_Color gc = BTN_PREP(right - 7 * sz, CB_SPLIT, a->split_preview);
+        SDL_Color gc = BTN_PREP(right - 8 * sz, CB_SPLIT, a->split_preview);
         icon_draw(a->renderer, ICON_SPLIT,
-                  right - 7 * sz + ipad, icon_off_y, icon_sz, gc);
+                  right - 8 * sz + ipad, icon_off_y, icon_sz, gc);
     }
     #undef BTN_PREP
 
@@ -8317,7 +9398,7 @@ static void render_chrome(App* a)
     {
         int pill_w = 100;
         int pill_h = CRH - 12;
-        int pill_x = right - 7 * sz - 10 - pill_w;
+        int pill_x = right - 8 * sz - 10 - pill_w;
         int pill_y = TBH + (CRH - pill_h) / 2;
         float t  = a->chrome_hover_t[CB_MODE];
         float et = ease_out_cubic(t);
@@ -8358,6 +9439,106 @@ static void render_chrome(App* a)
         font_draw_line(a->font_ide, label, strlen(label),
                        pill_x + (pill_w - lw) / 2, by, lc);
     }
+}
+
+/* Screen rect of a chrome-row button, mirroring chrome_hit_test's layout. */
+static bool chrome_button_rect(const App* a, int btn, SDL_Rect* out)
+{
+    int sz    = chrome_button_size(a);
+    int right = a->win_w;
+    int TBH   = title_bar_h(a);
+    int k;
+    switch (btn) {
+        case CB_SETTINGS: k = 1; break;
+        case CB_OUTLINE:  k = 2; break;
+        case CB_SIDEBAR:  k = 3; break;
+        case CB_FIND:     k = 4; break;
+        case CB_VSEARCH:  k = 5; break;
+        case CB_CMDP:     k = 6; break;
+        case CB_PLUGINS:  k = 7; break;
+        case CB_SPLIT:    k = 8; break;
+        case CB_MODE: {
+            int pill_w = 100;
+            *out = (SDL_Rect){ right - 8 * sz - 10 - pill_w, TBH, pill_w, sz };
+            return true;
+        }
+        default: return false;
+    }
+    *out = (SDL_Rect){ right - k * sz, TBH, sz, sz };
+    return true;
+}
+
+static const char* current_keystr_for(const char* action);
+static void keystr_pretty(const char* in, char* out, size_t cap);
+static bool overlay_floating_active(const App* a);
+
+/* Two-line tooltip under the hovered chrome button: what it does, and the
+ * live shortcut bound to it. Appears after the cursor has rested on the
+ * button for a moment; never while a menu, overlay or modal is up. */
+static void render_chrome_tooltip(App* a)
+{
+    int btn = a->chrome_hover;
+    if (btn == CB_NONE) return;
+    if (overlay_floating_active(a) || a->confirm_active || a->tinput_active ||
+        a->prompt_active || a->pcfg_active) return;
+    if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK) return;
+    uint32_t now = SDL_GetTicks();
+    if (now - a->chrome_hover_since < 450) { a->wants_anim_frame = true; return; }
+
+    static const struct { int btn; const char* label; const char* action; } TIPS[] = {
+        { CB_SETTINGS, "Settings",              "settings"        },
+        { CB_OUTLINE,  "Outline panel",         "outline_pin"     },
+        { CB_SIDEBAR,  "Toggle sidebar",        "toggle_sidebar"  },
+        { CB_FIND,     "Find in note",          "find"            },
+        { CB_VSEARCH,  "Search the vault",      "vault_search"    },
+        { CB_CMDP,     "Command palette",       "command_palette" },
+        { CB_SPLIT,    "Live preview (split)",  "toggle_split"    },
+        { CB_PLUGINS,  "Plugins",               "plugins"         },
+        { CB_MODE,     "Switch edit / preview", "toggle_edit"     },
+    };
+    const char* label = NULL;
+    const char* action = NULL;
+    for (size_t i = 0; i < sizeof TIPS / sizeof TIPS[0]; ++i)
+        if (TIPS[i].btn == btn) { label = TIPS[i].label; action = TIPS[i].action; }
+    if (!label) return;
+    if (btn == CB_MODE) label = a->edit_mode ? "Switch to preview" : "Switch to edit";
+    if (btn == CB_FIND && a->search_mode) label = "Close find";
+    if (btn == CB_SIDEBAR) label = a->sidebar_open ? "Hide sidebar" : "Show sidebar";
+    if (btn == CB_OUTLINE) label = a->outline_pinned ? "Hide outline panel" : "Show outline panel";
+    if (btn == CB_SPLIT) label = a->split_preview ? "Close live preview" : "Live preview (split)";
+    if (btn == CB_PLUGINS) label = a->plugins_active ? "Close plugins" : "Plugins";
+
+    char keys[48];
+    const char* ks = current_keystr_for(action);
+    if (ks && *ks) keystr_pretty(ks, keys, sizeof keys);
+    else           snprintf(keys, sizeof keys, "no shortcut");
+
+    SDL_Rect br;
+    if (!chrome_button_rect(a, btn, &br)) return;
+    Font* f = a->font_ide;
+    int sz_y  = font_line_height(f);
+    int pad_x = 12, pad_y = 7;
+    int w1 = font_measure(f, label, strlen(label));
+    int w2 = font_measure(f, keys,  strlen(keys));
+    int w  = (w1 > w2 ? w1 : w2) + 2 * pad_x;
+    int h  = 2 * sz_y + 2 * pad_y + 2;
+    int x  = br.x + br.w / 2 - w / 2;
+    int y  = br.y + br.h + 6;
+    if (x + w > a->win_w - 6) x = a->win_w - 6 - w;
+    if (x < 6) x = 6;
+
+    SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 110);
+    fill_rrect(a->renderer, (SDL_Rect){x + 2, y + 3, w, h}, 8);
+    SDL_Color body = a->bg_sidebar_active; body.a = 245;
+    SDL_SetRenderDrawColor(a->renderer, body.r, body.g, body.b, body.a);
+    fill_rrect(a->renderer, (SDL_Rect){x, y, w, h}, 8);
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_link.r, a->fg_link.g, a->fg_link.b, 170);
+    draw_rrect(a->renderer, (SDL_Rect){x, y, w, h}, 8);
+    font_draw_line(f, label, strlen(label), x + pad_x,
+                   y + pad_y + font_ascent(f), a->fg);
+    font_draw_line(f, keys, strlen(keys), x + pad_x,
+                   y + pad_y + sz_y + 2 + font_ascent(f), a->fg_muted);
 }
 
 /* Count files (non-dirs) that live directly inside the folder at vault
@@ -8438,6 +9619,38 @@ static int sidebar_max_scroll(const App* a)
     int avail   = a->win_h - sidebar_items_top(a) - status_bar_h(a);
     int over    = items_h - avail;
     return over > 0 ? over : 0;
+}
+
+/* Expand every folder above `path` and scroll the sidebar so its row is on
+ * screen — what a freshly created / renamed / dropped note needs so the user
+ * can see where it went. */
+static void sidebar_reveal_path(App* a, const char* path)
+{
+    int idx = vault_index_of(&a->vault, path);
+    if (idx < 0) return;
+    for (size_t i = 0; i < a->vault.count; ++i) {
+        VaultItem* it = &a->vault.items[i];
+        if (!it->is_dir || !it->collapsed) continue;
+        size_t pl = strlen(it->path);
+        if (strncmp(path, it->path, pl) == 0 &&
+            (path[pl] == '/' || path[pl] == '\\'))
+            it->collapsed = 0;
+    }
+    sidebar_compute_visible(a);
+    for (int row = 0; row < a->sidebar_visible_count; ++row) {
+        if (a->sidebar_visible[row] != idx) continue;
+        int item_h = sidebar_item_height(a);
+        int top    = row * item_h;
+        int avail  = a->win_h - sidebar_items_top(a) - status_bar_h(a);
+        if (top < a->sidebar_scroll_y)
+            a->sidebar_scroll_y = top;
+        else if (top + item_h > a->sidebar_scroll_y + avail)
+            a->sidebar_scroll_y = top + item_h - avail;
+        int m = sidebar_max_scroll(a);
+        if (a->sidebar_scroll_y > m) a->sidebar_scroll_y = m;
+        if (a->sidebar_scroll_y < 0) a->sidebar_scroll_y = 0;
+        break;
+    }
 }
 
 /* Does the ancestor of `row` at depth `a` have more children visible
@@ -9316,6 +10529,8 @@ static void action_graph         (App* a);
 static void action_toggle_spellcheck(App* a);
 static void action_keybindings   (App* a);
 static void action_colors        (App* a);
+static void action_reload_file   (App* a);
+static void action_associate_md  (App* a);
 
 static const MenuItem MENU_FILE[] = {
     { "New",                "Ctrl+N",       action_new_file },
@@ -9324,6 +10539,8 @@ static const MenuItem MENU_FILE[] = {
     { "Quick switch",       "Ctrl+P",       action_quick_switch },
     { "Save",               "Ctrl+S",       action_save },
     { "Save As\xe2\x80\xa6","Ctrl+Shift+S", action_save_as },
+    { "Reload from disk",   NULL,           action_reload_file },
+    { "Associate .md files\xe2\x80\xa6", NULL, action_associate_md },
     { "Quit",               "Ctrl+Q",       action_quit },
     { NULL, NULL, NULL }
 };
@@ -9419,6 +10636,7 @@ typedef enum {
     CTX_NEW_FILE,
     CTX_NEW_DIR,
     CTX_REVEAL,
+    CTX_REFRESH,
     CTX_COUNT,
 } CtxAction;
 
@@ -9429,6 +10647,7 @@ static const char* CTX_LABELS[CTX_COUNT] = {
     "New file here…",
     "New folder here…",
     "Show in Explorer",
+    "Refresh",
 };
 
 /* Editor formatting menu actions, ordered as they appear in the popup.
@@ -9488,6 +10707,7 @@ static const char* ED_SHORTCUTS[ED_COUNT] = {
 static int ctx_action_applies(const App* app, CtxAction a)
 {
     int idx = app->ctx_menu_target;
+    if (a == CTX_REFRESH) return 1;                /* always offered */
     if (idx < 0) {                                 /* empty-area menu */
         return a == CTX_NEW_FILE || a == CTX_NEW_DIR || a == CTX_REVEAL;
     }
@@ -9820,6 +11040,7 @@ static void submenu_invoke_row(App* a, int row)
     int nfound = vault_scan(&a->vault, snap);
     recent_dirs_push(a, snap);
     settings_persist(a);
+    if (a->lua) lua_host_fire_event(a->lua, "vault_change");
     char msg[300];
     snprintf(msg, sizeof msg, "vault: %.250s (%d note%s)",
              snap, nfound, nfound == 1 ? "" : "s");
@@ -10179,22 +11400,6 @@ static void render_recent_submenu(App* a)
     }
 }
 
-/* Confirm dialog: returns 1 = yes, 0 = no/cancel. Win32 uses a native
- * MessageBox; other platforms default to 1 (no easy modal). */
-static int confirm_yesno(SDL_Window* parent, const char* title, const char* msg)
-{
-#if defined(_WIN32)
-    SDL_SysWMinfo info; SDL_VERSION(&info.version);
-    HWND hwnd = NULL;
-    if (parent && SDL_GetWindowWMInfo(parent, &info)) hwnd = info.info.win.window;
-    int r = MessageBoxA(hwnd, msg, title, MB_YESNO | MB_ICONQUESTION);
-    return r == IDYES;
-#else
-    (void)parent; (void)title; (void)msg;
-    return 1;
-#endif
-}
-
 /* True if href is something we can hand off to the OS shell (web URL,
  * mailto, ftp, file). The wiki-link path handles internal [[name]] links;
  * everything else routes through the external opener. */
@@ -10419,15 +11624,108 @@ static bool follow_md_href(App* a, const char* href)
     return true;
 }
 
-/* Delete a file (or empty dir). Returns 0 on success. */
+static int path_is_dir(const char* p);
+
+/* Number of entries (files + folders, recursive) under a folder. */
+static int count_tree(const char* path)
+{
+    DIR* d = opendir(path);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        n++;
+        char child[1024];
+        snprintf(child, sizeof child, "%s/%s", path, ent->d_name);
+        if (path_is_dir(child)) n += count_tree(child);
+    }
+    closedir(d);
+    return n;
+}
+
+/* The confirm text for deleting `name` (a file, or a folder and everything
+ * inside it). Says where it goes so the user knows whether it's undoable. */
+static void delete_prompt(char* out, size_t cap, const char* name,
+                          const char* path, int is_dir)
+{
+#if defined(_WIN32)
+    const char* fate = "It will go to the Recycle Bin.";
+#else
+    const char* fate = "This cannot be undone.";
+#endif
+    if (is_dir) {
+        int n = count_tree(path);
+        if (n > 0)
+            snprintf(out, cap,
+                     "Delete \"%s\" and everything inside it (%d item%s)?\n%s",
+                     name, n, n == 1 ? "" : "s", fate);
+        else
+            snprintf(out, cap, "Delete the empty folder \"%s\"?\n%s", name, fate);
+    } else {
+        snprintf(out, cap, "Delete \"%s\"?\n%s", name, fate);
+    }
+}
+
+#if defined(_WIN32)
+/* Send `path` (a file, or a folder with all its contents) to the Recycle
+ * Bin. 0 on success — network shares / removable media may refuse, in
+ * which case the caller falls back to a permanent delete. */
+static int win_recycle(const char* path)
+{
+    char buf[MAX_PATH + 2];
+    size_t n = strlen(path);
+    if (n == 0 || n + 2 > sizeof buf) return -1;
+    memcpy(buf, path, n);
+    buf[n] = 0;
+    buf[n + 1] = 0;                        /* double-NUL terminated list */
+    for (size_t i = 0; i < n; ++i) if (buf[i] == '/') buf[i] = '\\';
+    SHFILEOPSTRUCTA op;
+    memset(&op, 0, sizeof op);
+    op.wFunc  = FO_DELETE;
+    op.pFrom  = buf;
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    int rc = SHFileOperationA(&op);
+    return (rc == 0 && !op.fAnyOperationsAborted) ? 0 : -1;
+}
+#endif
+
+/* Permanent recursive delete: files, then the (now empty) folders. */
+static int filesystem_delete_tree(const char* path, int is_dir)
+{
+    if (!is_dir) {
+#if defined(_WIN32)
+        return DeleteFileA(path) ? 0 : -1;
+#else
+        return unlink(path);
+#endif
+    }
+    DIR* d = opendir(path);
+    if (d) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+            char child[1024];
+            snprintf(child, sizeof child, "%s/%s", path, ent->d_name);
+            filesystem_delete_tree(child, path_is_dir(child));
+        }
+        closedir(d);
+    }
+#if defined(_WIN32)
+    return RemoveDirectoryA(path) ? 0 : -1;
+#else
+    return rmdir(path);
+#endif
+}
+
+/* Delete a file, or a folder with everything inside it. On Windows it goes
+ * to the Recycle Bin (undoable); elsewhere it's permanent. 0 on success. */
 static int filesystem_delete(const char* path, int is_dir)
 {
 #if defined(_WIN32)
-    if (is_dir) return RemoveDirectoryA(path) ? 0 : -1;
-    return DeleteFileA(path) ? 0 : -1;
-#else
-    return is_dir ? rmdir(path) : unlink(path);
+    if (win_recycle(path) == 0) return 0;
 #endif
+    return filesystem_delete_tree(path, is_dir);
 }
 
 /* Build the directory portion of `path` into `out`. Returns 0 on success.
@@ -10478,16 +11776,16 @@ static void ctx_menu_invoke(App* a, CtxAction act)
                 char old_base[256], new_base[256];
                 basename_no_md(it->path, old_base, sizeof old_base);
                 basename_no_md(picked,   new_base, sizeof new_base);
+                int was_dir = it->is_dir;     /* `it` dies with the rescan */
                 if (rename(it->path, picked) == 0) {
                     if (a->note_path && strcmp(a->note_path, it->path) == 0) {
                         free(a->note_path);
                         a->note_path = strdup(picked);
                         update_window_title(a);
                     }
-                    if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
-                    if (a->note_path)
-                        a->vault.selected = vault_index_of(&a->vault, a->note_path);
-                    if (!it->is_dir) {
+                    app_vault_rescan(a);
+                    sidebar_reveal_path(a, picked);
+                    if (!was_dir) {
                         int touched = update_backlinks_in_vault(
                             a, old_base, new_base);
                         char msg[160];
@@ -10511,25 +11809,32 @@ static void ctx_menu_invoke(App* a, CtxAction act)
         case CTX_DELETE: {
             if (!it) return;
             char prompt[1024];
-            snprintf(prompt, sizeof prompt,
-                "Delete \"%s\"%s?\nThis cannot be undone.",
-                it->name, it->is_dir ? " (folder must be empty)" : "");
-            if (!confirm_yesno(a->window, "Delete", prompt)) return;
-            if (filesystem_delete(it->path, it->is_dir) == 0) {
+            delete_prompt(prompt, sizeof prompt, it->name, it->path, it->is_dir);
+            /* `it` points into vault.items, which the rescan frees — copy
+             * what we need before anything can reload the list. */
+            char victim[1024];
+            snprintf(victim, sizeof victim, "%s", it->path);
+            int victim_is_dir = it->is_dir;
+            /* In-app confirm (same modal as every other prompt), not the
+             * native MessageBox. */
+            if (!confirm_action(a, "Delete", prompt, "Delete", "Cancel")) return;
+            if (filesystem_delete(victim, victim_is_dir) == 0) {
                 /* If we deleted the open file, drop the buffer (mark unsaved). */
-                if (!it->is_dir && a->note_path &&
-                    strcmp(a->note_path, it->path) == 0)
+                if (!victim_is_dir && a->note_path &&
+                    strcmp(a->note_path, victim) == 0)
                 {
                     free(a->note_path);
                     a->note_path = strdup("(unsaved)");
                     a->buf.dirty = true;
                     update_window_title(a);
                 }
-                if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
-                if (a->note_path)
-                    a->vault.selected = vault_index_of(&a->vault, a->note_path);
+                app_vault_rescan(a);
+                char msg[300];
+                snprintf(msg, sizeof msg, "deleted %.250s", vault_basename(victim));
+                app_notify(a, msg);
             } else {
-                fprintf(stderr, "delete failed: %s\n", it->path);
+                fprintf(stderr, "delete failed: %s\n", victim);
+                app_notify(a, "delete failed");
             }
             break;
         }
@@ -10549,22 +11854,50 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             if (!app_text_modal(a, "New file name", "untitled.md", dir))
                 return;
             if (a->tinput_len == 0) return;
+            /* No extension typed -> ".md". A typed .txt / .markdown is
+             * kept as-is (the sidebar lists those too). */
+            char name[300];
+            snprintf(name, sizeof name, "%s", a->tinput_text);
+            {
+                const char* base = vault_basename(name);
+                const char* dot  = strrchr(base, '.');
+                if (!dot || dot == base || !dot[1]) {
+                    size_t nl = strlen(name);
+                    while (nl > 0 && name[nl - 1] == '.') name[--nl] = 0;
+                    if (nl + 3 < sizeof name) memcpy(name + nl, ".md", 4);
+                }
+            }
             char picked[1024];
-            bool is_abs = (a->tinput_text[0] == '/' || a->tinput_text[0] == '\\' ||
-                           (a->tinput_len >= 2 && a->tinput_text[1] == ':'));
-            if (is_abs) snprintf(picked, sizeof picked, "%s", a->tinput_text);
+            bool is_abs = (name[0] == '/' || name[0] == '\\' ||
+                           (strlen(name) >= 2 && name[1] == ':'));
+            if (is_abs) snprintf(picked, sizeof picked, "%s", name);
             else if (a->tinput_dir[0]) path_join_safe(picked, sizeof picked,
-                                                      a->tinput_dir, a->tinput_text);
-            else snprintf(picked, sizeof picked, "%s", a->tinput_text);
-            FILE* f = fopen(picked, "wb");
-            if (f) {
-                fclose(f);
-                if (!confirm_discard(a)) return;
-                load_note(a, picked);
-                if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
-                a->vault.selected = vault_index_of(&a->vault, picked);
+                                                      a->tinput_dir, name);
+            else snprintf(picked, sizeof picked, "%s", name);
+            path_to_forward(picked);
+            if (file_exists(picked)) {
+                app_notify(a, "file already exists -- opening it");
             } else {
-                fprintf(stderr, "create failed: %s\n", picked);
+                FILE* f = fopen(picked, "wb");
+                if (!f) {
+                    fprintf(stderr, "create failed: %s\n", picked);
+                    app_notify(a, "could not create the file");
+                    return;
+                }
+                fclose(f);
+            }
+            /* Opening parks the current tab, so nothing needs discarding.
+             * Rescan first so the new note has a sidebar row to select,
+             * then reveal it and drop straight into edit mode — an empty
+             * preview looks like nothing happened. */
+            app_vault_rescan(a);
+            if (load_note(a, picked) == 0) {
+                a->vault.selected = vault_index_of(&a->vault, picked);
+                sidebar_reveal_path(a, picked);
+                enter_edit_mode(a);
+                char msg[300];
+                snprintf(msg, sizeof msg, "created %.250s", vault_basename(picked));
+                app_notify(a, msg);
             }
             break;
         }
@@ -10598,11 +11931,20 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             int err = (mkdir(picked, 0755) == 0 || errno == EEXIST) ? 0 : -1;
 #endif
             if (err == 0) {
-                if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
-                a->vault.selected = vault_index_of(&a->vault, picked);
+                app_vault_rescan(a);
+                sidebar_reveal_path(a, picked);
             } else {
                 fprintf(stderr, "mkdir failed: %s\n", picked);
+                app_notify(a, "could not create the folder");
             }
+            break;
+        }
+        case CTX_REFRESH: {
+            app_vault_rescan(a);
+            char msg[120];
+            snprintf(msg, sizeof msg, "refreshed -- %d item%s",
+                     (int)a->vault.count, a->vault.count == 1 ? "" : "s");
+            app_notify(a, msg);
             break;
         }
         case CTX_REVEAL: {
@@ -10828,13 +12170,35 @@ static void drop_flush(App* a)
 
     char msg[600];
     if (files == 1)
-        snprintf(msg, sizeof msg, "Copy \"%s\" into the vault?",
+        snprintf(msg, sizeof msg,
+                 "\"%s\"\n\nCopy it into the vault, or open it where it is?",
                  vault_basename(only));
     else
-        snprintf(msg, sizeof msg, "Copy %lu files into the vault?",
+        snprintf(msg, sizeof msg,
+                 "%lu files\n\nCopy them into the vault, or open them where they are?",
                  (unsigned long)files);
 
-    if (!confirm_action(a, "Copy to vault", msg, "Copy", "Cancel")) {
+    int choice = confirm_action_n(a, "Dropped files", msg,
+                                  "Copy to vault", "Cancel", "Open");
+    if (choice == 2) {
+        /* Open in place: each file gets its own tab, nothing is copied. */
+        size_t opened = 0;
+        for (size_t i = 0; i < a->drop_file_count; ++i) {
+            const char* src = a->drop_files[i];
+            if (path_is_dir(src)) continue;
+            char p[1024];
+            snprintf(p, sizeof p, "%s", src);
+            path_to_forward(p);
+            if (load_note(a, p) == 0) opened++;
+        }
+        drop_clear(a);
+        char note[120];
+        snprintf(note, sizeof note, "opened %lu file%s",
+                 (unsigned long)opened, opened == 1 ? "" : "s");
+        app_notify(a, note);
+        return;
+    }
+    if (choice != 0) {
         drop_clear(a);
         return;
     }
@@ -10854,7 +12218,8 @@ static void drop_flush(App* a)
     drop_clear(a);
 
     /* Surface the freshly-copied notes/images in the sidebar. */
-    vault_scan(&a->vault, a->vault.dir);
+    app_vault_rescan(a);
+    if (last[0]) sidebar_reveal_path(a, last);
 
     char note[600];
     if (copied == 0) {
@@ -11019,7 +12384,7 @@ static int dnd_finish_move(App* a)
         a->note_path = strdup(new_path);
         update_window_title(a);
     }
-    if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
+    app_vault_rescan(a);
     if (a->note_path)
         a->vault.selected = vault_index_of(&a->vault, a->note_path);
     char msg[256];
@@ -11173,8 +12538,11 @@ static SDL_Color* color_slot_ptr(App* a, int idx);
 typedef enum {
     SET_THEME,
     SET_FONT_IDE,       /* chrome / sidebar / overlays */
+    SET_FONT_STYLE_IDE, /* regular / bold / italic / bold italic */
     SET_FONT,           /* preview body (markdown rendering) */
+    SET_FONT_STYLE,
     SET_FONT_MONO,      /* editor + code blocks */
+    SET_FONT_STYLE_MONO,
     SET_SIZE,
     SET_SIZE_H1,
     SET_SIZE_H2,
@@ -11188,6 +12556,7 @@ typedef enum {
 #if defined(_WIN32)
     SET_HOSWL,          /* on/off: connect to the Hisashi OS Window Layer */
     SET_HOSWL_MENUS,    /* on/off: publish our menus to Hisashi's menubar */
+    SET_ROUNDED,        /* on/off: DWM rounded window corners (Win11) */
 #endif
     SET_CLOSE_ANIM,     /* off / fade — animation when the window closes */
     SET_SIDEBAR_W,
@@ -11214,8 +12583,11 @@ static bool settings_is_enter_only_row(SettingsRow r)
 static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Theme",
     "IDE font",
+    "IDE font style",
     "Preview font",
+    "Preview font style",
     "Editor font",
+    "Editor font style",
     "Font size",
     "H1 size",
     "H2 size",
@@ -11229,6 +12601,7 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
 #if defined(_WIN32)
     "Hisashi integration",
     "Hisashi menubar",
+    "Rounded corners",
 #endif
     "Close animation",
     "Sidebar width",
@@ -11277,6 +12650,16 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
             else
                 snprintf(out, cap, "%s", a->cfg_font_path_mono);
             break;
+        case SET_FONT_STYLE:
+        case SET_FONT_STYLE_IDE:
+        case SET_FONT_STYLE_MONO: {
+            static const char* NAMES[4] = { "Regular", "Bold", "Italic", "Bold Italic" };
+            int s = (r == SET_FONT_STYLE)     ? a->cfg_font_style
+                  : (r == SET_FONT_STYLE_IDE) ? a->cfg_font_style_ide
+                                              : a->cfg_font_style_mono;
+            snprintf(out, cap, "%s", NAMES[s & 3]);
+            break;
+        }
         case SET_SIZE:        snprintf(out, cap, "%d", a->cfg_font_size);    break;
         case SET_SIZE_H1:     snprintf(out, cap, "%d", a->cfg_font_size_h1); break;
         case SET_SIZE_H2:     snprintf(out, cap, "%d", a->cfg_font_size_h2); break;
@@ -11298,6 +12681,7 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
 #if defined(_WIN32)
         case SET_HOSWL:       snprintf(out, cap, "%s", a->cfg_hoswl       ? "On" : "Off"); break;
         case SET_HOSWL_MENUS: snprintf(out, cap, "%s", a->cfg_hoswl_menus ? "On" : "Off"); break;
+        case SET_ROUNDED:     snprintf(out, cap, "%s", a->cfg_rounded_corners ? "On" : "Off"); break;
 #endif
         case SET_CLOSE_ANIM:
             snprintf(out, cap, "%s",
@@ -11352,6 +12736,16 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->settings_font_idx_mono = (a->settings_font_idx_mono + dir + n) % n;
             snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono,
                      "%s", g_font_choices[a->settings_font_idx_mono].path);
+            need_reload_fonts = true;
+            break;
+        }
+        case SET_FONT_STYLE:
+        case SET_FONT_STYLE_IDE:
+        case SET_FONT_STYLE_MONO: {
+            int* slot = (r == SET_FONT_STYLE)     ? &a->cfg_font_style
+                      : (r == SET_FONT_STYLE_IDE) ? &a->cfg_font_style_ide
+                                                  : &a->cfg_font_style_mono;
+            *slot = (*slot + dir + 4) % 4;
             need_reload_fonts = true;
             break;
         }
@@ -11417,6 +12811,11 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             hoswl_menu_set_enabled(a);         /* sends "enable" immediately when connected */
             a->menu_open  = -1;
             a->menu_hover = -1;
+            break;
+        }
+        case SET_ROUNDED: {
+            a->cfg_rounded_corners = !a->cfg_rounded_corners;
+            win_apply_rounded_corners(a);      /* live: the compositor re-clips at once */
             break;
         }
 #endif
@@ -11515,6 +12914,7 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             a->cfg_font_size_h1 = 28;
             a->cfg_font_size_h2 = 22;
             a->cfg_font_size_h3 = 18;
+            a->cfg_font_style   = a->cfg_font_style_ide = a->cfg_font_style_mono = 0;
             a->sidebar_w        = 240;
             a->settings_theme_idx = 0;
             theme_apply(a, 0);
@@ -11689,6 +13089,10 @@ static int settings_persist(App* a)
     fprintf(f, "    font_path      = "); fputs_lua_string(f, a->cfg_font_path);      fprintf(f, ",\n");
     fprintf(f, "    font_path_ide  = "); fputs_lua_string(f, a->cfg_font_path_ide);  fprintf(f, ",\n");
     fprintf(f, "    font_path_mono = "); fputs_lua_string(f, a->cfg_font_path_mono); fprintf(f, ",\n");
+    fprintf(f, "    font_style     = %d,  -- 0 regular 1 bold 2 italic 3 bold italic\n",
+            a->cfg_font_style);
+    fprintf(f, "    font_style_ide = %d,\n", a->cfg_font_style_ide);
+    fprintf(f, "    font_style_mono = %d,\n", a->cfg_font_style_mono);
     fprintf(f, "    font_size      = %d,\n", a->cfg_font_size);
     fprintf(f, "    font_size_h1   = %d,\n", a->cfg_font_size_h1);
     fprintf(f, "    font_size_h2   = %d,\n", a->cfg_font_size_h2);
@@ -11707,6 +13111,8 @@ static int settings_persist(App* a)
             a->cfg_hoswl ? "true" : "false");
     fprintf(f, "    hoswl_menus    = %s,\n",
             a->cfg_hoswl_menus ? "true" : "false");
+    fprintf(f, "    rounded_corners = %s,\n",
+            a->cfg_rounded_corners ? "true" : "false");
 #endif
     fprintf(f, "    split_preview  = %s,\n",
             a->split_preview ? "true" : "false");
@@ -11819,12 +13225,14 @@ typedef struct {
     int  font_size_h1;
     int  font_size_h2;
     int  font_size_h3;
+    int  font_style, font_style_ide, font_style_mono;
     int  line_spacing;
     int  line_endings;
     int  edit_wrap;
     int  native_menubar;
     int  hoswl;
     int  hoswl_menus;
+    int  rounded_corners;
     int  close_anim;
     int  sidebar_w;
     int  theme_idx;
@@ -11844,12 +13252,16 @@ static void settings_snapshot_capture(const App* a)
     s->font_size_h1   = a->cfg_font_size_h1;
     s->font_size_h2   = a->cfg_font_size_h2;
     s->font_size_h3   = a->cfg_font_size_h3;
+    s->font_style     = a->cfg_font_style;
+    s->font_style_ide = a->cfg_font_style_ide;
+    s->font_style_mono= a->cfg_font_style_mono;
     s->line_spacing   = a->cfg_line_spacing;
     s->line_endings   = a->cfg_line_endings;
     s->edit_wrap      = a->cfg_edit_wrap ? 1 : 0;
     s->native_menubar = a->cfg_native_menubar ? 1 : 0;
     s->hoswl          = a->cfg_hoswl ? 1 : 0;
     s->hoswl_menus    = a->cfg_hoswl_menus ? 1 : 0;
+    s->rounded_corners= a->cfg_rounded_corners ? 1 : 0;
     s->close_anim     = a->cfg_close_anim;
     s->sidebar_w      = a->sidebar_w;
     s->theme_idx      = a->settings_theme_idx;
@@ -11916,6 +13328,15 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
     diff_int(out, cap, "H1 size",      s->font_size_h1, a->cfg_font_size_h1);
     diff_int(out, cap, "H2 size",      s->font_size_h2, a->cfg_font_size_h2);
     diff_int(out, cap, "H3 size",      s->font_size_h3, a->cfg_font_size_h3);
+    {
+        static const char* ST[4] = { "Regular", "Bold", "Italic", "Bold Italic" };
+        diff_str_named(out, cap, "IDE font style",
+                       ST[s->font_style_ide & 3], ST[a->cfg_font_style_ide & 3]);
+        diff_str_named(out, cap, "Preview font style",
+                       ST[s->font_style & 3], ST[a->cfg_font_style & 3]);
+        diff_str_named(out, cap, "Editor font style",
+                       ST[s->font_style_mono & 3], ST[a->cfg_font_style_mono & 3]);
+    }
     diff_int(out, cap, "Line spacing", s->line_spacing, a->cfg_line_spacing);
 
     if (s->line_endings != a->cfg_line_endings) {
@@ -11946,6 +13367,11 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
                        s->hoswl_menus ? "On" : "Off",
                        a->cfg_hoswl_menus ? "On" : "Off");
     }
+    if (s->rounded_corners != (a->cfg_rounded_corners ? 1 : 0)) {
+        diff_str_named(out, cap, "Rounded corners",
+                       s->rounded_corners ? "On" : "Off",
+                       a->cfg_rounded_corners ? "On" : "Off");
+    }
 #endif
     if (s->close_anim != a->cfg_close_anim) {
         const char* A[] = { "Off", "Fade", "Dissolve" };
@@ -11974,12 +13400,21 @@ static void settings_snapshot_restore(App* a)
     a->cfg_font_size_h1    = s->font_size_h1;
     a->cfg_font_size_h2    = s->font_size_h2;
     a->cfg_font_size_h3    = s->font_size_h3;
+    a->cfg_font_style      = s->font_style;
+    a->cfg_font_style_ide  = s->font_style_ide;
+    a->cfg_font_style_mono = s->font_style_mono;
     a->cfg_line_spacing    = s->line_spacing;
     a->cfg_line_endings    = s->line_endings;
     a->cfg_edit_wrap       = s->edit_wrap != 0;
     a->cfg_native_menubar  = s->native_menubar != 0;
     a->cfg_hoswl           = s->hoswl != 0;
     a->cfg_hoswl_menus     = s->hoswl_menus != 0;
+    if (a->cfg_rounded_corners != (s->rounded_corners != 0)) {
+        a->cfg_rounded_corners = s->rounded_corners != 0;
+#if defined(_WIN32)
+        win_apply_rounded_corners(a);
+#endif
+    }
     a->cfg_close_anim      = s->close_anim;
     a->sidebar_w           = s->sidebar_w;
     a->settings_theme_idx  = s->theme_idx;
@@ -12766,7 +14201,8 @@ static bool overlay_floating_active(const App* a)
            a->backlinks_active || a->tags_active    || a->vsearch_active ||
            a->outline_active   || a->tpl_active     || a->picker_active  ||
            a->keybind_active   || a->settings_active || a->graph_active  ||
-           a->ctx_menu_active  || a->menu_open >= 0;
+           a->ctx_menu_active  || a->menu_open >= 0  || a->pcfg_active   ||
+           a->prompt_active;
 }
 
 static void render_outline_panel(App* a)
@@ -13916,6 +15352,7 @@ static void tpl_open(App* a)
         a->vault.selected = -1;
         a->scroll_y = 0;
         update_window_title(a);
+        enter_edit_mode(a);      /* an empty preview looks like nothing happened */
         return;
     }
     a->tpl_active   = true;
@@ -13976,6 +15413,7 @@ static void tpl_activate(App* a)
     a->scroll_y = 0;
     update_window_title(a);
     tpl_close(a);
+    enter_edit_mode(a);
 }
 
 static void render_template_picker(App* a)
@@ -14436,6 +15874,16 @@ static void render_window_border(App* a)
     Uint8     alpha    = resizing ? 200 : 150;
 
     SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, alpha);
+    if (a->cfg_rounded_corners) {
+        /* DWM clips the corners with an ~8px radius; outline the same curve
+         * so the frame line doesn't run straight into the clipped corner. */
+        int rad = 8;
+        for (int i = 0; i < t; ++i)
+            draw_rrect(a->renderer,
+                       (SDL_Rect){ i, i, a->win_w - 2 * i, a->win_h - 2 * i },
+                       rad - i);
+        return;
+    }
     SDL_Rect top   = { 0, 0, a->win_w, t };
     SDL_Rect bot   = { 0, a->win_h - t, a->win_w, t };
     SDL_Rect left  = { 0, 0, t, a->win_h };
@@ -14948,6 +16396,7 @@ static void notify_now(App* a, const char* msg, uint32_t ms)
 static bool any_overlay_active(const App* a)
 {
     return a->confirm_active   || a->tinput_active    || a->eol_pick_active ||
+           a->prompt_active    || a->pcfg_active      ||
            a->switcher_active  || a->cmdp_active      || a->plugins_active  ||
            a->settings_active  || a->keybind_active   || a->picker_active   ||
            a->ctx_menu_active  || a->backlinks_active || a->tags_active     ||
@@ -15356,12 +16805,15 @@ static void app_render(App* a)
      * that may still be visible. */
     render_resize_badge(a);
     render_link_tooltip(a);
-    /* tinput modal first, then rename popup, confirm modal LAST. Order
-     * matters when one is nested inside the other (e.g. Delete-confirm
-     * or Rename popup fired from inside the folder picker) — whichever
-     * renders later wins the click. */
+    render_chrome_tooltip(a);
+    /* tinput modal first, then rename popup, then the plugin-config and
+     * prompt modals, confirm modal LAST. Order matters when one is nested
+     * inside the other (e.g. Delete-confirm or Rename popup fired from
+     * inside the folder picker) — whichever renders later wins the click. */
     render_tinput_modal(a);
     render_rename_popup(a);
+    render_pcfg_modal(a);
+    render_prompt_modal(a);
     render_confirm_modal(a);
     render_eol_picker(a);
 
@@ -15453,6 +16905,7 @@ static void enter_edit_mode(App* a)
     /* Match positions are tied to whichever buffer is shown; re-scan so
      * highlights line up with the new view. */
     if (a->search_mode != 0) search_rebuild(a);
+    if (a->lua) lua_host_fire_event(a->lua, "mode_change");
 }
 
 static void enter_preview_mode(App* a)
@@ -15463,6 +16916,7 @@ static void enter_preview_mode(App* a)
     SDL_StopTextInput();
     reparse_preview(a);
     if (a->search_mode != 0) search_rebuild(a);
+    if (a->lua) lua_host_fire_event(a->lua, "mode_change");
 }
 
 static void ensure_cursor_visible(App* a)
@@ -16562,11 +18016,30 @@ static int plugins_reload_btn(const App* a, SDL_Rect* out)
     return 0;
 }
 
+/* Clamp the body scroll to the content measured by the last render, so
+ * the wheel can't run off into empty space below the last plugin. */
+static void plugins_clamp_scroll(App* a)
+{
+    SDL_Rect box = plugins_box_rect(a);
+    int sz_y     = font_line_height(a->font_ide);
+    int header_h = sz_y + 24;
+    int view     = (box.y + box.h - 16) - (box.y + header_h + 10);
+    int max_sc   = a->plugins_content_h - view;
+    if (max_sc < 0) max_sc = 0;
+    if (a->plugins_scroll > max_sc) a->plugins_scroll = max_sc;
+    if (a->plugins_scroll < 0)      a->plugins_scroll = 0;
+}
+
 static void plugins_action_reload(App* a)
 {
     const char* pdir = app_plugin_dir(a);
+    /* Decorations belong to whichever plugin painted them; a plugin that
+     * was just disabled (or errored) must not leave its colours behind. */
+    decor_clear(&a->decor);
     int n = lua_host_reload_plugins(a->lua, pdir);
     plugins_collect(a);
+    /* Survivors repaint from a clean slate. */
+    if (a->note_path) lua_host_fire_event(a->lua, "open");
     char msg[160];
     snprintf(msg, sizeof msg, "reloaded %d plugin(s) from %s", n, pdir);
     app_notify(a, msg);
@@ -16662,6 +18135,7 @@ static void render_plugins(App* a)
     int rh = plugins_row_h(a);
     a->pcfg_hit_count = 0;
     a->ptoggle_hit_count = 0;
+    a->pset_hit_count = 0;
 
     /* Folder line: where plugins actually load from. */
     char dirline[400];
@@ -16675,7 +18149,7 @@ static void render_plugins(App* a)
     for (int i = 0; i < g_plugin_cfg_count; ++i)
         if (g_plugin_cfg[i].declared) ndecl++;
     if (ndecl > 0) {
-        const char* clab = "Config  (click a value to edit)";
+        const char* clab = "Config  (click a value to edit  -  gear = per-plugin settings)";
         font_draw_line(a->font_ide, clab, strlen(clab),
                        box.x + 20, y + font_ascent(a->font_ide), a->fg_heading);
         y += rh;
@@ -16722,6 +18196,7 @@ static void render_plugins(App* a)
                        box.x + 20, y + font_ascent(a->font_ide),
                        a->fg_muted);
         SDL_RenderSetClipRect(a->renderer, NULL);
+        a->plugins_content_h = (y + rh + a->plugins_scroll) - list_top;
         return;
     }
 
@@ -16781,6 +18256,28 @@ static void render_plugins(App* a)
                 a->ptoggle_hits[a->ptoggle_hit_count].row = i;
                 a->ptoggle_hit_count++;
             }
+            /* "settings" chip, left of the toggle, for plugins that declared
+             * config keys — opens the per-plugin settings modal. */
+            if (plugin_cfg_count_for(p->name) > 0) {
+                const char* slab = "settings";
+                int sw2   = font_measure(a->font_ide, slab, strlen(slab));
+                int set_w = sw2 + 20;
+                int set_x = tgl_x - 8 - set_w;
+                SDL_SetRenderDrawColor(a->renderer, a->bg_sidebar_hover.r,
+                    a->bg_sidebar_hover.g, a->bg_sidebar_hover.b, 200);
+                fill_rrect(a->renderer, (SDL_Rect){set_x, tgl_y, set_w, tgl_h},
+                           tgl_h / 2);
+                font_draw_line(a->font_ide, slab, strlen(slab), set_x + 10,
+                               row_text_baseline(a->font_ide, tgl_y, tgl_h),
+                               a->fg_link);
+                if (a->pset_hit_count <
+                    (int)(sizeof a->pset_hits / sizeof a->pset_hits[0])) {
+                    a->pset_hits[a->pset_hit_count].rect =
+                        (SDL_Rect){ set_x, tgl_y, set_w, tgl_h };
+                    a->pset_hits[a->pset_hit_count].row = i;
+                    a->pset_hit_count++;
+                }
+            }
         }
         y += rh;
 
@@ -16832,6 +18329,7 @@ static void render_plugins(App* a)
     }
 
     SDL_RenderSetClipRect(a->renderer, NULL);
+    a->plugins_content_h = (y + a->plugins_scroll) - list_top;
 }
 
 static int plugins_reload_hit(const App* a, int mx, int my)
@@ -17704,6 +19202,18 @@ static void action_save_as       (App* a) {
      * Replaces the native Win32 save dialog with our own UI. */
     if (!app_text_modal(a, "Save As", def, a->vault.dir)) return;
     if (a->tinput_len == 0) return;
+    /* No extension typed -> ".md" (a typed .txt / .markdown is kept). */
+    {
+        const char* base = vault_basename(a->tinput_text);
+        const char* dot  = strrchr(base, '.');
+        if ((!dot || dot == base || !dot[1]) &&
+            a->tinput_len + 3 < (int)sizeof a->tinput_text) {
+            while (a->tinput_len > 0 && a->tinput_text[a->tinput_len - 1] == '.')
+                a->tinput_text[--a->tinput_len] = 0;
+            memcpy(a->tinput_text + a->tinput_len, ".md", 4);
+            a->tinput_len += 3;
+        }
+    }
     char picked[1024];
     /* Absolute path? Use as-is. Otherwise place inside the modal's current
      * directory (which reflects any subdir navigation the user did). */
@@ -17722,7 +19232,7 @@ static void action_save_as       (App* a) {
         a->note_path = strdup(picked);
         note_stamp_sync(a);          /* the watch now follows the new file */
         update_window_title(a);
-        if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
+        app_vault_rescan(a);
         a->vault.selected = vault_index_of(&a->vault, picked);
         fprintf(stderr, "saved (as) %s\n", picked);
     } else {
@@ -17771,7 +19281,7 @@ static void action_rename        (App* a) {
         a->note_path = strdup(picked);
         note_stamp_sync(a);          /* the watch now follows the new file */
         update_window_title(a);
-        if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
+        app_vault_rescan(a);
         a->vault.selected = vault_index_of(&a->vault, picked);
         int touched = update_backlinks_in_vault(a, old_base, new_base);
         char msg[160];
@@ -17812,6 +19322,7 @@ static void action_open_dir      (App* a) {
              dir, n, n == 1 ? "" : "s");
     app_notify(a, msg);
     persist_vault_path(a);
+    if (a->lua) lua_host_fire_event(a->lua, "vault_change");
 }
 static void action_command_palette(App* a) { cmdp_open(a); }
 static void action_plugins        (App* a) { plugins_open(a); }
@@ -17908,6 +19419,150 @@ static void action_edit_settings(App* a)
     if (!confirm_discard(a)) return;
     load_note(a, g_settings_path);
 }
+/* Re-read the active note from disk (File > Reload from disk). */
+static void action_reload_file(App* a)
+{
+    if (!a->note_path || a->note_path[0] == '(') {
+        app_notify(a, "no file on disk to reload");
+        return;
+    }
+    if (a->buf.dirty &&
+        !confirm_action(a, "Reload from disk",
+                        "Discard your unsaved edits and reload this file\n"
+                        "from disk? Undo history is lost too.",
+                        "Reload", "Cancel"))
+        return;
+    reload_active_note(a);
+}
+
+#if defined(_WIN32)
+static int reg_set_str(HKEY root, const char* sub, const char* name,
+                       const char* val)
+{
+    HKEY k;
+    if (RegCreateKeyExA(root, sub, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL)
+        != ERROR_SUCCESS) return -1;
+    LONG r = RegSetValueExA(k, name, 0, REG_SZ, (const BYTE*)val,
+                            (DWORD)strlen(val) + 1);
+    RegCloseKey(k);
+    return r == ERROR_SUCCESS ? 0 : -1;
+}
+
+static int reg_key_exists(HKEY root, const char* sub)
+{
+    HKEY k;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
+    RegCloseKey(k);
+    return 1;
+}
+#endif
+
+/* Register Descry as an opener for .md files (File > Associate .md files).
+ * Windows: per-user ProgId + Default-Apps capability entries in HKCU (no
+ * admin rights). Windows keeps the *default* choice under its own hash-
+ * protected UserChoice key, so when one already exists we point the user
+ * at Settings > Default apps, which is the only sanctioned way to change
+ * it. Linux: a .desktop file + xdg-mime. macOS: Finder does it. */
+static void action_associate_md(App* a)
+{
+#if defined(_WIN32)
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+    if (n == 0 || n >= sizeof exe) {
+        app_notify(a, "could not locate descry.exe");
+        return;
+    }
+    char cmd[MAX_PATH + 16], icon[MAX_PATH + 8];
+    snprintf(cmd,  sizeof cmd,  "\"%s\" \"%%1\"", exe);
+    snprintf(icon, sizeof icon, "\"%s\",0", exe);
+    int rc = 0;
+    HKEY H = HKEY_CURRENT_USER;
+    rc |= reg_set_str(H, "Software\\Classes\\Descry.Markdown", NULL,
+                      "Markdown Document");
+    rc |= reg_set_str(H, "Software\\Classes\\Descry.Markdown\\DefaultIcon",
+                      NULL, icon);
+    rc |= reg_set_str(H, "Software\\Classes\\Descry.Markdown\\shell\\open",
+                      NULL, "Open with Descry");
+    rc |= reg_set_str(H, "Software\\Classes\\Descry.Markdown\\shell\\open\\command",
+                      NULL, cmd);
+    static const char* EXTS[] = { ".md", ".markdown" };
+    for (size_t i = 0; i < sizeof EXTS / sizeof EXTS[0]; ++i) {
+        char sub[128];
+        snprintf(sub, sizeof sub, "Software\\Classes\\%s\\OpenWithProgids", EXTS[i]);
+        rc |= reg_set_str(H, sub, "Descry.Markdown", "");
+        snprintf(sub, sizeof sub, "Software\\Classes\\%s", EXTS[i]);
+        rc |= reg_set_str(H, sub, NULL, "Descry.Markdown");
+        snprintf(sub, sizeof sub,
+                 "Software\\fezcode\\Descry\\Capabilities\\FileAssociations");
+        rc |= reg_set_str(H, sub, EXTS[i], "Descry.Markdown");
+    }
+    rc |= reg_set_str(H, "Software\\fezcode\\Descry\\Capabilities",
+                      "ApplicationName", "Descry");
+    rc |= reg_set_str(H, "Software\\fezcode\\Descry\\Capabilities",
+                      "ApplicationDescription",
+                      "Keyboard-driven markdown editor");
+    rc |= reg_set_str(H, "Software\\RegisteredApplications", "Descry",
+                      "Software\\fezcode\\Descry\\Capabilities");
+    rc |= reg_set_str(H, "Software\\Classes\\Applications\\descry.exe\\shell\\open\\command",
+                      NULL, cmd);
+    rc |= reg_set_str(H, "Software\\Classes\\Applications\\descry.exe\\SupportedTypes",
+                      ".md", "");
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+    if (rc != 0) {
+        info_modal(a, "File association",
+            "Some registry keys could not be written.\n"
+            "Descry may still show up under \"Open with\".");
+        return;
+    }
+    bool locked = reg_key_exists(H,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.md\\UserChoice");
+    if (locked) {
+        if (confirm_action(a, "File association",
+                "Descry is registered for .md files, but Windows already\n"
+                "has a default app for them. Only you can change that,\n"
+                "under Settings > Apps > Default apps.\n\n"
+                "Open Settings now?",
+                "Open Settings", "Later"))
+            ShellExecuteA(NULL, "open", "ms-settings:defaultapps",
+                          NULL, NULL, SW_SHOWNORMAL);
+    } else {
+        info_modal(a, "File association",
+            ".md files now open with Descry.\n"
+            "If Explorer still picks another app, choose Descry under\n"
+            "Settings > Apps > Default apps.");
+    }
+#elif defined(__APPLE__)
+    info_modal(a, "File association",
+        "On macOS: select a .md file in Finder, press Cmd+I,\n"
+        "pick Descry under \"Open with\" and click \"Change All\".");
+#else
+    const char* home = getenv("HOME");
+    if (!home || !*home) { app_notify(a, "HOME is not set"); return; }
+    char exe[1024] = {0};
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) snprintf(exe, sizeof exe, "descry");
+    char dir[1200], path[1300];
+    snprintf(dir,  sizeof dir,  "%s/.local/share/applications", home);
+    mkdir_p(dir);
+    snprintf(path, sizeof path, "%s/descry.desktop", dir);
+    FILE* f = fopen(path, "wb");
+    if (!f) { app_notify(a, "could not write descry.desktop"); return; }
+    fprintf(f,
+        "[Desktop Entry]\nType=Application\nName=Descry\n"
+        "Comment=Keyboard-driven markdown editor\n"
+        "Exec=\"%s\" %%f\nTerminal=false\n"
+        "MimeType=text/markdown;text/x-markdown;\n"
+        "Categories=Utility;TextEditor;\n", exe);
+    fclose(f);
+    int rc = system("xdg-mime default descry.desktop text/markdown "
+                    "text/x-markdown >/dev/null 2>&1");
+    (void)rc;
+    info_modal(a, "File association",
+        "Wrote ~/.local/share/applications/descry.desktop and made\n"
+        "Descry the default for text/markdown (xdg-mime).");
+#endif
+}
+
 static void action_about     (App* a) {
     info_modal(a, "About Descry " DESCRY_VERSION,
         "A keyboard-driven markdown editor.\n"
@@ -18317,7 +19972,7 @@ static void action_daily(App* a)
     } else {
         fclose(exists);
     }
-    if (a->vault.dir) vault_scan(&a->vault, a->vault.dir);
+    app_vault_rescan(a);
     if (load_note(a, path) == 0) {
         char msg[160];
         snprintf(msg, sizeof msg, "daily note: %s", date);
@@ -18334,6 +19989,7 @@ static const ActionEntry ACTIONS[] = {
     { "plugins",         "App",        action_plugins         },
     { "save",            "File",       action_save            },
     { "save_as",         "File",       action_save_as         },
+    { "reload_file",     "File",       action_reload_file     },
     { "rename",          "File",       action_rename          },
     { "quit",            "File",       action_quit            },
 
@@ -18369,6 +20025,7 @@ static const ActionEntry ACTIONS[] = {
     { "keybindings",     "App",        action_keybindings     },
     { "colors",          "App",        action_colors          },
     { "edit_settings",   "App",        action_edit_settings   },
+    { "associate_md",    "App",        action_associate_md    },
     { NULL, NULL, NULL },
 };
 
@@ -18577,11 +20234,28 @@ static void app_event(App* a, const SDL_Event* e)
             break;
 
         case SDL_MOUSEMOTION: {
-            a->chrome_hover  = chrome_hit_test(a, e->motion.x, e->motion.y);
+            /* While a menu, popup, overlay or modal owns the screen the
+             * chrome underneath must not react: no hover tints on the
+             * sidebar rows or top-bar buttons behind a context menu, and
+             * no resize cursor over the sidebar edge it happens to cover.
+             * The title-bar window controls stay live on purpose. */
+            bool ui_blocked = overlay_floating_active(a) || a->confirm_active ||
+                              a->tinput_active || a->prompt_active ||
+                              a->pcfg_active;
+            {
+                int cb = ui_blocked ? CB_NONE
+                                    : chrome_hit_test(a, e->motion.x, e->motion.y);
+                if (cb != a->chrome_hover) {
+                    a->chrome_hover       = cb;
+                    a->chrome_hover_since = SDL_GetTicks();
+                }
+            }
             a->tb_btn_hover  = titlebar_button_at(a, e->motion.x, e->motion.y);
             a->menu_hover    = titlebar_menu_at  (a, e->motion.x, e->motion.y);
-            a->tb_icon_hover = titlebar_icon_at  (a, e->motion.x, e->motion.y);
-            a->sidebar_hover = sidebar_item_at(a, e->motion.x, e->motion.y);
+            a->tb_icon_hover = !ui_blocked &&
+                               titlebar_icon_at(a, e->motion.x, e->motion.y);
+            a->sidebar_hover = ui_blocked ? -1
+                             : sidebar_item_at(a, e->motion.x, e->motion.y);
             if (a->switcher_active) {
                 int row = switcher_row_at(a, e->motion.x, e->motion.y);
                 if (row >= 0) a->switcher_selected = row;
@@ -18639,13 +20313,15 @@ static void app_event(App* a, const SDL_Event* e)
             int mx = e->motion.x, my = e->motion.y;
             const SDL_Rect* cv = &a->crumb_rect_vault;
             const SDL_Rect* ct = &a->crumb_rect_title;
-            if (cv->w > 0 && mx >= cv->x && mx < cv->x + cv->w &&
+            if (ui_blocked) { /* nothing behind an overlay lights up */ }
+            else if (cv->w > 0 && mx >= cv->x && mx < cv->x + cv->w &&
                 my >= cv->y && my < cv->y + cv->h)        a->crumb_hover = 0;
             else if (ct->w > 0 && mx >= ct->x && mx < ct->x + ct->w &&
                      my >= ct->y && my < ct->y + ct->h)   a->crumb_hover = 1;
             /* Tab strip hover. */
             a->tab_hover = -1;
-            if (mx >= a->tab_strip_x0 && mx < a->tab_strip_x1 &&
+            if (!ui_blocked &&
+                mx >= a->tab_strip_x0 && mx < a->tab_strip_x1 &&
                 my >= title_bar_h(a) && my < chrome_bar_h(a)) {
                 for (int i = 0; i < a->tab_strip_count; ++i) {
                     SDL_Rect r = a->tab_hits[i].rect;
@@ -18811,13 +20487,16 @@ static void app_event(App* a, const SDL_Event* e)
              * or the outline-panel resize handle (left edge of pinned panel). */
             {
                 bool over_resize = false;
-                if (a->sidebar_open &&
+                if (!ui_blocked && a->sidebar_open &&
+                    e->motion.y >= chrome_bar_h(a) &&
                     abs(e->motion.x - a->sidebar_w) <= 3)
                     over_resize = true;
-                if (a->split_preview && e->motion.y >= chrome_bar_h(a) &&
+                if (!ui_blocked && a->split_preview &&
+                    e->motion.y >= chrome_bar_h(a) &&
                     abs(e->motion.x - split_divider_x(a)) <= 3)
                     over_resize = true;
-                if (a->outline_pinned) {
+                if (!ui_blocked && a->outline_pinned &&
+                    e->motion.y >= chrome_bar_h(a)) {
                     int px = a->win_w - a->outline_panel_w;
                     if (abs(e->motion.x - px) <= 3) over_resize = true;
                 }
@@ -19145,8 +20824,22 @@ static void app_event(App* a, const SDL_Event* e)
                     }
                 }
                 if (ptgl_handled) break;
-                /* Click a config value → edit it (synchronous modal), then
-                 * persist. The plugin re-reads via descry.config on next use. */
+                /* "settings" chip → the per-plugin config modal. */
+                int pset_handled = 0;
+                for (int si = 0; si < a->pset_hit_count; ++si) {
+                    SDL_Rect r = a->pset_hits[si].rect;
+                    if (e->button.x >= r.x && e->button.x < r.x + r.w &&
+                        e->button.y >= r.y && e->button.y < r.y + r.h) {
+                        int row = a->pset_hits[si].row;
+                        if (row >= 0 && row < a->plugins_count)
+                            app_plugin_config_modal(a, a->plugins_rows[row].name);
+                        pset_handled = 1;
+                        break;
+                    }
+                }
+                if (pset_handled) break;
+                /* Click a config value → type-aware edit (toggle / cycle /
+                 * compact prompt), persisted immediately. */
                 int pcfg_handled = 0;
                 for (int ci = 0; ci < a->pcfg_hit_count; ++ci) {
                     SDL_Rect r = a->pcfg_hits[ci].rect;
@@ -19154,16 +20847,8 @@ static void app_event(App* a, const SDL_Event* e)
                         e->button.y >= r.y && e->button.y < r.y + r.h) {
                         int idx = a->pcfg_hits[ci].idx;
                         if (idx >= 0 && idx < g_plugin_cfg_count) {
-                            PluginCfg* pe = &g_plugin_cfg[idx];
-                            char title[96];
-                            snprintf(title, sizeof title, "Set  %s", pe->key);
-                            if (app_text_modal(a, title,
-                                               plugin_cfg_value(pe), NULL)) {
-                                snprintf(pe->val, sizeof pe->val, "%s",
-                                         a->tinput_text);
-                                settings_persist(a);
+                            if (pcfg_edit_value(a, &g_plugin_cfg[idx], 0))
                                 app_notify(a, "plugin config saved");
-                            }
                         }
                         pcfg_handled = 1;
                         break;
@@ -19852,10 +21537,10 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 break;
             }
-            /* Plugins overlay: wheel scrolls the body. */
+            /* Plugins overlay: wheel scrolls the body (clamped to content). */
             if (a->plugins_active) {
                 a->plugins_scroll -= e->wheel.y * 40;
-                if (a->plugins_scroll < 0) a->plugins_scroll = 0;
+                plugins_clamp_scroll(a);
                 break;
             }
             /* Command palette: wheel scrolls the row band. */
@@ -20333,6 +22018,7 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 if (k == SDLK_DOWN) {
                     a->plugins_scroll += rh * 2;
+                    plugins_clamp_scroll(a);
                     break;
                 }
                 if (k == SDLK_PAGEUP) {
@@ -20342,6 +22028,7 @@ static void app_event(App* a, const SDL_Event* e)
                 }
                 if (k == SDLK_PAGEDOWN) {
                     a->plugins_scroll += rh * 10;
+                    plugins_clamp_scroll(a);
                     break;
                 }
                 break;
