@@ -42,7 +42,12 @@ return {
     -- one specific color, add a color_* key after this line — it'll win
     -- over the theme's value.
     -- Available: "Editorial Dark" (default), "Default Dark", "Light",
-    -- "Solarized Dark", "Nord", "Gruvbox Dark", "Rose Pine Moon".
+    -- "Solarized Dark", "Nord", "Gruvbox Dark", "Rose Pine Moon", "Dracula",
+    -- "Tokyo Night", "One Dark", "Monokai", "Catppuccin Mocha", "Everforest Dark",
+    -- "Kanagawa Wave", "Flexoki Dark", "Night Owl", "Cobalt2", "Shades of Purple",
+    -- "Andromeda", "Vesper", "Material Ocean", "Cyberpunk 2077", "Synthwave '84",
+    -- 20 EPL Club Themes ("EPL: Arsenal", "EPL: Manchester United", "EPL: Manchester City",
+    -- "EPL: Liverpool", "EPL: Chelsea", etc.) and more (cycle with Ctrl+,).
     theme = "Editorial Dark",
 
     -- Keybindings. Modifier order: ctrl, shift, alt (e.g. "ctrl+shift+z").
