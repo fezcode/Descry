@@ -15,7 +15,8 @@ theme = "mica"
 default_dir = "${PROGRAMFILES}/Descry"
 
 [uninstall]
-keep = []
+keep          = []
+settings_dirs = ["${APPDATA}/fezcode/Descry"]   # offered as "Also remove my settings and data"
 
 [[steps]]
 type  = "welcome"
