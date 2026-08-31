@@ -121,7 +121,7 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.83.0"
+#define DESCRY_VERSION "0.84.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -4017,7 +4017,8 @@ static void render_tinput_modal(App* a)
         }
         SDL_Color tc = (sel || hov || match) ? a->fg_link : a->fg;
         SDL_Color ic_c = is_dir ? a->fg_link : a->fg_muted;
-        IconId ic = is_dir ? ICON_FOLDER : ICON_FILE;
+        IconId ic = is_dir ? (sel ? ICON_FOLDER_FILLED : ICON_FOLDER)
+                           : (sel ? ICON_FILE_FILLED   : ICON_FILE);
         int ic_y = y + (rh - ic_sz) / 2;
         icon_draw(a->renderer, ic, list_r.x + 12, ic_y, ic_sz, ic_c);
         font_draw_line(a->font_ide, a->tinput_files[i],
@@ -5722,6 +5723,7 @@ static void sync_renderer_logical_size(App* a)
     if (s != a->dpi_scale) {
         a->dpi_scale = s;
         font_set_render_scale(s);
+        icons_set_render_scale(s);
         /* Fonts may not exist on the first call (from app_init, before the
          * first app_reload_fonts); only re-rasterize when already loaded. */
         if (a->font_body) app_reload_fonts(a);
@@ -5995,9 +5997,10 @@ static int app_init(App* a, const char* note_path_arg)
     a->win_w = win_w;
     a->win_h = win_h;
 
-    /* Best-quality texture scaling: SVG icons rasterize at 3x oversample
-     * then bilinear-downscale to render size — without this hint the
-     * downscale uses nearest-neighbor and the icons look chunky. */
+    /* Best-quality texture scaling. Icons and glyphs are rasterized at
+     * device resolution and blitted 1:1 (see icons.c / font.c), so this
+     * only shapes the few textures that really are stretched — preview
+     * images, and pills on fractional DPI. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
 
     /* Custom decorations: borderless + resizable, with our own title bar
@@ -9348,10 +9351,11 @@ static void render_chrome(App* a)
         icon_draw(a->renderer, ICON_SETTINGS,
                   right - sz + ipad, icon_off_y, icon_sz, gc);
     }
-    /* Outline pin toggle: list icon, accented when pinned. */
+    /* Outline pin toggle: list icon, accented + filled when pinned. */
     {
         SDL_Color gc = BTN_PREP(right - 2 * sz, CB_OUTLINE, a->outline_pinned);
-        icon_draw(a->renderer, ICON_OUTLINE,
+        icon_draw(a->renderer,
+                  a->outline_pinned ? ICON_OUTLINE_FILLED : ICON_OUTLINE,
                   right - 2 * sz + ipad, icon_off_y, icon_sz, gc);
     }
     /* Sidebar toggle: panel icon, fill on left half when sidebar is open. */
@@ -9380,16 +9384,20 @@ static void render_chrome(App* a)
         icon_draw(a->renderer, ICON_COMMAND,
                   right - 6 * sz + ipad, icon_off_y, icon_sz, gc);
     }
-    /* Plugins overlay: plug icon, accented while the overlay is open. */
+    /* Plugins overlay: plug icon, accented + filled while the overlay is
+     * open. */
     {
         SDL_Color gc = BTN_PREP(right - 7 * sz, CB_PLUGINS, a->plugins_active);
-        icon_draw(a->renderer, ICON_PLUGIN,
+        icon_draw(a->renderer,
+                  a->plugins_active ? ICON_PLUGIN_FILLED : ICON_PLUGIN,
                   right - 7 * sz + ipad, icon_off_y, icon_sz, gc);
     }
-    /* Split live-preview toggle: two-column icon, accented when active. */
+    /* Split live-preview toggle: two-column icon, accented + filled when
+     * active. */
     {
         SDL_Color gc = BTN_PREP(right - 8 * sz, CB_SPLIT, a->split_preview);
-        icon_draw(a->renderer, ICON_SPLIT,
+        icon_draw(a->renderer,
+                  a->split_preview ? ICON_SPLIT_FILLED : ICON_SPLIT,
                   right - 8 * sz + ipad, icon_off_y, icon_sz, gc);
     }
     #undef BTN_PREP
@@ -9840,11 +9848,13 @@ static void render_sidebar(App* a)
             icon_draw(a->renderer,
                       it->collapsed ? ICON_CARET_RIGHT : ICON_CARET_DOWN,
                       x_caret, icon_y, SIDEBAR_ICON_SZ, a->fg_muted);
-            icon_draw(a->renderer,
-                      it->collapsed ? ICON_FOLDER : ICON_FOLDER_OPEN,
-                      x_icon, icon_y, SIDEBAR_ICON_SZ, icon_c);
+            /* The selected row gets the filled glyph. */
+            IconId fid = it->collapsed
+                ? (is_sel ? ICON_FOLDER_FILLED      : ICON_FOLDER)
+                : (is_sel ? ICON_FOLDER_OPEN_FILLED : ICON_FOLDER_OPEN);
+            icon_draw(a->renderer, fid, x_icon, icon_y, SIDEBAR_ICON_SZ, icon_c);
         } else {
-            icon_draw(a->renderer, ICON_FILE,
+            icon_draw(a->renderer, is_sel ? ICON_FILE_FILLED : ICON_FILE,
                       x_icon, icon_y, SIDEBAR_ICON_SZ, icon_c);
         }
 

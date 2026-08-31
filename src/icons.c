@@ -1,9 +1,7 @@
 #include "icons.h"
+#include "icon_raster.h"
 
-#define NANOSVG_IMPLEMENTATION
-#define NANOSVGRAST_IMPLEMENTATION
-#include "nanosvg.h"
-#include "nanosvgrast.h"
+#include "nanosvg.h"   /* parse API only; the implementation lives in icon_raster.c */
 
 #include <math.h>
 #include <stdio.h>
@@ -11,180 +9,213 @@
 #include <string.h>
 
 /* Lucide-style icons (ISC-licensed inspiration). 24x24 viewBox, 2px stroke,
- * round caps + joins. Using stroke='white' so a single texture serves any
- * tint via SDL_SetTextureColorMod. */
-static const char* SVG_SRC[ICON_COUNT] = {
+ * round caps + joins, stroke='white' so a single texture serves any tint.
+ *
+ * Each icon is a main SVG plus an optional "cut" SVG: shapes in the cut
+ * layer are knocked OUT of the main layer (alpha subtraction), which is how
+ * the filled variants get transparent grooves — a slit between two panes,
+ * list rules inside a solid card — without knowing the background colour. */
+#define SVG24_OPEN(sw) \
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " \
+    "stroke='white' stroke-width='" sw "' stroke-linecap='round' stroke-linejoin='round'>"
+#define SVG24      SVG24_OPEN("2")
+#define SVG24_BUTT \
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " \
+    "stroke='white' stroke-width='2' stroke-linecap='butt' stroke-linejoin='round'>"
+/* Window controls: 12-unit grid, 1-unit strokes on half-integer coordinates
+ * so that at the 12 px they are drawn at every line is exactly one crisp
+ * pixel — the same trick the OS caption glyphs use. */
+#define SVG12_OPEN(sw, cap) \
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' " \
+    "stroke='white' stroke-width='" sw "' stroke-linecap='" cap "' stroke-linejoin='miter'>"
+#define SVG_END "</svg>"
+
+typedef struct {
+    const char* svg;   /* main layer  */
+    const char* cut;   /* knockout layer (may be NULL) */
+} IconSrc;
+
+static const IconSrc SRC[ICON_COUNT] = {
     /* SETTINGS — three sliders, each with a circular knob */
-    [ICON_SETTINGS] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<line x1='21' y1='4' x2='14' y2='4'/>"
-    "<line x1='10' y1='4' x2='3' y2='4'/>"
-    "<line x1='21' y1='12' x2='12' y2='12'/>"
-    "<line x1='8' y1='12' x2='3' y2='12'/>"
-    "<line x1='21' y1='20' x2='16' y2='20'/>"
-    "<line x1='12' y1='20' x2='3' y2='20'/>"
-    "<circle cx='12' cy='4' r='2'/>"
-    "<circle cx='10' cy='12' r='2'/>"
-    "<circle cx='14' cy='20' r='2'/>"
-    "</svg>",
+    [ICON_SETTINGS] = { SVG24
+        "<line x1='21' y1='4' x2='14' y2='4'/>"
+        "<line x1='10' y1='4' x2='3' y2='4'/>"
+        "<line x1='21' y1='12' x2='12' y2='12'/>"
+        "<line x1='8' y1='12' x2='3' y2='12'/>"
+        "<line x1='21' y1='20' x2='16' y2='20'/>"
+        "<line x1='12' y1='20' x2='3' y2='20'/>"
+        "<circle cx='12' cy='4' r='2'/>"
+        "<circle cx='10' cy='12' r='2'/>"
+        "<circle cx='14' cy='20' r='2'/>"
+        SVG_END, NULL },
 
     /* FIND — magnifying glass */
-    [ICON_FIND] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<circle cx='11' cy='11' r='8'/>"
-    "<line x1='21' y1='21' x2='16.65' y2='16.65'/>"
-    "</svg>",
+    [ICON_FIND] = { SVG24
+        "<circle cx='11' cy='11' r='8'/>"
+        "<line x1='21' y1='21' x2='16.65' y2='16.65'/>"
+        SVG_END, NULL },
 
-    /* SIDEBAR_OPEN — panel with left third filled */
-    [ICON_SIDEBAR_OPEN] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<rect x='3' y='3' width='18' height='18' rx='2'/>"
-    "<line x1='9' y1='3' x2='9' y2='21'/>"
-    "<rect x='3' y='3' width='6' height='18' rx='1' fill='white' stroke='none'/>"
-    "</svg>",
+    /* SIDEBAR_OPEN — panel with the left third filled. The fill follows the
+     * frame's rounded corners so it reads as one solid pane. */
+    [ICON_SIDEBAR_OPEN] = { SVG24
+        "<path d='M3 5a2 2 0 0 1 2-2h4v18H5a2 2 0 0 1-2-2z' fill='white' stroke='none'/>"
+        "<rect x='3' y='3' width='18' height='18' rx='2'/>"
+        "<line x1='9' y1='3' x2='9' y2='21'/>"
+        SVG_END, NULL },
 
     /* SIDEBAR_CLOSED — panel outline only with divider */
-    [ICON_SIDEBAR_CLOSED] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<rect x='3' y='3' width='18' height='18' rx='2'/>"
-    "<line x1='9' y1='3' x2='9' y2='21'/>"
-    "</svg>",
+    [ICON_SIDEBAR_CLOSED] = { SVG24
+        "<rect x='3' y='3' width='18' height='18' rx='2'/>"
+        "<line x1='9' y1='3' x2='9' y2='21'/>"
+        SVG_END, NULL },
 
     /* OUTLINE — list with bullet dots */
-    [ICON_OUTLINE] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<line x1='8' y1='6' x2='21' y2='6'/>"
-    "<line x1='8' y1='12' x2='21' y2='12'/>"
-    "<line x1='8' y1='18' x2='21' y2='18'/>"
-    "<circle cx='4' cy='6'  r='1' fill='white' stroke='none'/>"
-    "<circle cx='4' cy='12' r='1' fill='white' stroke='none'/>"
-    "<circle cx='4' cy='18' r='1' fill='white' stroke='none'/>"
-    "</svg>",
+    [ICON_OUTLINE] = { SVG24
+        "<line x1='8' y1='6' x2='21' y2='6'/>"
+        "<line x1='8' y1='12' x2='21' y2='12'/>"
+        "<line x1='8' y1='18' x2='21' y2='18'/>"
+        "<circle cx='4' cy='6'  r='1' fill='white' stroke='none'/>"
+        "<circle cx='4' cy='12' r='1' fill='white' stroke='none'/>"
+        "<circle cx='4' cy='18' r='1' fill='white' stroke='none'/>"
+        SVG_END, NULL },
 
     /* FOLDER — closed folder shape */
-    [ICON_FOLDER] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<path d='M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'/>"
-    "</svg>",
+    [ICON_FOLDER] = { SVG24
+        "<path d='M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'/>"
+        SVG_END, NULL },
 
     /* FOLDER_OPEN — folder with peeking-up lid */
-    [ICON_FOLDER_OPEN] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<path d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2'/>"
-    "</svg>",
+    [ICON_FOLDER_OPEN] = { SVG24
+        "<path d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2'/>"
+        SVG_END, NULL },
 
     /* FILE — document with folded corner */
-    [ICON_FILE] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/>"
-    "<polyline points='14 2 14 8 20 8'/>"
-    "</svg>",
+    [ICON_FILE] = { SVG24
+        "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/>"
+        "<polyline points='14 2 14 8 20 8'/>"
+        SVG_END, NULL },
 
-    /* CARET_RIGHT — chevron pointing right */
-    [ICON_CARET_RIGHT] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-    "<polyline points='9 18 15 12 9 6'/>"
-    "</svg>",
+    /* CARET_RIGHT / CARET_DOWN — chevrons */
+    [ICON_CARET_RIGHT] = { SVG24_OPEN("2.5")
+        "<polyline points='9 18 15 12 9 6'/>"
+        SVG_END, NULL },
+    [ICON_CARET_DOWN] = { SVG24_OPEN("2.5")
+        "<polyline points='6 9 12 15 18 9'/>"
+        SVG_END, NULL },
 
-    /* CARET_DOWN — chevron pointing down */
-    [ICON_CARET_DOWN] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-    "<polyline points='6 9 12 15 18 9'/>"
-    "</svg>",
+    /* Window controls (12-grid, see SVG12_OPEN). */
+    [ICON_WIN_MIN] = { SVG12_OPEN("1", "butt")
+        "<path d='M1 6.5H11'/>"
+        SVG_END, NULL },
+    [ICON_WIN_MAX] = { SVG12_OPEN("1", "butt")
+        "<rect x='1.5' y='1.5' width='9' height='9'/>"
+        SVG_END, NULL },
+    [ICON_WIN_RESTORE] = { SVG12_OPEN("1", "butt")
+        "<rect x='1.5' y='3.5' width='7' height='7'/>"
+        "<path d='M3.5 3.5V1.5H10.5V8.5H8.5'/>"
+        SVG_END, NULL },
+    /* The X is diagonal, so it is anti-aliased whatever we do; a hair over
+     * 1 unit keeps its weight optically matched to the crisp bars. */
+    [ICON_WIN_CLOSE] = { SVG12_OPEN("1.2", "round")
+        "<path d='M1.5 1.5L10.5 10.5M10.5 1.5L1.5 10.5'/>"
+        SVG_END, NULL },
 
-    /* WIN_MIN — minimize: single horizontal line */
-    [ICON_WIN_MIN] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='1.5' stroke-linecap='square'>"
-    "<line x1='5' y1='12' x2='19' y2='12'/>"
-    "</svg>",
+    /* CHEVRON_LEFT / RIGHT — settings adjusters. */
+    [ICON_CHEVRON_LEFT] = { SVG24_OPEN("2.5")
+        "<polyline points='15 18 9 12 15 6'/>"
+        SVG_END, NULL },
+    [ICON_CHEVRON_RIGHT] = { SVG24_OPEN("2.5")
+        "<polyline points='9 18 15 12 9 6'/>"
+        SVG_END, NULL },
 
-    /* WIN_MAX — maximize: single square */
-    [ICON_WIN_MAX] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='1.5' stroke-linejoin='miter'>"
-    "<rect x='5' y='5' width='14' height='14'/>"
-    "</svg>",
+    /* VAULT_SEARCH — text rules + magnifying lens over the bottom-right.
+     * Reads as "find across documents". */
+    [ICON_VAULT_SEARCH] = { SVG24
+        "<path d='M21 6H3'/>"
+        "<path d='M10 12H3'/>"
+        "<path d='M10 18H3'/>"
+        "<circle cx='17' cy='15' r='3'/>"
+        "<path d='m21 19-1.9-1.9'/>"
+        SVG_END, NULL },
 
-    /* WIN_RESTORE — two stacked squares (restore from maximized) */
-    [ICON_WIN_RESTORE] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='1.5' stroke-linejoin='miter'>"
-    "<rect x='7' y='4' width='13' height='13'/>"
-    "<rect x='4' y='7' width='13' height='13'/>"
-    "</svg>",
-
-    /* WIN_CLOSE — X */
-    [ICON_WIN_CLOSE] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='1.5' stroke-linecap='square'>"
-    "<line x1='5' y1='5' x2='19' y2='19'/>"
-    "<line x1='19' y1='5' x2='5' y2='19'/>"
-    "</svg>",
-
-    /* CHEVRON_LEFT / RIGHT — used by settings adjusters. Solid filled. */
-    [ICON_CHEVRON_LEFT] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-    "<polyline points='15 18 9 12 15 6'/>"
-    "</svg>",
-
-    [ICON_CHEVRON_RIGHT] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-    "<polyline points='9 18 15 12 9 6'/>"
-    "</svg>",
-
-    /* VAULT_SEARCH — text-search: stacked text rules + magnifying lens
-     * over the bottom-right. Reads as "find across documents". */
-    [ICON_VAULT_SEARCH] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<path d='M21 6H3'/>"
-    "<path d='M10 12H3'/>"
-    "<path d='M10 18H3'/>"
-    "<circle cx='17' cy='15' r='3'/>"
-    "<path d='m21 19-1.9-1.9'/>"
-    "</svg>",
-
-    /* COMMAND — terminal-prompt style chevron + underscore. Reads as "run
-     * a command" to anyone who's seen a shell, and is visually different
-     * from the magnifier icons next to it. */
-    [ICON_COMMAND] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<polyline points='4 17 10 11 4 5'/>"
-    "<line x1='12' y1='19' x2='20' y2='19'/>"
-    "</svg>",
+    /* COMMAND — terminal prompt chevron + underscore. */
+    [ICON_COMMAND] = { SVG24
+        "<polyline points='4 17 10 11 4 5'/>"
+        "<line x1='12' y1='19' x2='20' y2='19'/>"
+        SVG_END, NULL },
 
     /* SPLIT — panel divided into two columns (live-preview split) */
-    [ICON_SPLIT] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<rect x='3' y='3' width='18' height='18' rx='2'/>"
-    "<line x1='12' y1='3' x2='12' y2='21'/>"
-    "</svg>",
+    [ICON_SPLIT] = { SVG24
+        "<rect x='3' y='3' width='18' height='18' rx='2'/>"
+        "<line x1='12' y1='3' x2='12' y2='21'/>"
+        SVG_END, NULL },
 
     /* PLUGIN — a plug: two prongs, a body, a cord. */
-    [ICON_PLUGIN] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
-    "<line x1='9' y1='2' x2='9' y2='8'/>"
-    "<line x1='15' y1='2' x2='15' y2='8'/>"
-    "<path d='M5 8h14v4a7 7 0 0 1-14 0V8z'/>"
-    "<line x1='12' y1='19' x2='12' y2='22'/>"
-    "</svg>",
+    [ICON_PLUGIN] = { SVG24
+        "<line x1='9' y1='2' x2='9' y2='8'/>"
+        "<line x1='15' y1='2' x2='15' y2='8'/>"
+        "<path d='M5 8h14v4a7 7 0 0 1-14 0V8z'/>"
+        "<line x1='12' y1='19' x2='12' y2='22'/>"
+        SVG_END, NULL },
+
+    /* ---- filled variants ------------------------------------------- */
+
+    /* FILE_FILLED — solid page; the corner flap stays an outline so the
+     * silhouette keeps its dog-ear. */
+    [ICON_FILE_FILLED] = { SVG24
+        "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z' fill='white'/>"
+        "<polyline points='14 2 14 8 20 8'/>"
+        SVG_END, NULL },
+
+    /* FOLDER_FILLED — solid folder silhouette. */
+    [ICON_FOLDER_FILLED] = { SVG24
+        "<path d='M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' fill='white'/>"
+        SVG_END, NULL },
+
+    /* FOLDER_OPEN_FILLED — solid open folder; a groove cut along the top
+     * of the front flap separates it from the back panel. */
+    [ICON_FOLDER_OPEN_FILLED] = { SVG24
+        "<path d='M2 5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2z' fill='white' stroke='none'/>"
+        "<path d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2'/>"
+        SVG_END,
+        SVG24_BUTT
+        "<path d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H19'/>"
+        SVG_END },
+
+    /* OUTLINE_FILLED — solid card with the list rules and bullets knocked
+     * out (the Fluent "filled" treatment for list glyphs). */
+    [ICON_OUTLINE_FILLED] = { SVG24
+        "<rect x='3' y='3' width='18' height='18' rx='2' fill='white'/>"
+        SVG_END,
+        SVG24
+        "<line x1='10.5' y1='8'  x2='17' y2='8'/>"
+        "<line x1='10.5' y1='12' x2='17' y2='12'/>"
+        "<line x1='10.5' y1='16' x2='17' y2='16'/>"
+        "<circle cx='7' cy='8'  r='1.25' fill='white' stroke='none'/>"
+        "<circle cx='7' cy='12' r='1.25' fill='white' stroke='none'/>"
+        "<circle cx='7' cy='16' r='1.25' fill='white' stroke='none'/>"
+        SVG_END },
+
+    /* SPLIT_FILLED — two solid panes with a slit between them. */
+    [ICON_SPLIT_FILLED] = { SVG24
+        "<rect x='3' y='3' width='18' height='18' rx='2' fill='white'/>"
+        SVG_END,
+        SVG24
+        "<line x1='12' y1='1' x2='12' y2='23'/>"
+        SVG_END },
+
+    /* PLUGIN_FILLED — solid plug body. */
+    [ICON_PLUGIN_FILLED] = { SVG24
+        "<line x1='9' y1='2' x2='9' y2='8'/>"
+        "<line x1='15' y1='2' x2='15' y2='8'/>"
+        "<path d='M5 8h14v4a7 7 0 0 1-14 0V8z' fill='white'/>"
+        "<line x1='12' y1='19' x2='12' y2='22'/>"
+        SVG_END, NULL },
 };
+
+/* Below this many device pixels a stroke is widened to the floor, so tiny
+ * glyphs (7 px macOS traffic lights) do not fade into a gray smear. */
+#define MIN_STROKE_PX 1.0f
 
 typedef struct CacheEntry {
     IconId             id;
@@ -201,40 +232,37 @@ typedef struct PillEntry {
 
 static struct {
     NSVGimage*       parsed[ICON_COUNT];
-    NSVGrasterizer*  rast;
+    NSVGimage*       cut[ICON_COUNT];
+    float            scale;          /* 0 until set -> treated as 1.0 */
     CacheEntry*      cache_head;
     PillEntry*       pill_head;
 } g;
 
+static NSVGimage* parse_svg(const char* src, int idx, const char* what)
+{
+    if (!src) return NULL;
+    /* nsvgParse mutates its input, so dup first. */
+    char* copy = strdup(src);
+    if (!copy) return NULL;
+    NSVGimage* img = nsvgParse(copy, "px", 96.0f);
+    free(copy);
+    if (!img)
+        fprintf(stderr, "icons_init: nsvgParse failed for icon %d (%s)\n", idx, what);
+    return img;
+}
+
 int icons_init(SDL_Renderer* r)
 {
     (void)r;
-    g.rast = nsvgCreateRasterizer();
-    if (!g.rast) {
-        fprintf(stderr, "icons_init: nsvgCreateRasterizer failed\n");
-        return -1;
-    }
     for (int i = 0; i < ICON_COUNT; ++i) {
-        if (!SVG_SRC[i]) continue;
-        /* nsvgParse mutates its input, so dup first. */
-        char* copy = strdup(SVG_SRC[i]);
-        if (!copy) continue;
-        g.parsed[i] = nsvgParse(copy, "px", 96.0f);
-        free(copy);
-        if (!g.parsed[i])
-            fprintf(stderr, "icons_init: nsvgParse failed for icon %d\n", i);
+        g.parsed[i] = parse_svg(SRC[i].svg, i, "main");
+        g.cut[i]    = parse_svg(SRC[i].cut, i, "cut");
     }
     return 0;
 }
 
-void icons_shutdown(void)
+static void flush_icon_cache(void)
 {
-    for (int i = 0; i < ICON_COUNT; ++i) {
-        if (g.parsed[i]) nsvgDelete(g.parsed[i]);
-        g.parsed[i] = NULL;
-    }
-    if (g.rast) nsvgDeleteRasterizer(g.rast);
-    g.rast = NULL;
     for (CacheEntry* e = g.cache_head; e; ) {
         CacheEntry* n = e->next;
         if (e->tex) SDL_DestroyTexture(e->tex);
@@ -242,6 +270,18 @@ void icons_shutdown(void)
         e = n;
     }
     g.cache_head = NULL;
+}
+
+void icons_shutdown(void)
+{
+    for (int i = 0; i < ICON_COUNT; ++i) {
+        if (g.parsed[i]) nsvgDelete(g.parsed[i]);
+        if (g.cut[i])    nsvgDelete(g.cut[i]);
+        g.parsed[i] = NULL;
+        g.cut[i]    = NULL;
+    }
+    icon_raster_shutdown();
+    flush_icon_cache();
     for (PillEntry* e = g.pill_head; e; ) {
         PillEntry* n = e->next;
         if (e->tex) SDL_DestroyTexture(e->tex);
@@ -251,14 +291,17 @@ void icons_shutdown(void)
     g.pill_head = NULL;
 }
 
-/* Oversample factor: rasterize the SVG at OVERSAMPLE x the requested size,
- * then let SDL bilinear-downscale on render. Without this, a 16x16 raster
- * of a 24-viewBox SVG with 2px strokes turns into mush — strokes become
- * ~1.3px and nanosvg's modest AA can't recover the missing detail. */
-#define OVERSAMPLE 3
+void icons_set_render_scale(float s)
+{
+    if (s <= 0.0f) s = 1.0f;
+    float cur = g.scale > 0.0f ? g.scale : 1.0f;
+    g.scale = s;
+    if (s != cur) flush_icon_cache();
+}
 
-/* Rasterize the icon at the requested size and stash the SDL_Texture in the
- * per-(id, sz) cache. Subsequent calls for the same key hit the cache. */
+/* Rasterize the icon at sz * scale device pixels and stash the SDL_Texture
+ * in the per-(id, sz) cache. Subsequent calls for the same key hit the
+ * cache. */
 static SDL_Texture* icon_get(SDL_Renderer* r, IconId id, int sz)
 {
     if (id < 0 || id >= ICON_COUNT || sz <= 0) return NULL;
@@ -266,34 +309,19 @@ static SDL_Texture* icon_get(SDL_Renderer* r, IconId id, int sz)
         if (e->id == id && e->sz == sz) return e->tex;
 
     NSVGimage* img = g.parsed[id];
-    if (!img || img->width <= 0 || img->height <= 0) return NULL;
+    if (!img) return NULL;
 
-    int W = sz * OVERSAMPLE, H = sz * OVERSAMPLE;
-    unsigned char* px = (unsigned char*)calloc((size_t)W * H * 4, 1);
+    float scale = g.scale > 0.0f ? g.scale : 1.0f;
+    int P = (int)((float)sz * scale + 0.5f);
+    if (P < 1) P = 1;
+
+    unsigned char* px = icon_raster(img, g.cut[id], P, MIN_STROKE_PX);
     if (!px) return NULL;
 
-    /* Square viewBox (24x24) → uniform scale based on the larger dim. */
-    float scale_w = (float)W / img->width;
-    float scale_h = (float)H / img->height;
-    float scale   = scale_w < scale_h ? scale_w : scale_h;
-    nsvgRasterize(g.rast, img, 0, 0, scale, px, W, H, W * 4);
-
-    /* nanosvg outputs PREMULTIPLIED RGBA. SDL_BLENDMODE_BLEND expects
-     * straight alpha, so un-premultiply each pixel. Without this, the
-     * tint appears double-multiplied and edges get darker than intended. */
-    for (int i = 0; i < W * H; ++i) {
-        unsigned char a = px[i*4 + 3];
-        if (a == 0) continue;
-        if (a == 255) continue;
-        px[i*4 + 0] = (unsigned char)(px[i*4 + 0] * 255 / a);
-        px[i*4 + 1] = (unsigned char)(px[i*4 + 1] * 255 / a);
-        px[i*4 + 2] = (unsigned char)(px[i*4 + 2] * 255 / a);
-    }
-
     /* On little-endian machines, ABGR8888 is byte order R,G,B,A — matches
-     * what nanosvg writes. */
+     * what icon_raster writes. */
     SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(
-        px, W, H, 32, W * 4, SDL_PIXELFORMAT_ABGR8888);
+        px, P, P, 32, P * 4, SDL_PIXELFORMAT_ABGR8888);
     SDL_Texture* tex = surf ? SDL_CreateTextureFromSurface(r, surf) : NULL;
     if (surf) SDL_FreeSurface(surf);
     free(px);
@@ -303,11 +331,11 @@ static SDL_Texture* icon_get(SDL_Renderer* r, IconId id, int sz)
         return NULL;
     }
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    /* Bilinear downscale at render time; the SCALE_QUALITY hint set in
-     * app_init drives this. */
+    /* 1:1 on integer scales; linear only matters on fractional DPI. */
     SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
 
     CacheEntry* e = (CacheEntry*)calloc(1, sizeof *e);
+    if (!e) { SDL_DestroyTexture(tex); return NULL; }
     e->id = id; e->sz = sz; e->tex = tex; e->next = g.cache_head;
     g.cache_head = e;
     return tex;

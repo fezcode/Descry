@@ -36,6 +36,7 @@ add_executable(descry
   src/decor.c
   src/font.c
   src/graph.c
+  src/icon_raster.c
   src/icons.c
   src/image.c
   src/lua_host.c
@@ -93,15 +94,18 @@ if(WIN32)
 endif()
 
 # --- unit tests (opt-in: -DDESCRY_TESTS=ON, or build.ps1 -Tests) --------
-# Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips
-# and the hoswl.h (Hisashi menubar client) DSL compiler / click parser.
+# Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips,
+# the hoswl.h (Hisashi menubar client) DSL compiler / click parser, and the
+# icon_raster.c SVG -> RGBA pipeline (supersampling, knockouts).
 option(DESCRY_TESTS "Build unit tests" OFF)
 if(DESCRY_TESTS)
   enable_testing()
   add_executable(test_tabs tests/test_tabs.c src/tabs.c src/buffer.c)
   add_executable(test_hoswl tests/test_hoswl.c)
-  foreach(t test_tabs test_hoswl)
-    target_include_directories(${t} PRIVATE src)
+  add_executable(test_icons tests/test_icons.c src/icon_raster.c)
+  target_link_libraries(test_icons PRIVATE m)
+  foreach(t test_tabs test_hoswl test_icons)
+    target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
     # -U comes after the config flags on the command line, so it wins.
@@ -111,4 +115,5 @@ if(DESCRY_TESTS)
   endforeach()
   add_test(NAME tabs COMMAND test_tabs)
   add_test(NAME hoswl COMMAND test_hoswl)
+  add_test(NAME icons COMMAND test_icons)
 endif()
