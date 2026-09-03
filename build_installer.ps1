@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$version = "0.84.1"
+$version = "0.85.0"
 $forge   = "D:\Workhammer\Forge\build\forge.exe"
 $project = $PSScriptRoot
 $outDir  = Join-Path $PSScriptRoot "dist"

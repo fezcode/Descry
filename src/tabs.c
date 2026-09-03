@@ -85,3 +85,19 @@ int tabs_parse_state_line(const char* line, char* out_path, int cap, int* out_ac
     }
     return 0;
 }
+
+int tabs_strip_clamp(int scroll, int content_w, int strip_w) {
+    int max = content_w - strip_w;
+    if (max < 0) max = 0;
+    if (scroll > max) scroll = max;
+    if (scroll < 0) scroll = 0;
+    return scroll;
+}
+
+int tabs_strip_follow(int scroll, int content_w, int strip_w,
+                      int chip_x, int chip_w) {
+    if (chip_x < scroll)                          scroll = chip_x;
+    else if (chip_x + chip_w > scroll + strip_w)  scroll = chip_x + chip_w - strip_w;
+    if (chip_x < scroll)                          scroll = chip_x;   /* wider than the strip */
+    return tabs_strip_clamp(scroll, content_w, strip_w);
+}

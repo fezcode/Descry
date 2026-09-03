@@ -555,6 +555,11 @@ typedef struct {
     int      tab_hover;              /* hovered tab index, -1 none */
     int      tab_scroll_x;           /* horizontal scroll of the strip, px */
     int      tab_strip_x0, tab_strip_x1;
+    int      tab_strip_content_w;    /* every chip end to end, px (this frame) */
+    /* What the strip last laid out. When the active tab, the tab count or
+     * the strip width changes, render_chrome scrolls the active chip into
+     * view; otherwise the offset the user wheeled to is left alone. */
+    int      tab_seen_active, tab_seen_count, tab_seen_strip_w;
 
     /* Custom window-decoration state. Title bar window controls hover
      * tracking + animations. -1 in tb_btn_hover means no button hovered. */

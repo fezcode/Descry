@@ -62,4 +62,18 @@ int  tablist_remove(TabList* t, int i);
  */
 int  tabs_parse_state_line(const char* line, char* out_path, int cap, int* out_active);
 
+/* Tab-strip overflow. `content_w` is the total width of every chip laid end
+ * to end, `strip_w` the visible strip, `scroll` how far the chips are shifted
+ * left — all in pixels, chip positions measured from the strip's left edge
+ * before scrolling ("content space"). */
+
+/* Clamp `scroll` so the strip never shows empty space past either end. */
+int  tabs_strip_clamp(int scroll, int content_w, int strip_w);
+
+/* Smallest move of `scroll` that brings the chip at [chip_x, chip_x + chip_w)
+ * fully into view (its left edge wins when the chip is wider than the strip).
+ * The result is clamped. */
+int  tabs_strip_follow(int scroll, int content_w, int strip_w,
+                       int chip_x, int chip_w);
+
 #endif

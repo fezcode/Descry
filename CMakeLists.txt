@@ -43,16 +43,19 @@ add_executable(descry
   src/markdown.c
   src/mermaid.c
   src/regex.c
+  src/reveal.c
   src/spell.c
   src/tabs.c
   src/vault.c
 )
 if(APPLE)
-  # The native menu bar is the only Objective-C in the tree; ARC keeps the
-  # menu objects alive without hand-written retains.
+  # The native menu bar and the window-corner clip are the only Objective-C
+  # in the tree; ARC keeps their Cocoa objects alive without hand-written
+  # retains.
   enable_language(OBJC)
-  target_sources(descry PRIVATE src/macos_menu.m)
-  set_source_files_properties(src/macos_menu.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_sources(descry PRIVATE src/macos_menu.m src/macos_window.m)
+  set_source_files_properties(src/macos_menu.m src/macos_window.m
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 target_include_directories(descry PRIVATE src vendor/nanosvg)
@@ -67,7 +70,8 @@ target_link_libraries(descry PRIVATE
   md4c-html
 )
 if(APPLE)
-  target_link_libraries(descry PRIVATE "-framework Cocoa")
+  # QuartzCore: CALayer, for the rounded-corner clip in macos_window.m.
+  target_link_libraries(descry PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
 if(WIN32)
   # comdlg32: native file dialogs.  wininet: GET remote images in preview.
@@ -94,17 +98,19 @@ if(WIN32)
 endif()
 
 # --- unit tests (opt-in: -DDESCRY_TESTS=ON, or build.ps1 -Tests) --------
-# Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips,
-# the hoswl.h (Hisashi menubar client) DSL compiler / click parser, and the
-# icon_raster.c SVG -> RGBA pipeline (supersampling, knockouts).
+# Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips and
+# tab-strip scroll math, the hoswl.h (Hisashi menubar client) DSL compiler /
+# click parser, the icon_raster.c SVG -> RGBA pipeline (supersampling,
+# knockouts), and the reveal.c file-manager command builders.
 option(DESCRY_TESTS "Build unit tests" OFF)
 if(DESCRY_TESTS)
   enable_testing()
   add_executable(test_tabs tests/test_tabs.c src/tabs.c src/buffer.c)
   add_executable(test_hoswl tests/test_hoswl.c)
   add_executable(test_icons tests/test_icons.c src/icon_raster.c)
+  add_executable(test_reveal tests/test_reveal.c src/reveal.c)
   target_link_libraries(test_icons PRIVATE m)
-  foreach(t test_tabs test_hoswl test_icons)
+  foreach(t test_tabs test_hoswl test_icons test_reveal)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -116,4 +122,5 @@ if(DESCRY_TESTS)
   add_test(NAME tabs COMMAND test_tabs)
   add_test(NAME hoswl COMMAND test_hoswl)
   add_test(NAME icons COMMAND test_icons)
+  add_test(NAME reveal COMMAND test_reveal)
 endif()

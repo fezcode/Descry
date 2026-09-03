@@ -35,6 +35,11 @@
 #else
   #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+  #include <SDL_syswm.h>    /* the NSWindow handle for macos_window.m */
+  #include "macos_window.h"
+#endif
+#include "reveal.h"
 
 #ifdef _WIN32
   /* Hisashi OS Window Layer client — vendored verbatim from
@@ -121,7 +126,7 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.84.1"
+#define DESCRY_VERSION "0.85.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -5756,6 +5761,42 @@ static void win_apply_rounded_corners(App* a)
 }
 #endif
 
+#if defined(__APPLE__)
+/* Every macOS window is rounded; a borderless NSWindow is the one exception,
+ * so ours is clipped to the platform radius by hand (macos_window.m). Square
+ * again in fullscreen, where the frame meets the screen edge. Cheap to call
+ * on every size change — Cocoa is only touched when the radius changes. */
+#define MAC_CORNER_RADIUS 10
+static void mac_apply_rounded_corners(App* a)
+{
+    static int applied = -1;
+    if (!a->window) return;
+    int want = (SDL_GetWindowFlags(a->window) & SDL_WINDOW_FULLSCREEN)
+               ? 0 : MAC_CORNER_RADIUS;
+    if (want == applied) return;
+    SDL_SysWMinfo wmi;
+    SDL_VERSION(&wmi.version);
+    if (!SDL_GetWindowWMInfo(a->window, &wmi)) return;
+    macos_window_set_corner_radius((void*)wmi.info.cocoa.window, (float)want);
+    applied = want;
+}
+#endif
+
+/* Radius the OS clips the window to, in logical px (0 = square). The frame
+ * outline follows the same curve so it doesn't run straight into the clip. */
+static int window_corner_radius(const App* a)
+{
+#if defined(__APPLE__)
+    return (a->window && (SDL_GetWindowFlags(a->window) & SDL_WINDOW_FULLSCREEN))
+           ? 0 : MAC_CORNER_RADIUS;
+#elif defined(_WIN32)
+    return a->cfg_rounded_corners ? 8 : 0;    /* DWMWCP_ROUND at 100 % */
+#else
+    (void)a;
+    return 0;
+#endif
+}
+
 static int app_init(App* a, const char* note_path_arg)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -6042,6 +6083,8 @@ static int app_init(App* a, const char* note_path_arg)
 
 #if defined(_WIN32)
     win_apply_rounded_corners(a);
+#elif defined(__APPLE__)
+    mac_apply_rounded_corners(a);
 #endif
 
     a->renderer = SDL_CreateRenderer(a->window, -1,
@@ -6093,6 +6136,10 @@ static int app_init(App* a, const char* note_path_arg)
     a->tab_scroll_x = 0;
     a->tab_strip_count = 0;
     a->tab_strip_x0 = a->tab_strip_x1 = 0;
+    a->tab_strip_content_w = 0;
+    a->tab_seen_active  = -2;      /* never matches, so frame 1 follows */
+    a->tab_seen_count   = -1;
+    a->tab_seen_strip_w = 0;
     a->split_preview = false;
     a->split_ratio = 0.5f;
     a->preview_scroll_y = 0;
@@ -9240,69 +9287,117 @@ static void render_chrome(App* a)
     int strip_x0 = bx;
     int strip_x1 = a->win_w - 8 * btn_sz - 110 - 8;   /* before the mode pill */
     if (strip_x1 < strip_x0) strip_x1 = strip_x0;
+    int strip_w  = strip_x1 - strip_x0;
     a->tab_strip_x0 = strip_x0;
     a->tab_strip_x1 = strip_x1;
 
-    SDL_Rect strip_clip = { strip_x0, TBH, strip_x1 - strip_x0, CRH };
+    /* Pass 1 — measure. The chip widths decide the scroll offset and the
+     * offset decides where every chip lands, so nothing is drawn yet. */
+    int         tab_count = a->tabs.count < 64 ? a->tabs.count : 64;
+    const char* tab_name[64];
+    int         tab_nw[64], tab_w[64];
+    bool        tab_dirty[64];
+    int content_w = 0;
+    int active_cx = -1, active_cw = 0;     /* active chip, content space */
+    for (int i = 0; i < tab_count; ++i) {
+        bool is_active = (i == a->tabs.active);
+        const char* path = is_active ? a->note_path : a->tabs.items[i].path;
+        tab_dirty[i] = is_active ? a->buf.dirty : a->tabs.items[i].buf.dirty;
+        tab_name[i]  = path ? vault_basename(path) : "(unsaved)";
+        int nw_full  = font_measure(a->font_ide, tab_name[i], strlen(tab_name[i]));
+        tab_nw[i]    = nw_full > 160 ? 160 : nw_full;
+        int pad = 10, gap_dirty = tab_dirty[i] ? 12 : 0, close_w = 16;
+        tab_w[i] = pad + tab_nw[i] + gap_dirty + close_w + 4;
+        if (is_active) { active_cx = content_w; active_cw = tab_w[i]; }
+        content_w += tab_w[i] + 2;
+    }
+    if (content_w > 0) content_w -= 2;             /* no gap after the last */
+    a->tab_strip_content_w = content_w;
+
+    /* The strip follows the active chip only when something could have
+     * pushed it out of view — a switch, an open/close, a narrower strip.
+     * Otherwise the offset the user wheeled to stays put. */
+    bool follow = a->tabs.active != a->tab_seen_active ||
+                  a->tabs.count  != a->tab_seen_count  ||
+                  strip_w        <  a->tab_seen_strip_w;
+    a->tab_seen_active  = a->tabs.active;
+    a->tab_seen_count   = a->tabs.count;
+    a->tab_seen_strip_w = strip_w;
+    if (follow && active_cx >= 0)
+        a->tab_scroll_x = tabs_strip_follow(a->tab_scroll_x, content_w,
+                                            strip_w, active_cx, active_cw);
+    a->tab_scroll_x = tabs_strip_clamp(a->tab_scroll_x, content_w, strip_w);
+    int max_scroll = content_w - strip_w;
+    if (max_scroll < 0) max_scroll = 0;
+
+    SDL_Rect strip_clip = { strip_x0, TBH, strip_w, CRH };
     SDL_RenderSetClipRect(a->renderer, &strip_clip);
 
+    /* Pass 2 — draw. Hit rects are recorded for every chip, on screen or
+     * not; the mouse handlers gate on the strip bounds. */
     a->tab_strip_count = 0;
     int tab_top = TBH + 3;
     int tab_h   = CRH - 6;
     int sx = strip_x0 - a->tab_scroll_x;
-    int active_x = -1, active_w = 0;
-    for (int i = 0; i < a->tabs.count && i < 64; ++i) {
+    for (int i = 0; i < tab_count; ++i) {
         bool is_active = (i == a->tabs.active);
-        const char* path = is_active ? a->note_path : a->tabs.items[i].path;
-        bool dirty       = is_active ? a->buf.dirty  : a->tabs.items[i].buf.dirty;
-        const char* name = path ? vault_basename(path) : "(unsaved)";
-        int nw_full = font_measure(a->font_ide, name, strlen(name));
-        int nw      = nw_full > 160 ? 160 : nw_full;
-        int pad = 10, gap_dirty = dirty ? 12 : 0, close_w = 16;
-        int tw_ = pad + nw + gap_dirty + close_w + 4;
-
-        SDL_Rect tr = { sx, tab_top, tw_, tab_h };
-        bool is_hover = (i == a->tab_hover);
-        if (is_active || is_hover) {
-            SDL_SetRenderDrawColor(a->renderer,
-                a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
-                a->bg_sidebar_hover.b, is_active ? 220 : 120);
-            fill_rrect(a->renderer, tr, 5);
-        }
-        int tx = sx + pad;
-        font_draw_elided(a->font_ide, name, strlen(name), tx, by, nw,
-                         is_active ? a->fg : a->fg_muted);
-        tx += nw + 4;
-        if (dirty)
-            font_draw_line(a->font_ide, "\xe2\x80\xa2", 3, tx, by, a->fg_link);
+        bool is_hover  = (i == a->tab_hover);
+        int  tw_ = tab_w[i], nw = tab_nw[i];
+        int  pad = 10, close_w = 16;
+        SDL_Rect tr      = { sx, tab_top, tw_, tab_h };
         SDL_Rect close_r = { sx + tw_ - close_w, tab_top + (tab_h - 14) / 2,
                              14, 14 };
-        if (is_hover || is_active)
-            font_draw_line(a->font_ide, "\xc3\x97", 2,   /* × */
-                           close_r.x + 3, by, a->fg_muted);
-
-        a->tab_hits[i].rect = tr;
+        a->tab_hits[i].rect       = tr;
         a->tab_hits[i].close_rect = close_r;
         a->tab_strip_count++;
-        if (is_active) {
-            active_x = sx; active_w = tw_;
-            SDL_Rect ul = { tr.x + 4, tab_top + tab_h - 2, tw_ - 8, 2 };
-            SDL_SetRenderDrawColor(a->renderer,
-                a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
-            SDL_RenderFillRect(a->renderer, &ul);
+        bool visible = sx + tw_ > strip_x0 && sx < strip_x1;
+        if (visible) {
+            if (is_active || is_hover) {
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
+                    a->bg_sidebar_hover.b, is_active ? 220 : 120);
+                fill_rrect(a->renderer, tr, 5);
+            }
+            int tx = sx + pad;
+            font_draw_elided(a->font_ide, tab_name[i], strlen(tab_name[i]),
+                             tx, by, nw, is_active ? a->fg : a->fg_muted);
+            tx += nw + 4;
+            if (tab_dirty[i])
+                font_draw_line(a->font_ide, "\xe2\x80\xa2", 3, tx, by, a->fg_link);
+            if (is_hover || is_active)
+                font_draw_line(a->font_ide, "\xc3\x97", 2,   /* × */
+                               close_r.x + 3, by, a->fg_muted);
+            if (is_active) {
+                SDL_Rect ul = { tr.x + 4, tab_top + tab_h - 2, tw_ - 8, 2 };
+                SDL_SetRenderDrawColor(a->renderer,
+                    a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
+                SDL_RenderFillRect(a->renderer, &ul);
+            }
         }
         sx += tw_ + 2;
     }
-    SDL_RenderSetClipRect(a->renderer, NULL);
 
-    /* Keep the active tab within the strip (one-frame-lagged auto-scroll). */
-    if (active_x >= 0) {
-        if (active_x < strip_x0)
-            a->tab_scroll_x -= (strip_x0 - active_x);
-        else if (active_x + active_w > strip_x1)
-            a->tab_scroll_x += (active_x + active_w) - strip_x1;
-        if (a->tab_scroll_x < 0) a->tab_scroll_x = 0;
+    /* Fade the overflowing end(s) into the bar so a half-visible chip reads
+     * as "more this way" rather than a hard cut. Starts a pixel below the
+     * title-bar divider so that hairline stays continuous. */
+    {
+        int fade_w = strip_w / 3 < 28 ? strip_w / 3 : 28;
+        SDL_Color bgc = a->bg_status;
+        for (int i = 0; i < fade_w; ++i) {
+            float t = 1.0f - (float)i / (float)fade_w;
+            Uint8 alpha = (Uint8)(255.0f * t * t);
+            SDL_SetRenderDrawColor(a->renderer, bgc.r, bgc.g, bgc.b, alpha);
+            if (a->tab_scroll_x > 0) {
+                SDL_Rect col = { strip_x0 + i, TBH + 1, 1, CRH - 1 };
+                SDL_RenderFillRect(a->renderer, &col);
+            }
+            if (a->tab_scroll_x < max_scroll) {
+                SDL_Rect col = { strip_x1 - 1 - i, TBH + 1, 1, CRH - 1 };
+                SDL_RenderFillRect(a->renderer, &col);
+            }
+        }
     }
+    SDL_RenderSetClipRect(a->renderer, NULL);
 
     /* Right-side buttons. */
     int sz    = chrome_button_size(a);
@@ -10656,7 +10751,7 @@ static const char* CTX_LABELS[CTX_COUNT] = {
     "Delete",
     "New file here…",
     "New folder here…",
-    "Show in Explorer",
+    REVEAL_MENU_LABEL,
     "Refresh",
 };
 
@@ -10773,7 +10868,7 @@ static const char* ctx_label_at(const App* a, int row)
         return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_TAB) {
-        if (row == 0) return "Open in Explorer";
+        if (row == 0) return REVEAL_MENU_LABEL;
         if (row == 1) return "Copy absolute path";
         if (row == 2) return "Close";
         return "";
@@ -11958,30 +12053,10 @@ static void ctx_menu_invoke(App* a, CtxAction act)
             break;
         }
         case CTX_REVEAL: {
-            char target[1024] = {0};
-            if (it) {
-                snprintf(target, sizeof target, "%s", it->path);
-            } else if (a->vault.dir) {
-                snprintf(target, sizeof target, "%s", a->vault.dir);
-            }
-            if (!target[0]) break;
-#ifdef _WIN32
-            for (int k = 0; target[k]; k++)
-                if (target[k] == '/') target[k] = '\\';
-            if (it && !it->is_dir) {
-                char args[1100];
-                snprintf(args, sizeof args, "/select,\"%s\"", target);
-                ShellExecuteA(NULL, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
-            } else {
-                ShellExecuteA(NULL, "explore", target, NULL, NULL, SW_SHOWNORMAL);
-            }
-#else
-            {
-                char cmd[1100];
-                snprintf(cmd, sizeof cmd, "xdg-open \"%s\"", target);
-                system(cmd);
-            }
-#endif
+            /* A row reveals itself; the empty-area menu opens the vault. */
+            const char* target = it ? it->path : a->vault.dir;
+            if (!target || !target[0]) break;
+            reveal_in_file_manager(target, !it || it->is_dir);
             break;
         }
         default: break;
@@ -12245,30 +12320,6 @@ static void drop_flush(App* a)
 }
 
 /* Single dispatch from a row click, switches on the active menu kind. */
-/* Reveal a file in the OS file manager (Explorer selects the file). */
-static void reveal_file_in_explorer(const char* path)
-{
-    if (!path || !path[0]) return;
-#ifdef _WIN32
-    char target[1024];
-    snprintf(target, sizeof target, "%s", path);
-    for (int k = 0; target[k]; k++) if (target[k] == '/') target[k] = '\\';
-    char args[1100];
-    snprintf(args, sizeof args, "/select,\"%s\"", target);
-    ShellExecuteA(NULL, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-    /* -R reveals AND selects the file in Finder, matching Explorer's
-     * /select behaviour (plain `open` would just launch the file). */
-    char cmd[1100];
-    snprintf(cmd, sizeof cmd, "open -R \"%s\"", path);
-    if (system(cmd) != 0) { /* best effort */ }
-#else
-    char cmd[1100];
-    snprintf(cmd, sizeof cmd, "xdg-open \"%s\"", path);
-    if (system(cmd) != 0) { /* best effort */ }
-#endif
-}
-
 static void ctx_menu_invoke_row(App* a, int row)
 {
     if (a->ctx_menu_kind == CTX_KIND_TAB) {
@@ -12279,8 +12330,8 @@ static void ctx_menu_invoke_row(App* a, int row)
         const char* path = (ti == a->tabs.active)
             ? a->note_path : a->tabs.items[ti].path;
         if (!path || path[0] == '(') { app_notify(a, "no file on disk"); return; }
-        if (row == 0) {                          /* Open in Explorer */
-            reveal_file_in_explorer(path);
+        if (row == 0) {                          /* Show in Explorer / Finder */
+            reveal_in_file_manager(path, false);
         } else if (row == 1) {                   /* Copy absolute path */
             char abs[1024];
 #ifdef _WIN32
@@ -15884,10 +15935,10 @@ static void render_window_border(App* a)
     Uint8     alpha    = resizing ? 200 : 150;
 
     SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, alpha);
-    if (a->cfg_rounded_corners) {
-        /* DWM clips the corners with an ~8px radius; outline the same curve
-         * so the frame line doesn't run straight into the clipped corner. */
-        int rad = 8;
+    int rad = window_corner_radius(a);
+    if (rad > 0) {
+        /* The OS clips the corners to `rad`; outline the same curve so the
+         * frame line doesn't run straight into the clipped corner. */
         for (int i = 0; i < t; ++i)
             draw_rrect(a->renderer,
                        (SDL_Rect){ i, i, a->win_w - 2 * i, a->win_h - 2 * i },
@@ -20235,6 +20286,9 @@ static void app_event(App* a, const SDL_Event* e)
                 a->win_h = e->window.data2;
                 sync_renderer_logical_size(a); /* re-map logical->device */
                 clamp_scroll(a);
+#if defined(__APPLE__)
+                mac_apply_rounded_corners(a);  /* square in fullscreen */
+#endif
                 /* Flash a centered "WxH" badge so the user has feedback
                  * while dragging the window edge. Hides ~900ms after the
                  * last resize event. */
@@ -21617,6 +21671,30 @@ static void app_event(App* a, const SDL_Event* e)
                 if (r >= 0) a->picker_selected = r;
                 int delta = (SDL_GetModState() & KMOD_SHIFT) ? 1 : 5;
                 picker_adjust(a, e->wheel.y > 0 ? +delta : -delta);
+                break;
+            }
+            /* Tab strip: the wheel (or a sideways swipe) slides the chips.
+             * A vertical wheel maps to horizontal — the strip has nothing
+             * to scroll vertically. render_chrome only re-engages its
+             * follow-the-active-tab on a switch, so this offset sticks. */
+            if (!overlay_floating_active(a) && !a->confirm_active &&
+                !a->tinput_active && !a->prompt_active &&
+                a->tab_strip_content_w > 0 &&
+                mx >= a->tab_strip_x0 && mx < a->tab_strip_x1 &&
+                my >= title_bar_h(a) && my < chrome_bar_h(a)) {
+                const int step = 48;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+                float dxf = (e->wheel.preciseX - e->wheel.preciseY) * (float)step;
+                int dx = (int)(dxf < 0 ? dxf - 0.5f : dxf + 0.5f);
+#else
+                int dx = (e->wheel.x - e->wheel.y) * step;
+#endif
+                if (dx != 0) {
+                    a->tab_scroll_x = tabs_strip_clamp(
+                        a->tab_scroll_x + dx, a->tab_strip_content_w,
+                        a->tab_strip_x1 - a->tab_strip_x0);
+                    a->tab_hover = -1;   /* chips moved; next motion re-hits */
+                }
                 break;
             }
             if (a->sidebar_open && mx < a->sidebar_w) {
