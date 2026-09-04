@@ -86,9 +86,21 @@ void macos_menu_install(const char *const *titles,
                 NSString *label =
                     [NSString stringWithUTF8String:items[m][r].label];
                 if (!label) continue;
+                char kb[2] = { items[m][r].key, 0 };
+                NSString *keq = kb[0] ? [NSString stringWithUTF8String:kb]
+                                      : @"";
                 NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:label
                                                            action:@selector(fire:)
-                                                    keyEquivalent:@""];
+                                                    keyEquivalent:keq];
+                if (kb[0]) {
+                    int md = items[m][r].mods;
+                    NSEventModifierFlags f = 0;
+                    if (md & MAC_MOD_CMD)   f |= NSEventModifierFlagCommand;
+                    if (md & MAC_MOD_SHIFT) f |= NSEventModifierFlagShift;
+                    if (md & MAC_MOD_ALT)   f |= NSEventModifierFlagOption;
+                    if (md & MAC_MOD_CTRL)  f |= NSEventModifierFlagControl;
+                    [mi setKeyEquivalentModifierMask:f];
+                }
                 [mi setTarget:g_target];
                 [mi setTag:(NSInteger)m * TAG_STRIDE + r];
                 [mi setEnabled:YES];

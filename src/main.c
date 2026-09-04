@@ -126,7 +126,7 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.85.0"
+#define DESCRY_VERSION "0.86.0"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -135,6 +135,21 @@ static void resolve_data_paths(void)
 /* Click hit kinds. The `kind` field on struct ClickHit (defined in app.h)
  * is one of these. */
 enum ClickHitKind { HIT_WIKI, HIT_TASK };
+
+/* The accelerator modifier: Cmd on macOS, Ctrl everywhere else.
+ *
+ * Every binding — the DEFAULT_KEYS table, the Lua `keybindings` table, the
+ * user's own overrides — is written with the `ctrl+` token, so one set of
+ * key strings stays portable across platforms. build_keystr is the single
+ * place that maps a physical modifier onto that token, and on macOS it maps
+ * Cmd, not Control (which is left for the usual emacs-ish text motions the
+ * platform reserves it for). Everything that hand-tests a modifier does so
+ * through KMOD_PRIMARY for the same reason. */
+#if defined(__APPLE__)
+#  define KMOD_PRIMARY KMOD_GUI
+#else
+#  define KMOD_PRIMARY KMOD_CTRL
+#endif
 
 /* Forward decl: user-keybinding loader, called from app_init early. */
 static void user_kbinds_load_from_cfg(LuaHost* h);
@@ -2133,6 +2148,12 @@ static int load_into_live(App* a, const char* path)
     return 0;
 }
 
+/* Navigation history hooks (defined with the rest of the nav stack far
+ * below): sync records where the user is leaving from, push records where
+ * they landed. Every file-open path runs through the two calls below. */
+static void nav_sync_current (App* a);
+static void nav_push_location(App* a);
+
 /* ---- Tabs: open files share one live document; others are parked ---------
  * load_into_live (above) reads a file's bytes into the live buffer. The
  * functions below add the tab layer on top: the ACTIVE tab's state lives in
@@ -2156,6 +2177,7 @@ static void tabs_park_active(App* a)
 static void switch_to_tab(App* a, int i)
 {
     if (i < 0 || i >= a->tabs.count || i == a->tabs.active) return;
+    nav_sync_current(a);
     tabs_park_active(a);
     tab_load(&a->tabs.items[i], &a->note_path, &a->buf,
              &a->scroll_y, &a->scroll_x, &a->edit_mode, &a->viewing_image);
@@ -2171,6 +2193,7 @@ static void switch_to_tab(App* a, int i)
         ? vault_index_of(&a->vault, a->note_path) : -1;
     a->fired_seq = a->buf.seq;            /* a switch isn't a "text_change" */
     update_window_title(a);
+    nav_push_location(a);
 }
 
 /* Tab-aware open: focus `path`'s existing tab, else park the current file and
@@ -2182,6 +2205,7 @@ static int load_note(App* a, const char* path)
     int existing = tablist_find(&a->tabs, path);
     if (existing >= 0) { switch_to_tab(a, existing); return 0; }
 
+    nav_sync_current(a);
     int prev = a->tabs.active;
     tabs_park_active(a);              /* prev safe in its slot; a->buf now empty */
     int idx = tablist_append(&a->tabs, path);
@@ -2192,6 +2216,7 @@ static int load_note(App* a, const char* path)
         if (prev >= 0) switch_to_tab(a, prev);
         return -1;
     }
+    nav_push_location(a);
     return 0;
 }
 
@@ -3731,8 +3756,8 @@ static int input_word_right(const char* buf, int len, int cursor)
 static bool input_handle_keydown(InputField* f, SDL_Keycode k, SDL_Scancode sc,
                                  Uint16 mod)
 {
-    bool ctrl  = (mod & KMOD_CTRL)  != 0;
-    bool shift = (mod & KMOD_SHIFT) != 0;
+    bool ctrl  = (mod & KMOD_PRIMARY) != 0;
+    bool shift = (mod & KMOD_SHIFT)   != 0;
     if (ctrl) {
         switch (sc) {
             case SDL_SCANCODE_A: k = SDLK_a; break;
@@ -6350,6 +6375,14 @@ static int app_init(App* a, const char* note_path_arg)
     }
     a->edit_mode = lua_host_cfg_number(a->lua, "start_in_edit_mode", 0) != 0;
 
+    /* Navigation history only starts recording now: restoring last session's
+     * tabs above would otherwise seed the stack with a dozen entries the user
+     * never navigated to. The first entry is wherever they land. */
+    a->nav_pos   = -1;
+    a->nav_count = 0;
+    a->nav_ready = true;
+    nav_push_location(a);
+
     a->running   = true;
     return 0;
 }
@@ -7787,15 +7820,14 @@ static void compute_edit_styles(const char* s, size_t n, unsigned char* st)
             if (boundary && i + 1 < n &&
                 (is_word_char((unsigned char)s[i+1]) || s[i+1] == '/'))
             {
-                st[i] = ES_TAG;
                 size_t k = i + 1;
                 while (k < n &&
                        (is_word_char((unsigned char)s[k]) ||
-                        s[k] == '-' || s[k] == '/'))
-                {
-                    st[k] = ES_TAG;
-                    k++;
-                }
+                        s[k] == '-' || s[k] == '/')) k++;
+                /* Same bound the parser applies, so the two views agree on
+                 * where a tag stops. */
+                if (k - (i + 1) <= MD_TAG_MAX_NAME)
+                    for (size_t b = i; b < k; ++b) st[b] = ES_TAG;
                 i = k; continue;
             }
         }
@@ -8750,7 +8782,8 @@ enum TitleBarButton {
 };
 #define TB_BTN_W 46
 
-static const char* MENU_LABELS[4] = { "File", "Edit", "View", "Help" };
+static const char* MENU_LABELS[MENU_COUNT] =
+    { "File", "Edit", "View", "Go", "Help" };
 
 #if defined(__APPLE__)
 /* macOS keeps the window controls at the LEFT, as three round "traffic
@@ -8842,7 +8875,7 @@ static bool titlebar_icon_at(const App* a, int mx, int my)
  * Uses the rects stashed by render_titlebar last frame. */
 static int titlebar_menu_at(const App* a, int mx, int my)
 {
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < MENU_COUNT; ++i) {
         const SDL_Rect* r = &a->menu_rects[i];
         if (r->w <= 0) continue;
         if (mx >= r->x && mx < r->x + r->w &&
@@ -8981,9 +9014,10 @@ static void render_titlebar(App* a, int TBH)
      * bar is carrying them (macOS), in which case the rects are cleared so
      * titlebar_menu_at stops reporting hits on last frame's geometry. */
     if (!menu_strip_visible(a)) {
-        for (int i = 0; i < 4; ++i) a->menu_rects[i] = (SDL_Rect){ 0, 0, 0, 0 };
+        for (int i = 0; i < MENU_COUNT; ++i)
+            a->menu_rects[i] = (SDL_Rect){ 0, 0, 0, 0 };
     } else
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < MENU_COUNT; ++i) {
         const char* label = MENU_LABELS[i];
         int lw = font_measure(a->font_ide, label, strlen(label));
         int item_w = lw + 16;
@@ -9574,6 +9608,33 @@ static bool chrome_button_rect(const App* a, int btn, SDL_Rect* out)
 static const char* current_keystr_for(const char* action);
 static void keystr_pretty(const char* in, char* out, size_t cap);
 static bool overlay_floating_active(const App* a);
+
+/* Rewrite a hand-written accelerator hint ("Ctrl+Shift+S") for the host
+ * platform. On macOS that means Cmd symbols in platform order; elsewhere
+ * the literal is already correct and passes straight through. The menu
+ * tables spell their hints out by hand (they are not tied to a rebindable
+ * action), so this is where they get localized.
+ *
+ * Returns a pointer into a small rotating pool, so a couple of hints can be
+ * measured and drawn in the same expression without clobbering each other. */
+static const char* shortcut_disp(const char* s)
+{
+#if defined(__APPLE__)
+    if (!s || !*s) return "";
+    static char pool[4][48];
+    static int  slot;
+    char keystr[48];
+    size_t j = 0;
+    for (size_t i = 0; s[i] && j + 1 < sizeof keystr; ++i)
+        keystr[j++] = (s[i] >= 'A' && s[i] <= 'Z') ? (char)(s[i] + 32) : s[i];
+    keystr[j] = 0;
+    char* out = pool[slot++ & 3];
+    keystr_pretty(keystr, out, sizeof pool[0]);
+    return out;
+#else
+    return s ? s : "";
+#endif
+}
 
 /* Two-line tooltip under the hovered chrome button: what it does, and the
  * live shortcut bound to it. Appears after the cursor has rested on the
@@ -10671,10 +10732,32 @@ static const MenuItem MENU_VIEW[] = {
     { "Outline Panel",       NULL,     action_outline_pin },
     { "Outline\xe2\x80\xa6",  NULL,     action_outline },
     { "Backlinks\xe2\x80\xa6",NULL,    action_backlinks },
-    { "Tags\xe2\x80\xa6",     NULL,    action_tags },
+    { "Tags\xe2\x80\xa6",     "Ctrl+Shift+G", action_tags },
     { "Graph\xe2\x80\xa6",    "Ctrl+Shift+M", action_graph },
     { "Toggle Spell Check",  NULL,    action_toggle_spellcheck },
     { "Settings\xe2\x80\xa6", NULL,    action_settings },
+    { NULL, NULL, NULL }
+};
+/* Go: everything that moves the caret or the open file somewhere else.
+ * Back/Forward walk the navigation history (see the nav_* block); the rest
+ * are the app's existing jump surfaces, gathered where a user looks for
+ * them. */
+static void action_nav_back      (App* a);
+static void action_nav_forward   (App* a);
+static void action_goto_line     (App* a);
+static void action_goto_last_edit(App* a);
+static void action_follow_link   (App* a);
+static const MenuItem MENU_GO[] = {
+    { "Back",                     "Ctrl+[",       action_nav_back },
+    { "Forward",                  "Ctrl+]",       action_nav_forward },
+    { "Last edit",                NULL,           action_goto_last_edit },
+    { "Go to File\xe2\x80\xa6",      "Ctrl+P",       action_quick_switch },
+    { "Go to Line\xe2\x80\xa6",      "Ctrl+G",       action_goto_line },
+    { "Go to Heading\xe2\x80\xa6",   "Ctrl+Shift+O", action_outline },
+    { "Go to Tag\xe2\x80\xa6",       "Ctrl+Shift+G", action_tags },
+    { "Follow link",              "Ctrl+Enter",   action_follow_link },
+    { "Backlinks\xe2\x80\xa6",       "Ctrl+Shift+B", action_backlinks },
+    { "Graph\xe2\x80\xa6",           "Ctrl+Shift+M", action_graph },
     { NULL, NULL, NULL }
 };
 static void action_about         (App* a);
@@ -10684,8 +10767,8 @@ static const MenuItem MENU_HELP[] = {
     { "About Descry\xe2\x80\xa6",NULL, action_about },
     { NULL, NULL, NULL }
 };
-static const MenuItem* MENU_TABLES[4] = {
-    MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_HELP
+static const MenuItem* MENU_TABLES[MENU_COUNT] = {
+    MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_HELP
 };
 /* Static accessors used by the menu rendering — the static menu tables
  * don't carry an App pointer, so dynamic content (recent vaults) is
@@ -10702,7 +10785,7 @@ static const char* app_recent_dir_at(int i)
 }
 
 static int menu_count_static(int idx) {
-    if (idx < 0 || idx >= 4) return 0;
+    if (idx < 0 || idx >= MENU_COUNT) return 0;
     const MenuItem* m = MENU_TABLES[idx];
     int n = 0; while (m[n].label) n++; return n;
 }
@@ -10889,21 +10972,19 @@ static const char* ctx_shortcut_at(const App* a, int row)
 {
     if (a->ctx_menu_kind == CTX_KIND_EDITOR) {
         if (row < 0 || row >= ED_COUNT) return "";
-        return ED_SHORTCUTS[row];
+        return shortcut_disp(ED_SHORTCUTS[row]);
     }
     if (a->ctx_menu_kind == CTX_KIND_PREVIEW) {
-        if (row == 0) return "Ctrl+C";
-        if (row == 1) return "Ctrl+E";
+        if (row == 0) return shortcut_disp("Ctrl+C");
+        if (row == 1) return shortcut_disp("Ctrl+E");
         return "";
     }
     if (a->ctx_menu_kind == CTX_KIND_MENU) {
         int n = menu_count(a->ctx_menu_target);
         if (row < 0 || row >= n) return "";
         int sn = menu_count_static(a->ctx_menu_target);
-        if (row < sn) {
-            const char* s = MENU_TABLES[a->ctx_menu_target][row].shortcut;
-            return s ? s : "";
-        }
+        if (row < sn)
+            return shortcut_disp(MENU_TABLES[a->ctx_menu_target][row].shortcut);
         return "";
     }
     return "";
@@ -11161,23 +11242,90 @@ static void submenu_invoke_row(App* a, int row)
 
 #define NATIVE_MENU_MAX_ROWS 32
 
+/* AppKit swallows a key equivalent before SDL sees the keystroke, so the
+ * menu's copy of an action becomes the ONLY handler for it. That is fine for
+ * a row whose action is right to run whatever has focus, and wrong for the
+ * clipboard / undo / find family, whose keystrokes have to reach whichever
+ * text field, modal or find bar is up. Those rows get no key equivalent and
+ * keep flowing through the app's own dispatch. Quit is left to SDL's
+ * application menu, which already owns Cmd+Q. */
+static bool mac_menu_key_allowed(void (*fn)(App*))
+{
+    return fn && fn != action_undo        && fn != action_redo &&
+                 fn != action_cut         && fn != action_copy &&
+                 fn != action_paste       && fn != action_select_all &&
+                 fn != action_find        && fn != action_find_replace &&
+                 fn != action_quit;
+}
+
+/* "Ctrl+Shift+S" -> key 's', MAC_MOD_CMD | MAC_MOD_SHIFT. `Ctrl` is the
+ * portable spelling of the accelerator, which is Cmd here (see KMOD_PRIMARY).
+ * Returns false for anything whose key isn't a single character — function
+ * keys, Enter — since those have no plain key-equivalent spelling. */
+static bool mac_key_equiv(const char* s, char* out_key, int* out_mods)
+{
+    *out_key = 0;
+    *out_mods = 0;
+    if (!s || !*s) return false;
+    int mods = 0;
+    const char* tok = s;
+    for (;;) {
+        const char* plus = strchr(tok, '+');
+        if (!plus || plus[1] == 0) break;      /* a trailing '+' IS the key */
+        size_t n = (size_t)(plus - tok);
+        if      (n == 4 && strncmp(tok, "Ctrl",  4) == 0) mods |= MAC_MOD_CMD;
+        else if (n == 5 && strncmp(tok, "Shift", 5) == 0) mods |= MAC_MOD_SHIFT;
+        else if (n == 3 && strncmp(tok, "Alt",   3) == 0) mods |= MAC_MOD_ALT;
+        else return false;
+        tok = plus + 1;
+    }
+    if (!tok[0] || tok[1]) return false;       /* multi-char key name */
+    char k = tok[0];
+    if (k >= 'A' && k <= 'Z') k = (char)(k + 32);
+    *out_key  = k;
+    *out_mods = mods;
+    return mods != 0;
+}
+
 static void native_menu_install(void)
 {
     /* Static storage: NSMenu copies the strings, but the arrays are handed
      * across as pointers and must outlive the call regardless. */
-    static MacMenuItem        rows[4][NATIVE_MENU_MAX_ROWS];
-    static const MacMenuItem* tables[4];
-    static const char*        titles[5];
+    static MacMenuItem        rows[MENU_COUNT][NATIVE_MENU_MAX_ROWS];
+    static const MacMenuItem* tables[MENU_COUNT];
+    static const char*        titles[MENU_COUNT + 1];
 
-    for (int m = 0; m < 4; ++m) {
+    /* Combos already claimed by an earlier row. The Go menu deliberately
+     * repeats entries that also live in File and View — handy in the app's
+     * own strip, but two AppKit items claiming one keystroke is not a thing
+     * worth shipping, so the first row to ask for a combo keeps it. */
+    struct { char key; int mods; } claimed[MENU_COUNT * NATIVE_MENU_MAX_ROWS];
+    int claimed_n = 0;
+
+    for (int m = 0; m < MENU_COUNT; ++m) {
         int n = menu_count_static(m);
         if (n > NATIVE_MENU_MAX_ROWS - 1) n = NATIVE_MENU_MAX_ROWS - 1;
-        for (int r = 0; r < n; ++r) rows[m][r].label = MENU_TABLES[m][r].label;
-        rows[m][n].label = NULL;
+        for (int r = 0; r < n; ++r) {
+            rows[m][r] = (MacMenuItem){ MENU_TABLES[m][r].label, 0, 0 };
+            char key = 0; int mods = 0;
+            if (!mac_menu_key_allowed(MENU_TABLES[m][r].fn)) continue;
+            if (!mac_key_equiv(MENU_TABLES[m][r].shortcut, &key, &mods))
+                continue;
+            bool taken = false;
+            for (int c = 0; c < claimed_n && !taken; ++c)
+                taken = (claimed[c].key == key && claimed[c].mods == mods);
+            if (taken) continue;
+            claimed[claimed_n].key  = key;
+            claimed[claimed_n].mods = mods;
+            claimed_n++;
+            rows[m][r].key  = key;
+            rows[m][r].mods = mods;
+        }
+        rows[m][n] = (MacMenuItem){ NULL, 0, 0 };
         tables[m] = rows[m];
         titles[m] = MENU_LABELS[m];
     }
-    titles[4] = NULL;
+    titles[MENU_COUNT] = NULL;
     macos_menu_install(titles, tables);
 }
 
@@ -11202,7 +11350,7 @@ static void native_menu_flush(App* a)
     int m = 0, r = 0;
     if (!macos_menu_take_pick(&m, &r)) return;
     if (r >= MAC_ROW_RECENT) { submenu_invoke_row(a, r - MAC_ROW_RECENT); return; }
-    if (m < 0 || m >= 4) return;
+    if (m < 0 || m >= MENU_COUNT) return;
     if (r < 0 || r >= menu_count_static(m)) return;
     void (*fn)(App*) = MENU_TABLES[m][r].fn;
     if (fn) fn(a);
@@ -11261,7 +11409,7 @@ static uint32_t hoswl_menu_fingerprint(const App* a)
 {
     uint32_t h = 2166136261u;
     #define HOSWL_FNV(b) (h = (h ^ (uint32_t)(b)) * 16777619u)
-    for (int m = 0; m < 4; ++m) {
+    for (int m = 0; m < MENU_COUNT; ++m) {
         for (int r = 0; r < menu_count_static(m); ++r) {
             char key[48];
             HOSWL_FNV(hoswl_row_check(a, m, r) + 2);
@@ -11296,7 +11444,7 @@ static void hoswl_menu_publish(App* a)
         if (w_ < 0 || (size_t)w_ >= sizeof text - o) { goto too_big; } \
         o += (size_t)w_; \
     } while (0)
-    for (int m = 0; m < 4; ++m) {
+    for (int m = 0; m < MENU_COUNT; ++m) {
         HOSWL_PUT("%s\n", MENU_LABELS[m]);
         int n = menu_count_static(m);
         for (int r = 0; r < n; ++r) {
@@ -11336,7 +11484,7 @@ static void hoswl_menu_dispatch(App* a, const char* id)
     if (a->menu_open >= 0 || a->ctx_menu_active) ctx_menu_close(a);
     if (sscanf(id, "recent.%d", &r) == 1) { submenu_invoke_row(a, r); return; }
     if (sscanf(id, "m%d.%d", &m, &r) != 2) return;
-    if (m < 0 || m >= 4 || r < 0 || r >= menu_count_static(m)) return;
+    if (m < 0 || m >= MENU_COUNT || r < 0 || r >= menu_count_static(m)) return;
     void (*fn)(App*) = MENU_TABLES[m][r].fn;
     if (fn) fn(a);
 }
@@ -15064,7 +15212,7 @@ static void render_backlinks(App* a)
 
 /* ----------------------------- tag panel -------------------------------- */
 
-#define TAGS_BOX_W   460
+#define TAGS_BOX_W   520
 #define TAGS_BOX_Y    60
 
 static int tags_row_h(const App* a) { return font_line_height(a->font_ide) + 6; }
@@ -15083,25 +15231,53 @@ static int tag_is_body_byte(unsigned char c)
     return is_word_char(c) || c == '-' || c == '/';
 }
 
-/* Find or insert a tag entry; returns the entry pointer. */
-static struct TagEntry* tags_intern(App* a, const char* name, size_t nlen)
+/* A vault-relative display path for a note ("notes/ideas/ml.md"). Falls back
+ * to the basename when the item sits outside the vault root. */
+static void vault_relpath(const App* a, const char* path, char* out, size_t cap)
 {
-    if (nlen >= sizeof(((struct TagEntry*)0)->name)) nlen = sizeof(((struct TagEntry*)0)->name) - 1;
+    const char* rel = path;
+    size_t dlen = a->vault.dir ? strlen(a->vault.dir) : 0;
+    if (dlen > 0 && strncmp(path, a->vault.dir, dlen) == 0) {
+        rel = path + dlen;
+        while (*rel == '/' || *rel == '\\') rel++;
+    } else {
+        rel = vault_basename(path);
+    }
+    size_t j = 0;
+    for (size_t i = 0; rel[i] && j + 1 < cap; ++i)
+        out[j++] = rel[i] == '\\' ? '/' : rel[i];
+    out[j] = 0;
+}
+
+/* Find or insert a tag entry; returns its index in the store. */
+static int tags_intern(App* a, const char* name, size_t nlen)
+{
+    if (nlen > MD_TAG_MAX_NAME) nlen = MD_TAG_MAX_NAME;
     for (int i = 0; i < a->tags_count; ++i) {
         if (strncmp(a->tags_entries[i].name, name, nlen) == 0 &&
             a->tags_entries[i].name[nlen] == 0)
-            return &a->tags_entries[i];
+            return i;
     }
     if (a->tags_count >= a->tags_cap) {
         a->tags_cap = a->tags_cap ? a->tags_cap * 2 : 32;
         a->tags_entries = realloc(a->tags_entries,
                                   a->tags_cap * sizeof(*a->tags_entries));
     }
-    struct TagEntry* t = &a->tags_entries[a->tags_count++];
+    struct TagEntry* t = &a->tags_entries[a->tags_count];
     memcpy(t->name, name, nlen);
-    t->name[nlen] = 0;
-    t->count = 0;
-    return t;
+    t->name[nlen]  = 0;
+    t->count       = 0;
+    t->note_count  = 0;
+    t->first_vault = -1;
+    return a->tags_count++;
+}
+
+/* Lookup-only twin, for callers that must not grow the store mid-walk. */
+static int tags_find(const App* a, const char* name)
+{
+    for (int i = 0; i < a->tags_count; ++i)
+        if (strcmp(a->tags_entries[i].name, name) == 0) return i;
+    return -1;
 }
 
 static int tags_compare(const void* a, const void* b)
@@ -15112,16 +15288,70 @@ static int tags_compare(const void* a, const void* b)
     return strcmp(x->name, y->name);
 }
 
-/* Trampoline so fm_each_tag can hand tags off to the global App* picker. */
+/* Walk one note's raw bytes, calling back once per inline `#tag`. Shared by
+ * the vault-wide collector and the graph builder so both agree on exactly
+ * what counts as a tag. `start` skips a YAML frontmatter block, whose
+ * literals must never be mistaken for inline tags. */
+static void tags_scan_text(const char* data, size_t len, size_t start,
+                           void (*cb)(void* ud, const char* name, size_t n),
+                           void* ud)
+{
+    for (size_t i = start; i + 1 < len; ++i) {
+        if (data[i] != '#') continue;
+        unsigned char prev = (i == 0) ? 0 : (unsigned char)data[i - 1];
+        if (!tag_is_boundary(prev)) continue;
+        if (!tag_is_body_byte((unsigned char)data[i + 1])) continue;
+        size_t b = i + 1;
+        size_t e = b;
+        while (e < len && tag_is_body_byte((unsigned char)data[e])) e++;
+        if (e - b <= MD_TAG_MAX_NAME) cb(ud, data + b, e - b);
+        i = e - 1;
+    }
+}
+
+/* Per-file collector state. `seen[t]` holds vault_idx + 1 for the file that
+ * last credited tag `t`, so note_count counts notes rather than mentions. */
+struct TagScan { App* a; int vault_idx; int** seen; int* seen_cap; };
+
+static void tags_collect_cb(void* ud, const char* name, size_t n)
+{
+    struct TagScan* sc = (struct TagScan*)ud;
+    int idx = tags_intern(sc->a, name, n);
+    struct TagEntry* t = &sc->a->tags_entries[idx];
+    t->count++;
+    if (t->first_vault < 0) t->first_vault = sc->vault_idx;
+
+    /* tags_intern may have just appended, so grow the seen map to match.
+     * If that fails the tag simply doesn't get its note counted — the
+     * occurrence count above is already in. */
+    if (idx >= *sc->seen_cap) {
+        int want = sc->a->tags_cap > idx + 1 ? sc->a->tags_cap : idx + 1;
+        int* grown = realloc(*sc->seen, (size_t)want * sizeof(int));
+        if (!grown) return;
+        memset(grown + *sc->seen_cap, 0,
+               (size_t)(want - *sc->seen_cap) * sizeof(int));
+        *sc->seen     = grown;
+        *sc->seen_cap = want;
+    }
+    if ((*sc->seen)[idx] != sc->vault_idx + 1) {
+        (*sc->seen)[idx] = sc->vault_idx + 1;
+        t->note_count++;
+    }
+}
+
+/* Trampoline so fm_each_tag can feed frontmatter tags through the same path
+ * as the inline ones. */
 static void tags_fm_cb(const char* t, size_t n, void* ud)
 {
-    App* a = (App*)ud;
-    tags_intern(a, t, n)->count++;
+    tags_collect_cb(ud, t, n);
 }
 
 static void tags_collect(App* a)
 {
     a->tags_count = 0;
+    int  seen_cap = 0;
+    int* seen     = NULL;
+
     for (size_t vi = 0; vi < a->vault.count; ++vi) {
         VaultItem* it = &a->vault.items[vi];
         if (it->is_dir) continue;
@@ -15132,33 +15362,47 @@ static void tags_collect(App* a)
         char*  data = slurp(it->path, &flen);
         if (!data) continue;
 
+        struct TagScan sc = { a, (int)vi, &seen, &seen_cap };
         /* Pull tags from this file's YAML frontmatter (if any), then scan
-         * the body for inline `#tag` occurrences. We skip the frontmatter
-         * range during the body scan so YAML literals never get mistaken
-         * for inline tags. */
+         * the body for inline `#tag` occurrences. */
         size_t scan_start = 0;
         size_t fm_start = 0, fm_end = 0, body_start = 0;
-        if (frontmatter_scan(data, flen,
-                             &fm_start, &fm_end, &body_start))
-        {
-            fm_each_tag(data + fm_start, fm_end - fm_start, tags_fm_cb, a);
+        if (frontmatter_scan(data, flen, &fm_start, &fm_end, &body_start)) {
+            fm_each_tag(data + fm_start, fm_end - fm_start, tags_fm_cb, &sc);
             scan_start = body_start;
         }
-        for (size_t i = scan_start; i + 1 < flen; ++i) {
-            if (data[i] != '#') continue;
-            unsigned char prev = (i == 0) ? 0 : (unsigned char)data[i - 1];
-            if (!tag_is_boundary(prev)) continue;
-            if (data[i + 1] == '#') continue;
-            if (!tag_is_body_byte((unsigned char)data[i + 1])) continue;
-            size_t s = i + 1;
-            size_t e = s;
-            while (e < flen && tag_is_body_byte((unsigned char)data[e])) e++;
-            tags_intern(a, data + s, e - s)->count++;
-            i = e - 1;
-        }
+        tags_scan_text(data, flen, scan_start, tags_collect_cb, &sc);
         free(data);
     }
+    free(seen);
     qsort(a->tags_entries, a->tags_count, sizeof(*a->tags_entries), tags_compare);
+}
+
+/* Right-hand column for a tag row: where it lives, and how widely.
+ * "notes/ml.md" for a tag in one note, "notes/ml.md  +3" when more. */
+static void tag_where(const App* a, const struct TagEntry* t,
+                      char* out, size_t cap)
+{
+    if (t->first_vault < 0 || t->first_vault >= (int)a->vault.count) {
+        snprintf(out, cap, "%d note%s", t->note_count,
+                 t->note_count == 1 ? "" : "s");
+        return;
+    }
+    char rel[300];
+    vault_relpath(a, a->vault.items[t->first_vault].path, rel, sizeof rel);
+    if (t->note_count > 1) snprintf(out, cap, "%s  +%d", rel, t->note_count - 1);
+    else                   snprintf(out, cap, "%s", rel);
+}
+
+/* Jump straight to a named tag's search results, from anywhere (a preview
+ * click, a graph node, the panel). */
+static void tag_search(App* a, const char* name)
+{
+    snprintf(a->vsearch_query, sizeof a->vsearch_query, "#%s", name);
+    a->vsearch_qlen  = strlen(a->vsearch_query);
+    a->vsearch_regex = false;     /* literal so '#' isn't escaped */
+    vsearch_open(a);
+    vsearch_rebuild(a);
 }
 
 static void tags_open(App* a)
@@ -15207,17 +15451,14 @@ static int tags_scrollbar_geom(const App* a,
                                        a->tags_scroll, track, thumb);
 }
 
-/* Activate: open vault search overlay pre-loaded with `#tag`. */
+/* Activate: open the vault-search overlay pre-loaded with `#tag`. */
 static void tags_activate(App* a)
 {
     if (a->tags_selected < 0 || a->tags_selected >= a->tags_count) return;
-    struct TagEntry* t = &a->tags_entries[a->tags_selected];
-    snprintf(a->vsearch_query, sizeof a->vsearch_query, "#%s", t->name);
-    a->vsearch_qlen   = strlen(a->vsearch_query);
-    a->vsearch_regex  = false;     /* literal so '#' isn't escaped */
+    char name[MD_TAG_MAX_NAME + 1];
+    snprintf(name, sizeof name, "%s", a->tags_entries[a->tags_selected].name);
     tags_close(a);
-    vsearch_open(a);
-    vsearch_rebuild(a);
+    tag_search(a, name);
 }
 
 static void render_tags(App* a)
@@ -15272,18 +15513,21 @@ static void render_tags(App* a)
             SDL_SetRenderDrawColor(a->renderer, bc.r, bc.g, bc.b, 255);
             SDL_RenderFillRect(a->renderer, &hr);
         }
-        char tag[80];
+        char tag[MD_TAG_MAX_NAME + 2];
         snprintf(tag, sizeof tag, "#%s", t->name);
-        font_draw_line(a->font_ide, tag, strlen(tag),
-                       box_x + 16, row_text_baseline(a->font_ide, y, rh),
-                       sel ? a->fg : a->fg_link);
-        char cnt[16];
-        snprintf(cnt, sizeof cnt, "%d", t->count);
-        int cw = font_measure(a->font_ide, cnt, strlen(cnt));
-        font_draw_line(a->font_ide, cnt, strlen(cnt),
-                       box_x + box_w - 16 - cw,
-                       row_text_baseline(a->font_ide, y, rh),
-                       a->fg_muted);
+        /* Right column first: it fixes how much room the name may take. */
+        char where[340];
+        tag_where(a, t, where, sizeof where);
+        int ww = font_measure(a->font_ide, where, strlen(where));
+        int name_w = box_w - 32 - ww - 16;
+        if (name_w < 60) name_w = 60;
+        font_draw_elided(a->font_ide, tag, strlen(tag),
+                         box_x + 16, row_text_baseline(a->font_ide, y, rh),
+                         name_w, sel ? a->fg : a->fg_link);
+        font_draw_elided(a->font_ide, where, strlen(where),
+                         box_x + box_w - 16 - ww,
+                         row_text_baseline(a->font_ide, y, rh),
+                         ww, a->fg_muted);
     }
 
     if (a->tags_count == 0) {
@@ -15840,6 +16084,7 @@ static void render_keybind(App* a)
 
         const char* show;
         char shadowed_buf[80];
+        char pretty_buf[64];
         SDL_Color val_c;
         if (a->keybind_capturing && sel) {
             show  = "press a key\xe2\x80\xa6";
@@ -15856,7 +16101,8 @@ static void render_keybind(App* a)
             show  = "(unbound)";
             val_c = a->fg_muted;
         } else {
-            show  = ks;
+            keystr_pretty(ks, pretty_buf, sizeof pretty_buf);
+            show  = pretty_buf;
             val_c = a->fg_link;
         }
         font_draw_line(a->font_ide, show, strlen(show),
@@ -16379,9 +16625,36 @@ static int graph_node_for_name(const App* a, const int* node_of_vault,
     return -1;
 }
 
+/* Per-note state while wiring `#tag` mentions into the graph. The tag store
+ * is already complete by then, so tags_find never grows it mid-build. */
+struct GraphTagScan { App* a; const int* node_of_tag; int src_node; };
+
+static void graph_tag_cb(void* ud, const char* name, size_t n);
+
+static void graph_tag_fm_cb(const char* name, size_t n, void* ud)
+{
+    graph_tag_cb(ud, name, n);
+}
+
+static void graph_tag_cb(void* ud, const char* name, size_t n)
+{
+    struct GraphTagScan* sc = (struct GraphTagScan*)ud;
+    char nm[MD_TAG_MAX_NAME + 1];
+    if (n > MD_TAG_MAX_NAME) return;
+    memcpy(nm, name, n);
+    nm[n] = 0;
+    int t = tags_find(sc->a, nm);
+    if (t >= 0) graph_add_edge(&sc->a->graph, sc->src_node, sc->node_of_tag[t]);
+}
+
 static void graph_build(App* a)
 {
     graph_clear(&a->graph);
+    /* Tags are nodes too: `[[…]]` ties two notes together, `#…` ties every
+     * note that mentions a subject to one hub. Collected through the same
+     * store the panel and the `#` popup use, so all three agree. */
+    tags_collect(a);
+
     int vc = (int)a->vault.count;
     int* node_of_vault = malloc((vc > 0 ? vc : 1) * sizeof(int));
     for (int i = 0; i < vc; ++i) node_of_vault[i] = -1;
@@ -16390,6 +16663,11 @@ static void graph_build(App* a)
         if (a->vault.items[v].is_dir || a->vault.items[v].is_image) continue;
         node_of_vault[v] = graph_add_node(&a->graph, v);
     }
+
+    int  tc = a->tags_count;
+    int* node_of_tag = malloc((tc > 0 ? tc : 1) * sizeof(int));
+    for (int t = 0; t < tc; ++t)
+        node_of_tag[t] = graph_add_tag(&a->graph, t);
 
     for (int v = 0; v < vc; ++v) {
         int src_node = node_of_vault[v];
@@ -16413,8 +16691,19 @@ static void graph_build(App* a)
             }
             i = e + 1;
         }
+        /* Frontmatter tags count as mentions too, exactly as in
+         * tags_collect, so a note filed only in its YAML header still
+         * reaches its hub. */
+        struct GraphTagScan sc = { a, node_of_tag, src_node };
+        size_t scan_start = 0, fm_s = 0, fm_e = 0, body_s = 0;
+        if (frontmatter_scan(src, len, &fm_s, &fm_e, &body_s)) {
+            fm_each_tag(src + fm_s, fm_e - fm_s, graph_tag_fm_cb, &sc);
+            scan_start = body_s;
+        }
+        tags_scan_text(src, len, scan_start, graph_tag_cb, &sc);
         free(src);
     }
+    free(node_of_tag);
     free(node_of_vault);
     graph_layout(&a->graph, 1400.0f, 1000.0f);
 }
@@ -16657,9 +16946,14 @@ static void graph_render(App* a)
     SDL_Rect view = graph_view_rect(a);
     overlay_card(a, view);
 
-    char title[120];
-    snprintf(title, sizeof title, "Graph  \xe2\x80\x94  %d notes, %d links",
-             a->graph.node_count, a->graph.edge_count);
+    int note_nodes = 0;
+    for (int i = 0; i < a->graph.node_count; ++i)
+        if (a->graph.nodes[i].kind == GRAPH_NOTE) note_nodes++;
+    char title[140];
+    snprintf(title, sizeof title,
+             "Graph  \xe2\x80\x94  %d notes, %d tags, %d links",
+             note_nodes, a->graph.node_count - note_nodes,
+             a->graph.edge_count);
     font_draw_line(a->font_ide, title, strlen(title),
                    view.x + 16, view.y + 10 + font_ascent(a->font_ide),
                    a->fg_heading);
@@ -16687,10 +16981,12 @@ static void graph_render(App* a)
         GraphNode* nd = &a->graph.nodes[i];
         float sx = ox + nd->x * scale, sy = oy + nd->y * scale;
         float r = graph_node_radius(nd->degree);
-        bool is_active = (nd->vault_idx == active_vi);
+        bool is_tag    = (nd->kind == GRAPH_TAG);
+        bool is_active = (!is_tag && nd->vault_idx == active_vi);
         bool is_hover  = (i == a->graph_hover_node);
         SDL_Color c = is_active ? a->fg_link
-                    : is_hover  ? a->fg_heading : a->fg;
+                    : is_hover  ? a->fg_heading
+                    : is_tag    ? a->fg_quote : a->fg;
         SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, 255);
         SDL_Rect dot = { (int)(sx - r), (int)(sy - r), (int)(2 * r), (int)(2 * r) };
         fill_rrect(a->renderer, dot, (int)r);
@@ -16700,15 +16996,23 @@ static void graph_render(App* a)
     bool label_all = scale > 26.0f;
     for (int i = 0; i < a->graph.node_count; ++i) {
         GraphNode* nd = &a->graph.nodes[i];
-        bool is_active = (nd->vault_idx == active_vi);
+        bool is_tag    = (nd->kind == GRAPH_TAG);
+        bool is_active = (!is_tag && nd->vault_idx == active_vi);
         bool is_hover  = (i == a->graph_hover_node);
         if (!label_all && !is_active && !is_hover) continue;
         char nm[160];
-        graph_note_name(a, nd->vault_idx, nm, sizeof nm);
+        if (is_tag) {
+            const char* tn = (nd->tag_idx >= 0 && nd->tag_idx < a->tags_count)
+                             ? a->tags_entries[nd->tag_idx].name : "";
+            snprintf(nm, sizeof nm, "#%s", tn);
+        } else {
+            graph_note_name(a, nd->vault_idx, nm, sizeof nm);
+        }
         float sx = ox + nd->x * scale, sy = oy + nd->y * scale;
         float r  = graph_node_radius(nd->degree);
         SDL_Color lc = is_active ? a->fg_link
-                     : is_hover  ? a->fg_heading : a->fg_muted;
+                     : is_hover  ? a->fg_heading
+                     : is_tag    ? a->fg_quote : a->fg_muted;
         font_draw_line(a->font_ide, nm, strlen(nm),
             (int)(sx + r + 4),
             (int)(sy - font_line_height(a->font_ide) / 2 + font_ascent(a->font_ide)),
@@ -16717,7 +17021,8 @@ static void graph_render(App* a)
     SDL_RenderSetClipRect(a->renderer, NULL);
 
     if (a->graph.node_count == 0) {
-        const char* empty = "(no notes with wiki-links in this vault)";
+        const char* empty =
+            "(no notes with [[wiki links]] or #tags in this vault)";
         font_draw_line(a->font_ide, empty, strlen(empty),
                        view.x + 16, view.y + view.h / 2, a->fg_muted);
     }
@@ -16771,7 +17076,16 @@ static bool graph_handle_event(App* a, const SDL_Event* e)
                 int dy = e->button.y - a->graph_drag_my;
                 if (dx * dx + dy * dy <= 25) {   /* a click, not a drag */
                     int ni = graph_node_at(a, e->button.x, e->button.y);
-                    if (ni >= 0) {
+                    if (ni >= 0 && a->graph.nodes[ni].kind == GRAPH_TAG) {
+                        int ti = a->graph.nodes[ni].tag_idx;
+                        if (ti >= 0 && ti < a->tags_count) {
+                            char name[MD_TAG_MAX_NAME + 1];
+                            snprintf(name, sizeof name, "%s",
+                                     a->tags_entries[ti].name);
+                            graph_close(a);
+                            tag_search(a, name);
+                        }
+                    } else if (ni >= 0) {
                         int vi = a->graph.nodes[ni].vault_idx;
                         if (vi >= 0 && vi < (int)a->vault.count) {
                             char* path = strdup(a->vault.items[vi].path);
@@ -17590,6 +17904,56 @@ static void render_switcher(App* a)
 
 /* ---------------------------- command palette -------------------------- */
 
+/* Capitalize a key name for display: "shift" -> "Shift", "s" -> "S",
+ * "page_up" -> "Page up". Shared by both keystr_pretty flavors. */
+static size_t key_name_pretty(const char* in, char* out, size_t cap)
+{
+    size_t j = 0;
+    bool   word_start = true;
+    for (size_t i = 0; in[i] && j + 1 < cap; ++i) {
+        char c = in[i];
+        if (c == '_') { out[j++] = ' '; word_start = true; continue; }
+        out[j++] = word_start && c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
+        word_start = false;
+    }
+    if (j < cap) out[j] = 0;
+    return j;
+}
+
+#if defined(__APPLE__)
+/* macOS writes an accelerator as symbols in a fixed order — ⌃⌥⇧⌘ then the
+ * key — not as the `Ctrl+Shift+P` chain the other platforms use. Bindings
+ * are still STORED with the portable `ctrl+` token (see KMOD_PRIMARY), so
+ * this is purely a display pass: `ctrl+shift+p` renders as ⌘⇧P. The key
+ * itself stays a word ("Return", "Left") rather than a symbol, since the
+ * user's chosen UI font may not carry the whole symbol set. */
+static void keystr_pretty(const char* in, char* out, size_t cap)
+{
+    if (!in || !*in) { if (cap) out[0] = 0; return; }
+    bool ctl = false, alt = false, sft = false, cmd = false;
+    const char* key = in;
+    for (;;) {
+        const char* plus = strchr(key, '+');
+        /* A trailing '+' IS the key ("ctrl++"), not a separator. */
+        if (!plus || plus[1] == 0) break;
+        size_t n = (size_t)(plus - key);
+        if      (n == 4 && strncmp(key, "ctrl",    4) == 0) cmd = true;
+        else if (n == 7 && strncmp(key, "control", 7) == 0) ctl = true;
+        else if (n == 5 && strncmp(key, "shift",   5) == 0) sft = true;
+        else if (n == 3 && strncmp(key, "alt",     3) == 0) alt = true;
+        else break;      /* unknown token: treat the rest as the key name */
+        key = plus + 1;
+    }
+    char name[40];
+    key_name_pretty(key, name, sizeof name);
+    snprintf(out, cap, "%s%s%s%s%s",
+             ctl ? "\xe2\x8c\x83" : "",     /* ⌃ */
+             alt ? "\xe2\x8c\xa5" : "",     /* ⌥ */
+             sft ? "\xe2\x87\xa7" : "",     /* ⇧ */
+             cmd ? "\xe2\x8c\x98" : "",     /* ⌘ */
+             name);
+}
+#else
 /* "ctrl+shift+p" -> "Ctrl+Shift+P". Pretty-prints each '+'-separated token
  * with leading capital. Single-char tokens are upcased; multi-letter ones
  * become Capitalized. Writes into out (cap bytes), always NUL-terminated. */
@@ -17614,6 +17978,7 @@ static void keystr_pretty(const char* in, char* out, size_t cap)
     }
     out[j] = 0;
 }
+#endif
 
 /* "save_as" -> "Save As", "vault_search" -> "Vault Search". Underscores are
  * the word separator; everything else is passed through. */
@@ -18459,7 +18824,194 @@ static void edit_cursor_screen_pos(const App* a, int* out_x, int* out_y)
     if (out_y) *out_y = y;
 }
 
-/* ----------------------------- wiki-link auto-complete ------------------ */
+/* --------------------------- navigation history -------------------------
+ * A browser-style back / forward stack over "places the user has been": a
+ * file plus the caret and scroll offset inside it. Every note open and every
+ * deliberate caret jump (outline pick, search hit, Go to line, a wiki link)
+ * brackets itself with nav_sync_current() before the move and
+ * nav_push_location() after, so Back lands where you actually were rather
+ * than where you arrived. Pushing while parked mid-stack drops the forward
+ * entries, exactly like a browser.
+ *
+ * Ordinary typing and scrolling deliberately do NOT push — the stack is a
+ * record of jumps, not of edits. */
+
+#define NAV_MAX ((int)(sizeof(((App*)0)->nav_hist) / sizeof(((App*)0)->nav_hist[0])))
+
+/* Fill `e` from the live document state. */
+static void nav_capture(const App* a, struct NavEntry* e)
+{
+    memset(e, 0, sizeof *e);
+    snprintf(e->path, sizeof e->path, "%s", a->note_path ? a->note_path : "");
+    e->cursor    = a->buf.cursor;
+    e->scroll_y  = a->scroll_y;
+    e->edit_mode = a->edit_mode;
+}
+
+/* Refresh the entry the user is standing on, so a later Back/Forward returns
+ * to the caret they left rather than the one they arrived with. */
+static void nav_sync_current(App* a)
+{
+    if (!a->nav_ready || a->nav_replaying) return;
+    if (a->nav_pos < 0 || a->nav_pos >= a->nav_count) return;
+    if (!a->note_path) return;
+    struct NavEntry* e = &a->nav_hist[a->nav_pos];
+    if (strcmp(e->path, a->note_path) != 0) return;   /* stale: leave it */
+    e->cursor    = a->buf.cursor;
+    e->scroll_y  = a->scroll_y;
+    e->edit_mode = a->edit_mode;
+}
+
+/* Append the live location, dropping anything ahead of nav_pos. A push that
+ * lands on the same file+caret as the current entry is folded into it, which
+ * is what keeps load_note -> switch_to_tab from recording twice. */
+static void nav_push_location(App* a)
+{
+    if (!a->nav_ready || a->nav_replaying) return;
+    /* '(' fronts the synthetic buffers — "(welcome)", "(untitled)" — which
+     * have nothing on disk to navigate back to. */
+    if (!a->note_path || !a->note_path[0] || a->note_path[0] == '(') return;
+
+    struct NavEntry e;
+    nav_capture(a, &e);
+
+    if (a->nav_pos >= 0 && a->nav_pos < a->nav_count) {
+        struct NavEntry* cur = &a->nav_hist[a->nav_pos];
+        if (strcmp(cur->path, e.path) == 0 && cur->cursor == e.cursor) {
+            *cur = e;
+            return;
+        }
+    }
+    a->nav_count = a->nav_pos + 1;          /* forward entries are history */
+    if (a->nav_count >= NAV_MAX) {
+        /* Full: drop the oldest so the newest always fits. */
+        memmove(&a->nav_hist[0], &a->nav_hist[1],
+                (size_t)(NAV_MAX - 1) * sizeof a->nav_hist[0]);
+        a->nav_count = NAV_MAX - 1;
+    }
+    a->nav_hist[a->nav_count++] = e;
+    a->nav_pos = a->nav_count - 1;
+}
+
+/* Put the user back at `e`. Switching files goes through load_note, which is
+ * tab-aware, so nothing is lost and no discard prompt is needed. */
+static void nav_restore(App* a, const struct NavEntry* e)
+{
+    a->nav_replaying = true;
+    if (!a->note_path || strcmp(a->note_path, e->path) != 0) {
+        if (load_note(a, e->path) != 0) {
+            a->nav_replaying = false;
+            app_notify(a, "navigation: file is gone");
+            return;
+        }
+    }
+    if (!a->viewing_image) {
+        if (e->edit_mode) enter_edit_mode(a);
+        else              enter_preview_mode(a);
+        size_t c = e->cursor <= a->buf.len ? e->cursor : a->buf.len;
+        buffer_set_cursor(&a->buf, c, false);
+        a->scroll_y = e->scroll_y;
+        clamp_scroll(a);
+        ensure_cursor_visible(a);
+        bump_blink(a);
+    }
+    update_window_title(a);
+    a->nav_replaying = false;
+}
+
+static void action_nav_back(App* a)
+{
+    nav_sync_current(a);
+    if (a->nav_pos <= 0) { app_notify(a, "no earlier location"); return; }
+    a->nav_pos--;
+    nav_restore(a, &a->nav_hist[a->nav_pos]);
+}
+
+static void action_nav_forward(App* a)
+{
+    nav_sync_current(a);
+    if (a->nav_pos < 0 || a->nav_pos + 1 >= a->nav_count) {
+        app_notify(a, "no later location");
+        return;
+    }
+    a->nav_pos++;
+    nav_restore(a, &a->nav_hist[a->nav_pos]);
+}
+
+/* Remember where the buffer was last modified. Called from the main loop
+ * whenever buf.seq moves, which is exactly "the document changed". */
+static void nav_mark_edit(App* a)
+{
+    if (!a->note_path) return;
+    snprintf(a->nav_edit_path, sizeof a->nav_edit_path, "%s", a->note_path);
+    a->nav_edit_cursor = a->buf.cursor;
+    a->nav_edit_valid  = true;
+}
+
+static void action_goto_last_edit(App* a)
+{
+    if (!a->nav_edit_valid) { app_notify(a, "no edit to return to"); return; }
+    struct NavEntry e = {0};
+    snprintf(e.path, sizeof e.path, "%s", a->nav_edit_path);
+    e.cursor    = a->nav_edit_cursor;
+    e.edit_mode = true;
+    e.scroll_y  = 0;
+    nav_sync_current(a);
+    nav_restore(a, &e);
+    nav_push_location(a);
+}
+
+/* Move the caret to 1-based `line`, in edit mode, and record the jump. */
+static void nav_goto_line(App* a, long line)
+{
+    if (a->viewing_image) { app_notify(a, "image files have no lines"); return; }
+    size_t total = buffer_line_count(&a->buf);
+    if (line < 1) line = 1;
+    if ((size_t)line > total) line = (long)total;
+    nav_sync_current(a);
+    enter_edit_mode(a);
+    buffer_set_cursor(&a->buf, buffer_line_start(&a->buf, (size_t)line - 1),
+                      false);
+    ensure_cursor_visible(a);
+    bump_blink(a);
+    nav_push_location(a);
+}
+
+static void action_goto_line(App* a)
+{
+    if (a->viewing_image) { app_notify(a, "image files have no lines"); return; }
+    char cur[32];
+    size_t line, col;
+    buffer_cursor_pos(&a->buf, &line, &col);
+    snprintf(cur, sizeof cur, "%zu", line + 1);
+    char desc[80];
+    snprintf(desc, sizeof desc, "Line number (1 - %zu)",
+             buffer_line_count(&a->buf));
+    char out[32];
+    if (!app_prompt_modal(a, "Go to line", desc, cur, out, sizeof out, NULL))
+        return;
+    char* endp = NULL;
+    long  n = strtol(out, &endp, 10);
+    if (endp == out) { app_notify(a, "not a line number"); return; }
+    nav_goto_line(a, n);
+}
+
+/* -------------------------- relation auto-complete ----------------------
+ * One popup, two sources. Typing `[[` lists the vault's notes; typing `#`
+ * mid-line lists its tags. The filter is always the slice of the buffer
+ * between wc_anchor and the caret, and accepting a row swaps that slice out
+ * — for a wiki link the caret then steps over the auto-paired `]]`, and for
+ * a tag there is nothing to step over.
+ *
+ * Every row carries a second, muted column: the note's path relative to the
+ * vault root for a file, or where the tag already appears for a tag. Two
+ * notes called "index" in different folders are otherwise identical on
+ * screen, which is exactly when you need to pick the right one. */
+
+#define WC_WIKI  0
+#define WC_TAG   1
+
+#define WC_BOX_W  520
 
 /* Display name for a wiki-link target: vault item name without `.md` suffix.
  * Returns the byte length to use; stores result in `out` (caller-sized). */
@@ -18475,10 +19027,32 @@ static size_t wc_display_name(const char* name, char* out, size_t out_cap)
     return n;
 }
 
+/* The two columns of row `i`. `label` is what gets inserted on accept (minus
+ * the fences); `where` is the muted right-hand hint. */
+static void wc_row_text(const App* a, int i,
+                        char* label, size_t label_cap,
+                        char* where, size_t where_cap)
+{
+    label[0] = 0;
+    where[0] = 0;
+    if (i < 0 || i >= a->wc_count) return;
+    int idx = a->wc_matches[i];
+    if (a->wc_kind == WC_TAG) {
+        if (idx < 0 || idx >= a->tags_count) return;
+        snprintf(label, label_cap, "%s", a->tags_entries[idx].name);
+        tag_where(a, &a->tags_entries[idx], where, where_cap);
+        return;
+    }
+    if (idx < 0 || idx >= (int)a->vault.count) return;
+    wc_display_name(a->vault.items[idx].name, label, label_cap);
+    vault_relpath(a, a->vault.items[idx].path, where, where_cap);
+}
+
 static void wc_rebuild(App* a)
 {
-    if (a->wc_cap < (int)a->vault.count) {
-        a->wc_cap = (int)a->vault.count + 8;
+    int need = a->wc_kind == WC_TAG ? a->tags_count : (int)a->vault.count;
+    if (a->wc_cap < need) {
+        a->wc_cap = need + 8;
         a->wc_matches = realloc(a->wc_matches, a->wc_cap * sizeof(int));
     }
     a->wc_count = 0;
@@ -18486,20 +19060,32 @@ static void wc_rebuild(App* a)
     const char* q     = a->buf.data + a->wc_anchor;
     size_t      qlen  = (a->buf.cursor > a->wc_anchor)
                         ? a->buf.cursor - a->wc_anchor : 0;
-    for (size_t i = 0; i < a->vault.count; ++i) {
-        if (a->vault.items[i].is_dir) continue;
-        char disp[256];
-        wc_display_name(a->vault.items[i].name, disp, sizeof disp);
-        if (fuzzy_match(disp, q, qlen))
-            a->wc_matches[a->wc_count++] = (int)i;
+    if (a->wc_kind == WC_TAG) {
+        /* An empty filter lists every tag in the vault — that is the point of
+         * typing `#` before you know what you are looking for. */
+        for (int i = 0; i < a->tags_count; ++i)
+            if (fuzzy_match(a->tags_entries[i].name, q, qlen))
+                a->wc_matches[a->wc_count++] = i;
+    } else {
+        for (size_t i = 0; i < a->vault.count; ++i) {
+            if (a->vault.items[i].is_dir) continue;
+            char disp[256];
+            wc_display_name(a->vault.items[i].name, disp, sizeof disp);
+            if (fuzzy_match(disp, q, qlen))
+                a->wc_matches[a->wc_count++] = (int)i;
+        }
     }
     if (a->wc_selected >= a->wc_count) a->wc_selected = a->wc_count - 1;
     if (a->wc_selected < 0 && a->wc_count > 0) a->wc_selected = 0;
 }
 
-static void wc_open_at_cursor(App* a, int screen_x, int screen_y)
+static void wc_open_at_cursor(App* a, int screen_x, int screen_y, int kind)
 {
+    /* Tags live in the vault's text, not in an index, so they are gathered
+     * once here and filtered in memory for the rest of the popup's life. */
+    if (kind == WC_TAG) tags_collect(a);
     a->wc_active   = true;
+    a->wc_kind     = kind;
     a->wc_anchor   = a->buf.cursor;
     a->wc_selected = 0;
     a->wc_x = screen_x;
@@ -18509,28 +19095,26 @@ static void wc_open_at_cursor(App* a, int screen_x, int screen_y)
 
 static void wc_close(App* a) { a->wc_active = false; }
 
-/* Insert the selected name (without `.md`) into the buffer, replacing
- * whatever the user typed between wc_anchor and cursor. The surrounding
- * `[[` and `]]` are already in place from the auto-pair, so just swap
- * the middle. */
+/* Insert the selected name into the buffer, replacing whatever the user
+ * typed between wc_anchor and cursor. For a wiki link the `[[` and `]]` are
+ * already in place from the auto-pair, so only the middle is swapped and the
+ * caret then steps over the closer; a tag has no closer to step over. */
 static void wc_select(App* a)
 {
+    char disp[256], where[8];
     if (a->wc_selected < 0 || a->wc_selected >= a->wc_count) {
         wc_close(a); return;
     }
-    int vi = a->wc_matches[a->wc_selected];
-    if (vi < 0 || vi >= (int)a->vault.count) { wc_close(a); return; }
-
-    char disp[256];
-    size_t dn = wc_display_name(a->vault.items[vi].name, disp, sizeof disp);
+    wc_row_text(a, a->wc_selected, disp, sizeof disp, where, sizeof where);
+    if (!disp[0]) { wc_close(a); return; }
 
     /* Delete chars between anchor and cursor, then insert the display name. */
     size_t typed = (a->buf.cursor > a->wc_anchor)
                    ? a->buf.cursor - a->wc_anchor : 0;
     for (size_t i = 0; i < typed; ++i) buffer_delete_back(&a->buf);
-    buffer_insert(&a->buf, disp, dn);
-    /* Skip past the auto-paired `]]` so the cursor lands after the link. */
-    if (a->buf.cursor + 2 <= a->buf.len &&
+    buffer_insert(&a->buf, disp, strlen(disp));
+    if (a->wc_kind == WC_WIKI &&
+        a->buf.cursor + 2 <= a->buf.len &&
         a->buf.data[a->buf.cursor]     == ']' &&
         a->buf.data[a->buf.cursor + 1] == ']')
     {
@@ -18550,7 +19134,8 @@ static void render_wiki_complete(App* a)
     int rows     = a->wc_count < max_rows ? a->wc_count : max_rows;
     if (rows == 0) rows = 1;
 
-    int box_w = 320;
+    int box_w = WC_BOX_W;
+    if (box_w > a->win_w - 16) box_w = a->win_w - 16;
     int box_h = row_h * rows + 12;
     int box_x = a->wc_x;
     int box_y = a->wc_y;
@@ -18564,7 +19149,8 @@ static void render_wiki_complete(App* a)
     overlay_card(a, box);
 
     if (a->wc_count == 0) {
-        const char* msg = "No matching notes";
+        const char* msg = a->wc_kind == WC_TAG ? "No matching tags"
+                                               : "No matching notes";
         font_draw_line(a->font_ide, msg, strlen(msg),
                        box_x + 12, box_y + 6 + font_ascent(a->font_ide),
                        a->fg_muted);
@@ -18584,7 +19170,6 @@ static void render_wiki_complete(App* a)
 
     int y = box_y + 6;
     for (int i = start; i < end; ++i) {
-        int  vi  = a->wc_matches[i];
         bool sel = (i == a->wc_selected);
         if (sel) {
             SDL_Rect r = { box_x + 4, y, box_w - 8, row_h };
@@ -18593,12 +19178,26 @@ static void render_wiki_complete(App* a)
                 a->bg_sidebar_active.b, 255);
             SDL_RenderFillRect(a->renderer, &r);
         }
-        char disp[256];
-        size_t dn = wc_display_name(a->vault.items[vi].name, disp, sizeof disp);
-        SDL_Color c = sel ? a->fg_link : a->fg;
-        font_draw_elided(a->font_ide, disp, dn,
-                         box_x + 10, y + font_ascent(a->font_ide) + 2,
-                         box_w - 20, c);
+        char disp[256], where[340];
+        wc_row_text(a, i, disp, sizeof disp, where, sizeof where);
+
+        /* The path column gets at most half the row and is elided from the
+         * left in spirit (font_draw_elided trims the tail, so a long path
+         * keeps its leading folders — which is the part that disambiguates). */
+        int base = row_text_baseline(a->font_ide, y, row_h);
+        int where_w = font_measure(a->font_ide, where, strlen(where));
+        int where_max = box_w / 2 - 16;
+        if (where_w > where_max) where_w = where_max;
+        int name_max = box_w - 20 - where_w - 16;
+        if (name_max < 60) name_max = 60;
+
+        font_draw_elided(a->font_ide, disp, strlen(disp),
+                         box_x + 10, base, name_max,
+                         sel ? a->fg_link : a->fg);
+        if (where[0] && where_w > 0)
+            font_draw_elided(a->font_ide, where, strlen(where),
+                             box_x + box_w - 10 - where_w, base, where_w,
+                             a->fg_muted);
         y += row_h;
     }
 }
@@ -20065,6 +20664,10 @@ static const ActionEntry ACTIONS[] = {
     { "vault_search",    "Edit",       action_vsearch         },
 
     { "follow_link",     "Navigation", action_follow_link     },
+    { "nav_back",        "Navigation", action_nav_back        },
+    { "nav_forward",     "Navigation", action_nav_forward     },
+    { "goto_line",       "Navigation", action_goto_line       },
+    { "goto_last_edit",  "Navigation", action_goto_last_edit  },
     { "outline",         "Navigation", action_outline         },
     { "outline_pin",     "Navigation", action_outline_pin     },
     { "backlinks",       "Navigation", action_backlinks       },
@@ -20102,12 +20705,21 @@ static const struct { const char* keystr; const char* action; } DEFAULT_KEYS[] =
     { "ctrl+alt+p",   "plugins"        },
     { "ctrl+f",       "find"           },
     { "ctrl+h",       "find_replace"   },
+    /* macOS eats Cmd+H (Hide application) before any app sees it, so the
+     * platform's own Find & Replace combo doubles as a default here. */
+    { "ctrl+alt+f",   "find_replace"   },
     { "ctrl+shift+f", "vault_search"   },
     { "ctrl+shift+o", "outline"        },
     { "ctrl+alt+o",   "outline_pin"    },
     { "ctrl+shift+b", "backlinks"      },
     { "ctrl+shift+g", "tags"           },
     { "ctrl+shift+m", "graph"          },
+    { "ctrl+[",       "nav_back"       },
+    { "ctrl+]",       "nav_forward"    },
+    { "alt+left",     "nav_back"       },
+    { "alt+right",    "nav_forward"    },
+    { "ctrl+g",       "goto_line"      },
+    { "ctrl+shift+backspace", "goto_last_edit" },
     { "ctrl+d",       "daily_note"     },
     { "ctrl+shift+e", "export_html"    },
     { "ctrl+alt+t",   "align_table"    },
@@ -20239,7 +20851,16 @@ static const char* action_shadower(const char* action)
 static void build_keystr(SDL_Keycode k, int mod, char* out, size_t outlen)
 {
     int n = 0;
+#if defined(__APPLE__)
+    /* Cmd is the accelerator here, so it is what spells `ctrl+`. A real
+     * Control press gets its own token instead, which matches nothing in
+     * any binding table — Ctrl+A/E/K stay the platform's text motions. */
+    if (mod & KMOD_GUI)   n += snprintf(out + n, outlen - n, "ctrl+");
+    else if (mod & KMOD_CTRL)
+                          n += snprintf(out + n, outlen - n, "control+");
+#else
     if (mod & KMOD_CTRL)  n += snprintf(out + n, outlen - n, "ctrl+");
+#endif
     if (mod & KMOD_SHIFT) n += snprintf(out + n, outlen - n, "shift+");
     if (mod & KMOD_ALT)   n += snprintf(out + n, outlen - n, "alt+");
 
@@ -20499,6 +21120,20 @@ static void app_event(App* a, const SDL_Event* e)
                         }
                         resolved = true;
                         break;
+                    }
+                    if (!resolved) {
+                        for (size_t ti = 0; ti < a->doc.tag_count; ++ti) {
+                            MdTag* tg = &a->doc.tags[ti];
+                            if (h->byte_start < tg->start ||
+                                h->byte_start >= tg->end) continue;
+                            snprintf(a->tip_text, sizeof a->tip_text,
+                                     "Search tag -- #%.*s",
+                                     (int)tg->name_len,
+                                     a->doc.data + tg->name_start);
+                            a->tip_broken = false;
+                            resolved = true;
+                            break;
+                        }
                     }
                     if (!resolved) {
                         for (size_t wi = 0; wi < a->doc.wiki_count; ++wi) {
@@ -21419,7 +22054,7 @@ static void app_event(App* a, const SDL_Event* e)
                     if (a->split_preview) a->render_pane = PANE_LEFT;
                     size_t pos = edit_position_at(a, e->button.x, e->button.y);
                     a->render_pane = rp_save;
-                    bool ctrlmod = (SDL_GetModState() & KMOD_CTRL) != 0;
+                    bool ctrlmod = (SDL_GetModState() & KMOD_PRIMARY) != 0;
                     /* Ctrl+click on a wiki-link follows it; cursor doesn't
                      * move and the click doesn't start a drag-select. */
                     if (ctrlmod) {
@@ -21491,7 +22126,7 @@ static void app_event(App* a, const SDL_Event* e)
                      * Ctrl+click on a link byte resolves through the inline
                      * `[text](url)` table and opens externally (after a
                      * confirm prompt) instead of treating it as a wiki. */
-                    bool ctrl_held = (SDL_GetModState() & KMOD_CTRL) != 0;
+                    bool ctrl_held = (SDL_GetModState() & KMOD_PRIMARY) != 0;
                     int handled = 0;
                     for (size_t hi = 0; hi < a->hit_count; ++hi) {
                         struct ClickHit* h = &a->hits[hi];
@@ -21527,6 +22162,21 @@ static void app_event(App* a, const SDL_Event* e)
                                 handled = 1;
                                 goto out_of_hits;
                             }
+                        }
+                        /* `#tag` before `[[wiki]]`: their byte ranges never
+                         * overlap, and the tag table is the shorter walk. A
+                         * tag opens the vault search for it. */
+                        for (size_t ti = 0; ti < a->doc.tag_count; ++ti) {
+                            MdTag* tg = &a->doc.tags[ti];
+                            if (h->byte_start < tg->start ||
+                                h->byte_start >= tg->end) continue;
+                            char name[MD_TAG_MAX_NAME + 1];
+                            snprintf(name, sizeof name, "%.*s",
+                                     (int)tg->name_len,
+                                     a->doc.data + tg->name_start);
+                            tag_search(a, name);
+                            handled = 1;
+                            goto out_of_hits;
                         }
                         for (size_t wi = 0; wi < a->doc.wiki_count; ++wi) {
                             MdWiki* wk = &a->doc.wikis[wi];
@@ -21888,9 +22538,10 @@ static void app_event(App* a, const SDL_Event* e)
                 bump_blink(a);
                 a->notification_until = 0;     /* dismiss on type */
 
-                /* Wiki-complete activation: did the user just type the second
-                 * `[` of `[[`? After auto-pair, buf has `...[[]]` with the
-                 * cursor between the inner pair. */
+                /* Relation auto-complete activation. `[[`: did the user just
+                 * type the second `[`? After auto-pair, buf has `...[[]]`
+                 * with the cursor between the inner pair. `#`: a fresh tag
+                 * sigil in the middle of a line. */
                 if (!a->wc_active && tn == 1 && t[0] == '[' &&
                     a->buf.cursor >= 2 && a->buf.cursor + 2 <= a->buf.len &&
                     a->buf.data[a->buf.cursor - 2] == '[' &&
@@ -21900,17 +22551,46 @@ static void app_event(App* a, const SDL_Event* e)
                 {
                     int cx, cy;
                     edit_cursor_screen_pos(a, &cx, &cy);
-                    wc_open_at_cursor(a, cx, cy);
+                    wc_open_at_cursor(a, cx, cy, WC_WIKI);
+                }
+                /* `#` opens the tag picker. Only mid-line, after a space or
+                 * an opening bracket: a `#` in column 0 is a heading marker,
+                 * and popping a tag list up every time someone starts a
+                 * heading would be its own kind of wrong. */
+                else if (!a->wc_active && tn == 1 && t[0] == '#' &&
+                         a->buf.cursor >= 2 &&
+                         (a->buf.data[a->buf.cursor - 2] == ' '  ||
+                          a->buf.data[a->buf.cursor - 2] == '\t' ||
+                          a->buf.data[a->buf.cursor - 2] == '('  ||
+                          a->buf.data[a->buf.cursor - 2] == '['))
+                {
+                    int cx, cy;
+                    edit_cursor_screen_pos(a, &cx, &cy);
+                    wc_open_at_cursor(a, cx, cy, WC_TAG);
                 }
                 else if (a->wc_active) {
-                    /* Cursor moved past the auto-paired `]]` boundary, or the
-                     * user typed something that broke the link — e.g. a `]`,
-                     * a newline, or moved before the anchor. Otherwise just
-                     * refresh the filter from buf[anchor..cursor]. */
+                    /* The caret moved before the anchor, or the user typed
+                     * something the relation can't contain — the wiki
+                     * closer, or any byte a tag name can't hold. Otherwise
+                     * just refresh the filter from buf[anchor..cursor]. */
+                    bool broke = (tn == 1 && t[0] == '\n');
+                    if (a->wc_kind == WC_TAG)
+                        broke = broke ||
+                                (tn == 1 &&
+                                 !tag_is_body_byte((unsigned char)t[0]));
+                    else
+                        broke = broke || (tn == 1 && t[0] == ']');
                     if (a->buf.cursor < a->wc_anchor) wc_close(a);
-                    else if (tn == 1 && (t[0] == ']' || t[0] == '\n'))
-                        wc_close(a);
-                    else wc_rebuild(a);
+                    else if (broke) wc_close(a);
+                    else {
+                        wc_rebuild(a);
+                        /* `#` is a character people type for its own sake
+                         * ("issue #12") far more often than `[[` is, so an
+                         * empty tag list gets out of the way instead of
+                         * hanging around saying "no match". */
+                        if (a->wc_kind == WC_TAG && a->wc_count == 0)
+                            wc_close(a);
+                    }
                 }
             }
             break;
@@ -21918,8 +22598,8 @@ static void app_event(App* a, const SDL_Event* e)
         case SDL_KEYDOWN: {
             SDL_Keycode k = e->key.keysym.sym;
             int mod  = e->key.keysym.mod;
-            bool ctrl = (mod & KMOD_CTRL)  != 0;
-            bool sel  = (mod & KMOD_SHIFT) != 0;
+            bool ctrl = (mod & KMOD_PRIMARY) != 0;
+            bool sel  = (mod & KMOD_SHIFT)   != 0;
 
             /* Backlinks panel swallows nav keys while open. */
             if (a->backlinks_active) {
@@ -22613,9 +23293,10 @@ int main(int argc, char** argv)
         /* Fire the plugin "text_change" event when the document mutated this
          * frame. buf.seq bumps on every insert/delete/undo/redo; loads and
          * tab switches resync fired_seq so they don't count as edits. */
-        if (app.lua && app.buf.seq != app.fired_seq) {
+        if (app.buf.seq != app.fired_seq) {
             app.fired_seq = app.buf.seq;
-            lua_host_fire_event(app.lua, "text_change");
+            nav_mark_edit(&app);
+            if (app.lua) lua_host_fire_event(app.lua, "text_change");
         }
         app_render(&app);
     }

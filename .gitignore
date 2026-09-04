@@ -1,4 +1,5 @@
 /build/
+/build-tests/
 *.o
 *.obj
 *.a

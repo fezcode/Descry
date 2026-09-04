@@ -18,6 +18,10 @@
 typedef struct Font    Font;
 typedef struct LuaHost LuaHost;
 
+/* Top-level menus in the title-bar strip (and their mirrors in the
+ * native macOS / Hisashi menu bars): File, Edit, View, Go, Help. */
+#define MENU_COUNT 5
+
 /* Per-frame record of an overflowing preview table's horizontal scrollbar,
  * rebuilt every render_preview and consumed by mouse/drag handling. The
  * scroll offset itself lives in MdLine.h_scroll (reset on re-parse). */
@@ -297,12 +301,15 @@ typedef struct {
     int      pset_hit_count;
     int      plugins_content_h;     /* body height last render, for scroll clamp */
 
-    /* Wiki-link auto-complete (triggered by typing `[[` in edit mode). The
+    /* Relation auto-complete: `[[` offers the vault's files, `#` offers its
+     * tags. Both share this one popup — only the row source differs. The
      * filter text is the slice of the buffer between wc_anchor and the
      * cursor; popup is anchored at (wc_x, wc_y) under the trigger position. */
     bool     wc_active;
-    size_t   wc_anchor;          /* buffer pos right after the `[[`         */
-    int*     wc_matches;         /* indices into vault.items                */
+    int      wc_kind;            /* WC_WIKI = files, WC_TAG = tags          */
+    size_t   wc_anchor;          /* buffer pos right after the `[[` / `#`   */
+    int*     wc_matches;         /* vault.items indices, or tags_entries
+                                  * indices when wc_kind is WC_TAG          */
     int      wc_count;
     int      wc_cap;
     int      wc_selected;
@@ -566,16 +573,16 @@ typedef struct {
     int      tb_btn_hover;           /* -1 none, 0 min, 1 max, 2 close */
     float    tb_btn_hover_t[3];      /* eased hover state per button */
     /* Top menu bar (File/Edit/View/Help). */
-    int      menu_hover;             /* -1 none, 0..3 = menu index */
-    float    menu_hover_t[4];        /* eased hover state per menu */
+    int      menu_hover;             /* -1 none, 0..MENU_COUNT-1 */
+    float    menu_hover_t[MENU_COUNT];  /* eased hover state per menu */
     /* The folder glyph at the left of the title bar. It opens the vault
      * picker (File > Open Dir), so it needs a rect to hit-test and its own
      * hover fade, exactly like the menu labels beside it. */
     SDL_Rect tb_icon_rect;
     bool     tb_icon_hover;
     float    tb_icon_hover_t;
-    int      menu_open;              /* -1 closed, 0..3 = which dropdown */
-    SDL_Rect menu_rects[4];          /* hit rects per menu (set by render) */
+    int      menu_open;              /* -1 closed, else the dropdown index */
+    SDL_Rect menu_rects[MENU_COUNT]; /* hit rects per menu (set by render) */
 
     /* Per-button animation level [0..1] for the chrome bar; eased toward
      * 1 when the button is hovered, 0 otherwise. Drives bg fade and the
@@ -647,17 +654,47 @@ typedef struct {
     int      backlinks_count;
     int      backlinks_cap;
 
-    /* Tag panel (Ctrl+Shift+G): every #tag across the vault, by count. */
+    /* Tag store (Ctrl+Shift+G): every `#tag` across the vault, by count.
+     * `#tag` is the vault's second relation next to `[[wiki links]]` —
+     * `[[…]]` points at one file, `#…` names a subject any number of notes
+     * can share. One store backs three surfaces: this panel, the `#`
+     * auto-complete popup, and the tag nodes in the graph view, so it is
+     * collected once per open (tags_collect) rather than rescanned per
+     * keystroke. */
     bool     tags_active;
     int      tags_selected;
     int      tags_hover;
     int      tags_scroll;
     struct TagEntry {
-        char   name[64];      /* without leading '#' */
-        int    count;
+        char   name[MD_TAG_MAX_NAME + 1];  /* without the leading '#'      */
+        int    count;         /* occurrences across the whole vault        */
+        int    note_count;    /* distinct notes mentioning it              */
+        int    first_vault;   /* vault index of the first note using it    */
     }*       tags_entries;
     int      tags_count;
     int      tags_cap;
+
+    /* Navigation history — a browser-style back/forward stack of visited
+     * locations. Every note open and every deliberate caret jump (outline,
+     * search hit, Go to line) records where the user was, so Ctrl/Cmd+[
+     * walks back to it and Ctrl/Cmd+] returns. Pushing from the middle of
+     * the stack drops the forward entries, exactly like a browser.
+     * `nav_pos` indexes the CURRENT location; -1 means the stack is empty. */
+    struct NavEntry {
+        char   path[600];
+        size_t cursor;
+        int    scroll_y;
+        bool   edit_mode;
+    }        nav_hist[64];
+    int      nav_count;
+    int      nav_pos;
+    bool     nav_replaying;    /* restoring an entry: don't record it again */
+    bool     nav_ready;        /* false during app_init, so startup opens
+                                * seed the stack without pushing noise    */
+    /* Last place the buffer was actually modified (Go > Last edit). */
+    char     nav_edit_path[600];
+    size_t   nav_edit_cursor;
+    bool     nav_edit_valid;
 
     /* Template picker (shown by New File when templates/ has *.md files). */
     bool     tpl_active;

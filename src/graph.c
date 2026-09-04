@@ -20,16 +20,33 @@ void graph_clear(GraphModel* g)
     g->edge_count = 0;
 }
 
-int graph_add_node(GraphModel* g, int vault_idx)
+static GraphNode* graph_new_node(GraphModel* g)
 {
     if (g->node_count >= g->node_cap) {
         g->node_cap = g->node_cap ? g->node_cap * 2 : 64;
         g->nodes = realloc(g->nodes, g->node_cap * sizeof *g->nodes);
     }
-    GraphNode* n = &g->nodes[g->node_count];
+    GraphNode* n = &g->nodes[g->node_count++];
     memset(n, 0, sizeof *n);
+    n->vault_idx = -1;
+    n->tag_idx   = -1;
+    return n;
+}
+
+int graph_add_node(GraphModel* g, int vault_idx)
+{
+    GraphNode* n = graph_new_node(g);
+    n->kind      = GRAPH_NOTE;
     n->vault_idx = vault_idx;
-    return g->node_count++;
+    return g->node_count - 1;
+}
+
+int graph_add_tag(GraphModel* g, int tag_idx)
+{
+    GraphNode* n = graph_new_node(g);
+    n->kind    = GRAPH_TAG;
+    n->tag_idx = tag_idx;
+    return g->node_count - 1;
 }
 
 void graph_add_edge(GraphModel* g, int a, int b)

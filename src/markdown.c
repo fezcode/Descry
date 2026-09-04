@@ -632,6 +632,73 @@ static void wikis_post(MdDoc* d)
     }
 }
 
+/* A byte that may appear inside a tag name: word chars plus `-` and `/`,
+ * with every non-ASCII byte treated as a word byte so UTF-8 names survive.
+ * Kept in step with compute_edit_styles in main.c, which applies the same
+ * rule to the raw source in edit mode. */
+static int tag_body_byte(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '/' ||
+           c >= 0x80;
+}
+
+/* `#` only opens a tag at the start of a line or after whitespace or an
+ * opening bracket, so `C#` and `foo#bar` stay literal text. */
+static int tag_boundary(unsigned char prev)
+{
+    return prev == 0    || prev == ' ' || prev == '\t' || prev == '\n' ||
+           prev == '\r' || prev == '(' || prev == '[';
+}
+
+/* Post-parse twin of wikis_post for `#tag` spans. There is no closing sigil:
+ * the name runs from after the `#` to the first byte that can't be part of
+ * it. The span is marked STYLE_LINK so it picks up the link color, plus
+ * STYLE_TAG so the renderer and the click handler can tell the two relation
+ * kinds apart.
+ *
+ * Scanned per rendered line rather than across the whole buffer: paragraph
+ * boundaries leave no separator byte in `data`, so the first byte of the
+ * next paragraph would otherwise read as a continuation of this one.
+ *
+ * Heading markers never reach here — md4c consumes them into the line kind,
+ * so `## Title` arrives as the text "Title". */
+static void tags_post(MdDoc* d)
+{
+    if (!d->data) return;
+    for (size_t li = 0; li < d->line_count; ++li) {
+        if (d->lines[li].kind == LINE_CODE) continue;   /* code is literal */
+        size_t ls = d->lines[li].start;
+        size_t le = ls + d->lines[li].len;
+        if (le > d->len) le = d->len;
+
+        for (size_t i = ls; i + 1 < le; ++i) {
+            if (d->data[i] != '#') continue;
+            unsigned char prev = (i == ls) ? 0 : (unsigned char)d->data[i-1];
+            if (!tag_boundary(prev)) continue;
+            size_t e = i + 1;
+            while (e < le && tag_body_byte((unsigned char)d->data[e])) e++;
+            size_t body = e - (i + 1);
+            if (body == 0 || body > MD_TAG_MAX_NAME) { i = e; continue; }
+
+            for (size_t b = i; b < e; ++b)
+                d->style[b] |= STYLE_LINK | STYLE_TAG;
+
+            if (d->tag_count >= d->tag_cap) {
+                d->tag_cap = d->tag_cap ? d->tag_cap * 2 : 8;
+                d->tags = realloc(d->tags, d->tag_cap * sizeof(MdTag));
+            }
+            d->tags[d->tag_count++] = (MdTag){
+                .start      = i,
+                .end        = e,
+                .name_start = i + 1,
+                .name_len   = body,
+            };
+            i = e - 1;
+        }
+    }
+}
+
 int md_doc_parse(const char* src, size_t src_len, MdDoc* out)
 {
     memset(out, 0, sizeof *out);
@@ -669,6 +736,7 @@ int md_doc_parse(const char* src, size_t src_len, MdDoc* out)
         out->line_count--;
     }
     wikis_post(out);
+    tags_post(out);
     /* If parsing bailed mid-link the orphaned href would leak. */
     free(ctx.link_href);
     return rc;
@@ -682,6 +750,7 @@ void md_doc_free(MdDoc* d)
     free(d->src_map);
     free(d->lines);
     free(d->wikis);
+    free(d->tags);
     for (size_t i = 0; i < d->link_count; ++i) free(d->links[i].href);
     free(d->links);
     memset(d, 0, sizeof *d);

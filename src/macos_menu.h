@@ -16,15 +16,26 @@
  * is a good way to deadlock. The pick is queued instead, and the main loop
  * collects it with macos_menu_take_pick() once the pump has returned. */
 
+/* Modifier bits for MacMenuItem.mods. */
+#define MAC_MOD_CMD    (1 << 0)
+#define MAC_MOD_SHIFT  (1 << 1)
+#define MAC_MOD_ALT    (1 << 2)
+#define MAC_MOD_CTRL   (1 << 3)
+
 /* One row of a menu; a NULL label terminates the array.
  *
- * There is deliberately no key-equivalent field. Descry's bindings are
- * Ctrl-based on every platform, so a native ⌘ shortcut would disagree with
- * what the app actually listens for, and a native ⌃ shortcut would fire the
- * menu action *and* the app's own keybinding for the same keystroke —
- * harmless for Save, but every toggle would flip twice and appear dead. */
+ * `key` is the row's key equivalent (a lowercase character, 0 for none) and
+ * `mods` its modifier bits. Descry's accelerator is Cmd on this platform, so
+ * these agree with what the app itself listens for — but AppKit consumes a
+ * matching keystroke before SDL ever sees it, which means only rows whose
+ * action is right to run unconditionally may carry one. The caller decides;
+ * everything to do with the clipboard, undo or find deliberately arrives
+ * here with key == 0 so those keystrokes still reach the focused text
+ * field. */
 typedef struct {
     const char* label;
+    char        key;
+    int         mods;
 } MacMenuItem;
 
 /* Build (or rebuild) the menu bar. `titles` is a NULL-terminated array of

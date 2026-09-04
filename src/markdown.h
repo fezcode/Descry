@@ -42,6 +42,7 @@ typedef enum {
     STYLE_STRIKE = 1 << 3,
     STYLE_LINK   = 1 << 4,
     STYLE_MATH   = 1 << 5,   /* inline/display `$…$` LaTeX-math span */
+    STYLE_TAG    = 1 << 6,   /* `#tag` span */
 } StyleFlags;
 
 typedef struct {
@@ -74,6 +75,21 @@ typedef struct {
     size_t name_len;    /* length of inner name                          */
 } MdWiki;
 
+/* Longest tag name (bytes) a `#tag` span may carry. */
+#define MD_TAG_MAX_NAME 63
+
+/* `#tag` relation. The sibling of MdWiki: where `[[…]]` points at one file,
+ * `#…` names a subject any number of notes can share. There is no closing
+ * sigil — the name runs to the first byte that can't be part of it. The
+ * whole span (the `#` included) gets STYLE_LINK | STYLE_TAG; this struct
+ * lets a click handler resolve a byte position back to the tag name. */
+typedef struct {
+    size_t start;       /* byte offset of the '#'                        */
+    size_t end;         /* byte offset just past the last name byte      */
+    size_t name_start;  /* start of the name (after the '#')             */
+    size_t name_len;    /* length of the name                            */
+} MdTag;
+
 /* `[text](url)` inline link. `start`..`end` are the rendered-text byte
  * range that received STYLE_LINK; `href` is a heap-allocated copy of the
  * URL. A Ctrl+click hit-test resolves a clicked byte to this struct to
@@ -99,6 +115,8 @@ typedef struct {
     size_t         line_count, line_cap;
     MdWiki*        wikis;
     size_t         wiki_count, wiki_cap;
+    MdTag*         tags;
+    size_t         tag_count, tag_cap;
     MdLink*        links;
     size_t         link_count, link_cap;
 } MdDoc;

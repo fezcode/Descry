@@ -28,7 +28,15 @@ preview rendering, plugin host — without the Electron tax.
   open straight into the preview pane.
 - **Wiki links** `[[note name]]` resolve case-insensitively across the
   vault; backlinks panel shows every note that points at the current
-  one.
+  one. Typing `[[` opens an auto-complete list of every note, each row
+  showing its path relative to the vault root so two notes called
+  "index" stay distinguishable.
+- **Tags** `#tag` are the vault's other relation: where `[[…]]` points
+  at one file, `#…` names a subject any number of notes can share.
+  Highlighted in both edit and preview, clickable in preview to search
+  the vault for them, and offered by an auto-complete list (with the
+  same path column) when you type `#` mid-line. The tag panel
+  (Ctrl+Shift+G) ranks every tag in the vault by use.
 - **Outline panel** auto-generated from headings, pinned or modal.
 - **Find / Replace** with regex, case-insensitive, whole-word, live
   match count, caret-aware editing, click-to-position. Searches the
@@ -56,8 +64,16 @@ preview rendering, plugin host — without the Electron tax.
   simple super/subscripts become real Unicode glyphs (`$\sum_{i=1}^{n}
   x_i^2$` → `∑ᵢ₌₁ⁿ xᵢ²`). A typographic pass, not a full TeX engine.
 - **Graph view** (Ctrl+Shift+M) — a force-directed map of the vault's
-  wiki-link graph. Node size scales with degree, the current note is
-  highlighted; drag to pan, scroll to zoom, click a node to open it.
+  relation graph: one node per note, one per `#tag`, an edge per wiki
+  link and per tag mention. Node size scales with degree, the current
+  note is highlighted; drag to pan, scroll to zoom, click a note to
+  open it or a tag to search for it.
+- **Navigation history** — every note you open and every deliberate
+  jump (outline heading, Go to line, a followed link) is recorded, so
+  Ctrl+[ walks back to where you were, caret and scroll included, and
+  Ctrl+] returns. The Go menu gathers the rest: Go to File, Line,
+  Heading and Tag, plus "Last edit" to hop back to where you were last
+  typing.
 - **Spell check** — opt-in (`spellcheck = true` in `settings.lua`),
   dictionary-driven red squiggles under unknown words in the editor.
   Points at a system word list or your own `dictionary_path`; "Add to
@@ -188,6 +204,11 @@ afterwards.
   `settings.lua` copied from another OS that points at a missing font
   is detected and swapped for the platform default instead of failing
   to start.
+- **Cmd is the accelerator.** Every shortcut listed under
+  [Keyboard](#keyboard) uses ⌘ here, shown that way in the menus, the
+  command palette and the keybindings editor. Cmd+H is the system's
+  "hide application" and never reaches an app, so Find & Replace also
+  answers to the platform's own ⌥⌘F.
 - **Reveal in Finder** uses `open -R`; external links and the log
   folder open via `open`.
 - File dialogs use AppleScript (`osascript`); logs and settings live
@@ -248,6 +269,12 @@ and an honest list of what's *not* exposed yet — lives in
 A non-exhaustive list. Every binding is editable from `Settings >
 Keybindings` and persists to `settings.lua` next to the exe.
 
+**On macOS the accelerator is Cmd, not Ctrl** — read every `Ctrl+…`
+below as `⌘…`. The bindings themselves are stored with the portable
+`ctrl+` spelling, so a `settings.lua` moves between machines unchanged;
+only the physical key differs. Control is left alone for the text
+motions the platform reserves it for.
+
 | Action                | Shortcut          |
 |-----------------------|-------------------|
 | Toggle edit / preview | Ctrl+E            |
@@ -256,10 +283,12 @@ Keybindings` and persists to `settings.lua` next to the exe.
 | New file              | Ctrl+N            |
 | Rename                | F2                |
 | Quick switcher        | Ctrl+P            |
+| Back / Forward        | Ctrl+[ / Ctrl+]   |
+| Go to line            | Ctrl+G            |
 | Command palette       | Ctrl+Shift+P      |
 | Plugins overlay       | Ctrl+Alt+P        |
 | Find                  | Ctrl+F            |
-| Find / Replace        | Ctrl+H            |
+| Find / Replace        | Ctrl+H (Alt+Ctrl+F) |
 | Vault search          | Ctrl+Shift+F      |
 | Outline               | Ctrl+Shift+O      |
 | Backlinks             | Ctrl+Shift+B      |
