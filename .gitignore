@@ -19,3 +19,6 @@ compile_commands.json
 .descry.state
 **/.descry.state
 /dist/
+
+# macOS Finder metadata
+.DS_Store
