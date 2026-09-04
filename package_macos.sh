@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Build a self-contained, double-clickable Descry.app on macOS — and optionally
-# a drag-to-Applications .dmg. The macOS counterpart of build_installer.ps1.
+# a drag-to-Applications .dmg and/or a .zip of the bundle. The macOS
+# counterpart of build_installer.ps1.
 #
 # It assembles dist/macos-arm64/Descry.app with:
 #   - the descry binary (Contents/MacOS/descry)
@@ -11,17 +12,19 @@
 #   - a Descry.icns generated from resources/icon_*.png
 #   - an ad-hoc code signature so Gatekeeper lets it launch locally
 #
-# Usage: ./package_macos.sh [--dmg] [--no-build] [--sign "Developer ID App: …"]
+# Usage: ./package_macos.sh [--dmg] [--zip] [--no-build] [--sign "Developer ID App: …"]
 
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Build a self-contained Descry.app (and optionally a .dmg) on macOS.
+Build a self-contained Descry.app (and optionally a .dmg / .zip) on macOS.
 
-Usage: ./package_macos.sh [--dmg] [--no-build] [--sign <identity>]
+Usage: ./package_macos.sh [--dmg] [--zip] [--no-build] [--sign <identity>]
 
   --dmg              Also produce dist/Descry-<version>.dmg (drag-to-Applications).
+  --zip              Also produce dist/Descry-<version>-macos-arm64.zip (bare
+                     app bundle, zipped with ditto so the signature survives).
   --no-build         Skip build.sh; reuse the existing build/descry.
   --sign <identity>  Code-sign with a Developer ID instead of ad-hoc ("-").
                      For distribution you still need to notarize separately.
@@ -30,12 +33,14 @@ EOF
 }
 
 do_dmg=0
+do_zip=0
 do_build=1
 sign_id="-"          # ad-hoc by default
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dmg)      do_dmg=1; shift ;;
+        --zip)      do_zip=1; shift ;;
         --no-build) do_build=0; shift ;;
         --sign)     sign_id="${2:?--sign needs an identity}"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
@@ -148,6 +153,22 @@ if [ "$do_dmg" -eq 1 ]; then
     hdiutil create -volname "Descry ${version}" -srcfolder "$stage" \
         -ov -format UDZO "$dmg" >/dev/null
     echo "Built: $dmg"
+fi
+
+# --- optional .zip -------------------------------------------------------
+# ditto (not zip) so the bundle's symlinks and code signature survive the
+# round-trip; --keepParent keeps Descry.app as the archive's top-level entry.
+if [ "$do_zip" -eq 1 ]; then
+    mkdir -p dist
+    # Arch from the bundled binary, not uname -m (which reports x86_64 under
+    # Rosetta), so the name always matches what is actually inside.
+    zip_arch="$(lipo -archs "$app/Contents/MacOS/descry" 2>/dev/null | tr ' ' '-')"
+    [ -n "$zip_arch" ] || zip_arch="arm64"
+    zipfile="dist/Descry-${version}-macos-${zip_arch}.zip"
+    echo "Building $zipfile ..."
+    rm -f "$zipfile"
+    ditto -c -k --sequesterRsrc --keepParent "$app" "$zipfile"
+    echo "Built: $zipfile"
 fi
 
 echo "Done. Double-click $app, or drag it to /Applications."
