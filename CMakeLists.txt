@@ -39,6 +39,7 @@ add_executable(descry
   src/icon_raster.c
   src/icons.c
   src/image.c
+  src/inputfield.c
   src/lua_host.c
   src/markdown.c
   src/mermaid.c
@@ -111,10 +112,12 @@ if(DESCRY_TESTS)
   add_executable(test_reveal tests/test_reveal.c src/reveal.c)
   add_executable(test_markdown tests/test_markdown.c src/markdown.c)
   add_executable(test_graph tests/test_graph.c src/graph.c)
+  add_executable(test_inputfield tests/test_inputfield.c src/inputfield.c)
   target_link_libraries(test_icons PRIVATE m)
   target_link_libraries(test_markdown PRIVATE md4c)
   target_link_libraries(test_graph PRIVATE m)
-  foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph)
+  foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
+            test_inputfield)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -129,4 +132,5 @@ if(DESCRY_TESTS)
   add_test(NAME reveal COMMAND test_reveal)
   add_test(NAME markdown COMMAND test_markdown)
   add_test(NAME graph COMMAND test_graph)
+  add_test(NAME inputfield COMMAND test_inputfield)
 endif()

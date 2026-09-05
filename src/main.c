@@ -3,6 +3,7 @@
 #include "font.h"
 #include "icons.h"
 #include "image.h"
+#include "inputfield.h"
 #include "lua_host.h"
 #include "macos_menu.h"
 #include "markdown.h"
@@ -126,7 +127,7 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.86.0"
+#define DESCRY_VERSION "0.86.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -3870,6 +3871,28 @@ static bool input_handle_keydown(InputField* f, SDL_Keycode k, SDL_Scancode sc,
  * pixel rect of the input's text area + the field state. Caret rendering
  * stays the caller's responsibility (it usually has theme-specific
  * styling). */
+/* Caret width the modals draw, and the horizontal padding either side of
+ * the text inside an input field — both shared by the scroll math so the
+ * caret can never end up flush against (or past) the rounded border. */
+#define INPUT_CARET_W 2
+#define INPUT_PAD_X   10
+
+/* Re-follow the caret for a one-line input and return the resulting text
+ * origin. `*scroll` is the field's persistent offset; `in_r` its rect.
+ * Text and caret are then drawn at the returned x, and everything stays
+ * inside the clip rect the caller sets. */
+static int input_scroll_origin(App* a, const InputField* f,
+                               const SDL_Rect* in_r, int* scroll)
+{
+    int view_w  = in_r->w - 2 * INPUT_PAD_X;
+    if (view_w < 1) view_w = 1;
+    int caret_x = font_measure(a->font_ide, f->buf, *f->cursor);
+    int text_w  = font_measure(a->font_ide, f->buf, *f->len);
+    *scroll = input_scroll_follow(*scroll, caret_x, INPUT_CARET_W,
+                                  text_w, view_w);
+    return in_r->x + INPUT_PAD_X - *scroll;
+}
+
 static void input_render_selection(App* a, const InputField* f,
                                    int tx, int ty_top, int line_h)
 {
@@ -3940,19 +3963,19 @@ static void render_tinput_modal(App* a)
         border_c.r, border_c.g, border_c.b, border_c.a);
     draw_rrect(a->renderer, in_r, 6);
 
-    int tx = in_r.x + 10;
+    InputField f = {
+        .buf = a->tinput_text, .cap = (int)sizeof a->tinput_text,
+        .len = &a->tinput_len, .cursor = &a->tinput_cursor,
+        .sel_anchor = &a->tinput_sel_anchor,
+    };
+    /* A path longer than the field scrolls under the caret rather than
+     * running off the right edge with no way to see the tail. */
+    int tx = input_scroll_origin(a, &f, &in_r, &a->tinput_scroll_x);
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
     /* Selection highlight under the text. */
-    {
-        InputField f = {
-            .buf = a->tinput_text, .cap = (int)sizeof a->tinput_text,
-            .len = &a->tinput_len, .cursor = &a->tinput_cursor,
-            .sel_anchor = &a->tinput_sel_anchor,
-        };
-        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
-    }
+    input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
     if (a->tinput_len > 0) {
         font_draw_line(a->font_ide, a->tinput_text, a->tinput_len,
                        tx, ty, a->fg);
@@ -4264,20 +4287,18 @@ static void render_rename_popup(App* a)
         border_c.r, border_c.g, border_c.b, border_c.a);
     draw_rrect(a->renderer, in_r, 6);
 
-    int tx = in_r.x + 10;
+    InputField f = {
+        .buf = a->tinput_renpop_text,
+        .cap = (int)sizeof a->tinput_renpop_text,
+        .len = &a->tinput_renpop_len,
+        .cursor = &a->tinput_renpop_cursor,
+        .sel_anchor = &a->tinput_renpop_sel_anchor,
+    };
+    int tx = input_scroll_origin(a, &f, &in_r, &a->tinput_renpop_scroll_x);
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
-    {
-        InputField f = {
-            .buf = a->tinput_renpop_text,
-            .cap = (int)sizeof a->tinput_renpop_text,
-            .len = &a->tinput_renpop_len,
-            .cursor = &a->tinput_renpop_cursor,
-            .sel_anchor = &a->tinput_renpop_sel_anchor,
-        };
-        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
-    }
+    input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
     if (a->tinput_renpop_len > 0) {
         font_draw_line(a->font_ide,
                        a->tinput_renpop_text, a->tinput_renpop_len,
@@ -4361,6 +4382,7 @@ static bool app_rename_popup(App* a, const char* oldname,
     a->tinput_renpop_cursor = a->tinput_renpop_len;
     /* Pre-select the whole name so the user can type to replace it. */
     a->tinput_renpop_sel_anchor = (a->tinput_renpop_len > 0) ? 0 : -1;
+    a->tinput_renpop_scroll_x   = 0;
     a->tinput_renpop_active = true;
     a->tinput_renpop_choice = -1;
     a->tinput_renpop_hover  = 0;
@@ -4485,6 +4507,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
     /* Default-select-all on open so the user can immediately type to
      * replace the prefilled name (standard Save-As / rename UX). */
     a->tinput_sel_anchor = (a->tinput_len > 0 && default_text) ? 0 : -1;
+    a->tinput_scroll_x   = 0;
     a->tinput_active = true;
     a->tinput_choice = -1;
     a->tinput_hover  = 0;     /* OK by default */
@@ -5063,18 +5086,16 @@ static void render_prompt_modal(App* a)
         : (SDL_Color){a->fg_link.r, a->fg_link.g, a->fg_link.b, 200};
     SDL_SetRenderDrawColor(a->renderer, border_c.r, border_c.g, border_c.b, border_c.a);
     draw_rrect(a->renderer, in_r, 6);
-    int tx = in_r.x + 10;
+    InputField f = {
+        .buf = a->prompt_text, .cap = (int)sizeof a->prompt_text,
+        .len = &a->prompt_len, .cursor = &a->prompt_cursor,
+        .sel_anchor = &a->prompt_sel_anchor,
+    };
+    int tx = input_scroll_origin(a, &f, &in_r, &a->prompt_scroll_x);
     int ty = in_r.y + (in_h - sz_y) / 2 + font_ascent(a->font_ide);
     SDL_Rect clip = { in_r.x + 6, in_r.y + 1, in_r.w - 12, in_r.h - 2 };
     SDL_RenderSetClipRect(a->renderer, &clip);
-    {
-        InputField f = {
-            .buf = a->prompt_text, .cap = (int)sizeof a->prompt_text,
-            .len = &a->prompt_len, .cursor = &a->prompt_cursor,
-            .sel_anchor = &a->prompt_sel_anchor,
-        };
-        input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
-    }
+    input_render_selection(a, &f, tx, in_r.y + (in_h - sz_y) / 2, sz_y);
     if (a->prompt_len > 0)
         font_draw_line(a->font_ide, a->prompt_text, a->prompt_len, tx, ty, a->fg);
     int cw = font_measure(a->font_ide, a->prompt_text, a->prompt_cursor);
@@ -5182,6 +5203,7 @@ static bool app_prompt_modal(App* a, const char* title, const char* desc,
     a->prompt_len        = (int)strlen(a->prompt_text);
     a->prompt_cursor     = a->prompt_len;
     a->prompt_sel_anchor = a->prompt_len > 0 ? 0 : -1;   /* type to replace */
+    a->prompt_scroll_x   = 0;
     a->prompt_choice     = -1;
     a->prompt_hover      = 0;
     a->prompt_err_text[0] = 0;
@@ -13412,6 +13434,7 @@ static void settings_open (App* a)
     a->settings_active   = true;
     a->settings_selected = 0;
     a->settings_hover    = -1;
+    a->settings_scroll   = 0;
     /* Re-sync the font index in case cfg_font_path was changed elsewhere. */
     int i = font_choice_find(a->cfg_font_path);
     if (i >= 0) a->settings_font_idx = i;
@@ -13719,6 +13742,107 @@ static int settings_val_x_off (const App* a)
 }
 static int settings_box_x     (const App* a) { return (a->win_w - settings_box_w(a)) / 2; }
 
+/* Whole-panel geometry, derived once and shared by the renderer, the
+ * hit-test, the scrollbar and ensure-visible so they can never disagree.
+ *
+ * The card used to grow with SET_COUNT without ever consulting the window,
+ * so on a short window the tail of the list (and the hint) simply fell off
+ * the bottom edge with no way to reach it. It is capped at the window
+ * height now, and the rows scroll inside [rows_top, rows_bot). */
+typedef struct {
+    SDL_Rect box;
+    int row_h;
+    int rows_top, rows_bot;   /* visible band of the row list, screen px */
+    int content_h;            /* row_h * SET_COUNT                       */
+    int hint_lines;
+} SettingsGeom;
+
+/* The hint under the rows. Font rows get a longer contextual one, which may
+ * wrap to two lines inside a narrow window — hence the measure below. */
+static const char* settings_hint_str(const App* a)
+{
+    bool on_font_row = (a->settings_selected == SET_FONT ||
+                        a->settings_selected == SET_FONT_IDE ||
+                        a->settings_selected == SET_FONT_MONO);
+    return on_font_row
+        ? "Up/Dn navigate  -  Left/Right cycle  -  Enter: pick custom â¦  -  Esc save & close"
+        : "Up/Dn navigate  -  Left/Right change  -  Esc save & close";
+}
+
+/* Fills `g` and clamps a->settings_scroll to what the panel can actually
+ * show (persisting the clamp, so every later caller sees a sane offset). */
+static void settings_geom(App* a, SettingsGeom* g)
+{
+    g->row_h = font_line_height(a->font_ide) + 8;
+    int box_w = settings_box_w(a);
+
+    g->hint_lines = wrap_text(a, a->font_ide, settings_hint_str(a), 0, 0,
+                              box_w - 32, g->row_h,
+                              (SDL_Color){0, 0, 0, 0}, false);
+    if (g->hint_lines < 1) g->hint_lines = 1;
+
+    /* Everything that isn't a row: title line, the hint line(s), and the
+     * 10 px top / 18 px bottom padding the layout has always used. */
+    int chrome_h = g->row_h * (1 + g->hint_lines) + 28;
+    g->content_h = g->row_h * SET_COUNT;
+
+    int box_h     = chrome_h + g->content_h;
+    int max_box_h = a->win_h - SETTINGS_BOX_Y - 20;
+    /* Never squeeze below one visible row, however short the window is. */
+    if (max_box_h < chrome_h + g->row_h) max_box_h = chrome_h + g->row_h;
+    if (box_h > max_box_h) box_h = max_box_h;
+
+    g->box      = (SDL_Rect){ settings_box_x(a), SETTINGS_BOX_Y, box_w, box_h };
+    g->rows_top = g->box.y + 10 + g->row_h;
+    g->rows_bot = g->box.y + box_h - g->row_h * g->hint_lines - 18;
+
+    int max_sc = g->content_h - (g->rows_bot - g->rows_top);
+    if (max_sc < 0) max_sc = 0;
+    if (a->settings_scroll > max_sc) a->settings_scroll = max_sc;
+    if (a->settings_scroll < 0)      a->settings_scroll = 0;
+}
+
+/* Clamp the row scroll to what the panel can show. settings_geom does the
+ * work; this is for call sites that only want the side effect. */
+static void settings_clamp_scroll(App* a)
+{
+    SettingsGeom g;
+    settings_geom(a, &g);
+}
+
+/* True when rows are hidden above or below the visible band. */
+static bool settings_overflows(App* a)
+{
+    SettingsGeom g; settings_geom(a, &g);
+    return g.content_h > (g.rows_bot - g.rows_top);
+}
+
+static int settings_scrollbar_geom(App* a, SDL_Rect* track, SDL_Rect* thumb)
+{
+    SettingsGeom g; settings_geom(a, &g);
+    return overlay_list_scrollbar_geom(g.box.x, g.box.w,
+                                       g.rows_top, g.rows_bot,
+                                       g.content_h, a->settings_scroll,
+                                       track, thumb);
+}
+
+/* Keep the selected row inside the visible band — otherwise Up/Dn walks the
+ * selection straight off the panel in a short window. */
+static void settings_ensure_selected_visible(App* a)
+{
+    SettingsGeom g; settings_geom(a, &g);
+    int view_h = g.rows_bot - g.rows_top;
+    int y      = a->settings_selected * g.row_h;
+    if (y < a->settings_scroll)
+        a->settings_scroll = y;
+    else if (y + g.row_h > a->settings_scroll + view_h)
+        a->settings_scroll = y + g.row_h - view_h;
+    int max_sc = g.content_h - view_h;
+    if (max_sc < 0) max_sc = 0;
+    if (a->settings_scroll > max_sc) a->settings_scroll = max_sc;
+    if (a->settings_scroll < 0)      a->settings_scroll = 0;
+}
+
 /* Hit-test the settings overlay: which row (and what part) is at (mx, my)?
  * Returns:
  *   row    >= 0  if cursor is inside a row; -1 if outside the rows
@@ -13726,21 +13850,17 @@ static int settings_box_x     (const App* a) { return (a->win_w - settings_box_w
  *                  chevron / right half, 'B' for the row body (label/value).
  *   inside_box   — set to true if the cursor is inside the box (so the
  *                  caller knows whether a click should close the overlay). */
-static int settings_hit_test(const App* a, int mx, int my,
+static int settings_hit_test(App* a, int mx, int my,
                              char* part, bool* inside_box)
 {
-    int row_h = font_line_height(a->font_ide) + 8;
-    int box_w = settings_box_w(a);
-    int box_h = row_h * (SET_COUNT + 2) + 28;
-    int box_x = settings_box_x(a);
-    int box_y = SETTINGS_BOX_Y;
+    SettingsGeom g; settings_geom(a, &g);
+    int box_x = g.box.x, box_w = g.box.w;
     if (inside_box)
         *inside_box = (mx >= box_x && mx < box_x + box_w &&
-                       my >= box_y && my < box_y + box_h);
-    int rows_top = box_y + 10 + row_h;
+                       my >= g.box.y && my < g.box.y + g.box.h);
     if (mx < box_x + 4 || mx >= box_x + box_w - 4 ||
-        my < rows_top || my >= rows_top + row_h * SET_COUNT) return -1;
-    int r = (my - rows_top) / row_h;
+        my < g.rows_top || my >= g.rows_bot) return -1;
+    int r = (my - g.rows_top + a->settings_scroll) / g.row_h;
     if (r < 0 || r >= SET_COUNT) return -1;
     int val_x = box_x + settings_val_x_off(a);
     int chev  = settings_chev_sz(a);
@@ -13817,45 +13937,38 @@ static void render_settings(App* a)
 
     overlay_backdrop(a);
 
-    int row_h = font_line_height(a->font_ide) + 8;
-    int box_w = settings_box_w(a);
-    /* Pre-measure the hint so we can reserve the right number of lines.
-     * The font rows get a longer contextual hint and may wrap to 2 rows
-     * inside narrow windows. */
-    bool on_font_row = (a->settings_selected == SET_FONT ||
-                        a->settings_selected == SET_FONT_IDE ||
-                        a->settings_selected == SET_FONT_MONO);
-    const char* hint = on_font_row
-        ? "Up/Dn navigate  -  Left/Right cycle  -  Enter: pick custom \xe2\x80\xa6  -  Esc save & close"
-        : "Up/Dn navigate  -  Left/Right change  -  Esc save & close";
-    int hint_lines = wrap_text(a, a->font_ide, hint, 0, 0,
-                               box_w - 32, row_h,
-                               (SDL_Color){0,0,0,0}, false);
-    if (hint_lines < 1) hint_lines = 1;
-    int box_h = row_h * (SET_COUNT + 1 + hint_lines) + 28;
-    int box_x = settings_box_x(a);
-    int box_y = SETTINGS_BOX_Y;
+    SettingsGeom g;
+    settings_geom(a, &g);
+    const char* hint = settings_hint_str(a);
+    int row_h = g.row_h;
+    int box_x = g.box.x, box_y = g.box.y, box_w = g.box.w;
     int chev  = settings_chev_sz(a);
 
-    SDL_Rect box = { box_x, box_y, box_w, box_h };
-    overlay_card(a, box);
+    overlay_card(a, g.box);
 
-    int y = box_y + 10;
     /* Title */
     {
         const char* title = "Settings";
         font_draw_line(a->font_ide, title, strlen(title),
-                       box_x + 16, y + font_ascent(a->font_ide), a->fg_link);
+                       box_x + 16, box_y + 10 + font_ascent(a->font_ide),
+                       a->fg_link);
     }
-    y += row_h;
-    SDL_Rect div = { box_x + 8, y - 2, box_w - 16, 1 };
+    SDL_Rect div = { box_x + 8, g.rows_top - 2, box_w - 16, 1 };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 100);
     SDL_RenderFillRect(a->renderer, &div);
 
     int val_x = box_x + settings_val_x_off(a);
 
-    for (int r = 0; r < SET_COUNT; ++r) {
+    /* Rows scroll inside the band, clipped so a partly-visible row is cut
+     * at the edge instead of spilling over the hint or the card border. */
+    SDL_Rect rows_clip = { box_x + 4, g.rows_top,
+                           box_w - 8, g.rows_bot - g.rows_top };
+    SDL_RenderSetClipRect(a->renderer, &rows_clip);
+
+    int y = g.rows_top - a->settings_scroll;
+    for (int r = 0; r < SET_COUNT; ++r, y += row_h) {
+        if (y + row_h <= g.rows_top || y >= g.rows_bot) continue;
         bool sel   = (r == a->settings_selected);
         bool hover = (r == a->settings_hover) && !sel;
         if (sel || hover) {
@@ -13889,14 +14002,19 @@ static void render_settings(App* a)
         SDL_Color val_c = sel ? a->fg_link : a->fg;
         font_draw_line(a->font_ide, val, strlen(val),
                        val_x, y + font_ascent(a->font_ide) + 2, val_c);
-        y += row_h;
     }
+    SDL_RenderSetClipRect(a->renderer, NULL);
 
-    /* Hint line(s) — pre-measured above so box_h already reserved enough
-     * vertical room. wrap_text handles single-line and multi-line cases. */
-    y += 4;
+    SDL_Rect sb_track, sb_thumb;
+    if (settings_scrollbar_geom(a, &sb_track, &sb_thumb))
+        overlay_scrollbar_draw(a, &sb_track, &sb_thumb,
+                               a->sb_drag == SB_SETTINGS);
+
+    /* Hint line(s) — settings_geom reserved the rows for them, so they
+     * always land inside the card however short the window is. */
     wrap_text(a, a->font_ide, hint,
-              box_x + 16, y, box_w - 32, row_h, a->fg_muted, true);
+              box_x + 16, g.rows_bot + 4, box_w - 32, row_h,
+              a->fg_muted, true);
 }
 
 /* ----------------------------- color picker ----------------------------- */
@@ -21352,6 +21470,14 @@ static void app_event(App* a, const SDL_Event* e)
                         got = true;
                     }
                     break;
+                case SB_SETTINGS:
+                    if (settings_scrollbar_geom(a, &track, &thumb)) {
+                        SettingsGeom sg; settings_geom(a, &sg);
+                        scroll = &a->settings_scroll;
+                        content_h = sg.content_h;
+                        got = true;
+                    }
+                    break;
                 default:
                     break;
                 }
@@ -21921,6 +22047,13 @@ static void app_event(App* a, const SDL_Event* e)
             if (a->settings_active && !a->keybind_active && !a->picker_active &&
                 e->button.button == SDL_BUTTON_LEFT)
             {
+                SettingsGeom sg; settings_geom(a, &sg);
+                SDL_Rect strack, sthumb;
+                if (settings_scrollbar_geom(a, &strack, &sthumb) &&
+                    overlay_scrollbar_handle_click(a, e->button.x, e->button.y,
+                        &strack, &sthumb, SB_SETTINGS,
+                        &a->settings_scroll, sg.content_h, sg.row_h))
+                    break;
                 bool inside = false;
                 char part = 'B';
                 int r = settings_hit_test(a, e->button.x, e->button.y,
@@ -22241,6 +22374,16 @@ static void app_event(App* a, const SDL_Event* e)
              * Skipped while a sub-overlay (keybind / picker) is layered over
              * settings — the wheel belongs to that overlay, not us. */
             if (a->settings_active && !a->keybind_active && !a->picker_active) {
+                /* Once the list is taller than the panel the wheel does the
+                 * obvious thing and scrolls it — Shift+wheel still adjusts
+                 * the row under the cursor. When everything fits there is
+                 * nothing to scroll, so the wheel adjusts as it always has. */
+                if (settings_overflows(a) &&
+                    !(SDL_GetModState() & KMOD_SHIFT)) {
+                    a->settings_scroll -= e->wheel.y * 40;
+                    settings_clamp_scroll(a);
+                    break;
+                }
                 int r = settings_hit_test(a, mx, my, NULL, NULL);
                 if (r < 0) r = a->settings_selected;
                 if (r >= 0 && r < SET_COUNT) {
@@ -23017,11 +23160,13 @@ static void app_event(App* a, const SDL_Event* e)
                 if (k == SDLK_ESCAPE) { settings_close(a); break; }
                 if (k == SDLK_DOWN) {
                     a->settings_selected = (a->settings_selected + 1) % SET_COUNT;
+                    settings_ensure_selected_visible(a);
                     break;
                 }
                 if (k == SDLK_UP) {
                     a->settings_selected =
                         (a->settings_selected - 1 + SET_COUNT) % SET_COUNT;
+                    settings_ensure_selected_visible(a);
                     break;
                 }
                 if (k == SDLK_LEFT) {

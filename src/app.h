@@ -432,6 +432,7 @@ typedef struct {
     int      prompt_len;
     int      prompt_cursor;
     int      prompt_sel_anchor;
+    int      prompt_scroll_x;        /* px the text is shifted left      */
     int      prompt_choice;          /* -1 pending, 0 = OK, 1 = Cancel  */
     int      prompt_hover;           /* 0 = OK, 1 = Cancel, -1 = none   */
     char     prompt_err_text[200];   /* validation error, empty = none  */
@@ -476,6 +477,7 @@ typedef struct {
     int      tinput_renpop_len;
     int      tinput_renpop_cursor;
     int      tinput_renpop_sel_anchor; /* -1 = no selection               */
+    int      tinput_renpop_scroll_x;   /* px the text is shifted left     */
     int      tinput_renpop_choice;     /* -1 pending, 0 = OK, 1 = Cancel  */
     int      tinput_renpop_hover;      /* 0 = OK, 1 = Cancel, -1 = none   */
     bool     tinput_renpop_err;
@@ -487,6 +489,11 @@ typedef struct {
     int      tinput_len;
     int      tinput_cursor;          /* caret position within tinput_text */
     int      tinput_sel_anchor;      /* -1 = no selection                */
+    /* Horizontal scroll of the one-line input, in px: how far its text is
+     * shifted left so the caret stays inside the field on long paths.
+     * Recomputed from the caret every frame, kept here so a caret that's
+     * already visible doesn't drag the view around. */
+    int      tinput_scroll_x;
     /* Dir-listing for the modal so Save/Rename/New show actual files
      * in the target directory. tinput_files entries are heap-allocated
      * basenames; freed when the modal closes. */
@@ -510,7 +517,7 @@ typedef struct {
      * and the y-offset within the thumb when the drag started. */
     enum { SB_NONE = 0, SB_DOC, SB_KEYBIND, SB_OUTLINE_PANEL,
            SB_VSEARCH, SB_OUTLINE_LIST, SB_BACKLINKS, SB_TAGS, SB_PICKER,
-           SB_CMDP, SB_TINPUT, SB_DOC_H, SB_PREVIEW_TABLE }
+           SB_CMDP, SB_TINPUT, SB_DOC_H, SB_PREVIEW_TABLE, SB_SETTINGS }
                                                               sb_drag;
     int      sb_drag_offset;
 
@@ -522,6 +529,10 @@ typedef struct {
     int      settings_font_idx_ide;  /* IDE chrome    — index into g_font_choices */
     int      settings_font_idx_mono; /* editor / mono — index into g_font_choices */
     int      settings_theme_idx;     /* index into g_themes */
+    /* Vertical scroll of the settings row list, in px. The card is capped
+     * at the window height, so in a short window the rows that don't fit
+     * scroll inside it instead of running off the bottom edge. */
+    int      settings_scroll;
 
     /* Keybindings overlay (F1) state — also serves as the help surface;
      * the standalone Help overlay was merged into it. */
