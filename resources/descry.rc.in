@@ -1,0 +1,52 @@
+/* Windows resource script — CMake generates the real .rc into the build tree
+ * from this template (see CMakeLists.txt) so the VERSIONINFO block can never
+ * drift from the DESCRY_VERSION define in src/main.c.  The icon and manifest
+ * are named by absolute path because the generated file no longer sits next
+ * to them.
+ *
+ * The VERSIONINFO block is not decoration.  An unsigned executable carrying
+ * no company, product, description or version metadata is one of the cheap
+ * features Windows Defender's ML classifier weighs when it decides an unknown
+ * binary looks like malware, and a bare descry.exe was being quarantined as
+ * Trojan:Win32/Bearfoos.A!ml.  Filling the block in costs nothing and removes
+ * that signal.  ASCII only: windres reads this file in the build machine's
+ * code page, so non-ASCII text here comes out as mojibake in Explorer. */
+
+IDI_ICON1 ICON "@DESCRY_RES_DIR@/descry.ico"
+
+/* Application manifest (activeCodePage=UTF-8, supported OS list) — see
+ * descry.manifest. 24 == RT_MANIFEST, 1 == CREATEPROCESS_MANIFEST_RESOURCE_ID.
+ * ld skips MinGW's default-manifest.o when the objects already carry one. */
+1 24 "@DESCRY_RES_DIR@/descry.manifest"
+
+/* 1 == VS_VERSION_INFO.  The numeric quads are what Explorer sorts and
+ * compares on; the string block is what its Details tab shows. */
+1 VERSIONINFO
+FILEVERSION    @DESCRY_VERSION_MAJOR@,@DESCRY_VERSION_MINOR@,@DESCRY_VERSION_PATCH@,0
+PRODUCTVERSION @DESCRY_VERSION_MAJOR@,@DESCRY_VERSION_MINOR@,@DESCRY_VERSION_PATCH@,0
+FILEFLAGSMASK  0x3fL
+FILEFLAGS      0x0L
+FILEOS         0x40004L   /* VOS_NT_WINDOWS32 */
+FILETYPE       0x1L       /* VFT_APP */
+FILESUBTYPE    0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"      /* US English (0x409), Unicode code page (1200) */
+    BEGIN
+      VALUE "CompanyName",      "Fezcode"
+      VALUE "FileDescription",  "Descry - markdown notebook and editor"
+      VALUE "FileVersion",      "@DESCRY_VERSION@.0"
+      VALUE "InternalName",     "descry"
+      VALUE "LegalCopyright",   "Copyright (c) 2026 Fezcode. MIT licensed."
+      VALUE "OriginalFilename", "descry.exe"
+      VALUE "ProductName",      "Descry"
+      VALUE "ProductVersion",   "@DESCRY_VERSION@"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    /* Must agree with the StringFileInfo block name above. */
+    VALUE "Translation", 0x409, 1200
+  END
+END

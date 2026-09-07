@@ -31,6 +31,12 @@
     Configure with -DDESCRY_TESTS=ON (reconfiguring if the cache disagrees),
     build the unit-test executables and run them with ctest.
 
+.PARAMETER Sign
+    Authenticode-sign build\descry.exe through tools\sign.ps1 (and the installer
+    too, with -Installer). Needs DESCRY_SIGN_THUMBPRINT or DESCRY_SIGN_PFX in the
+    environment; see tools\make-dev-cert.ps1 for a local certificate. Unsigned
+    builds are the main reason Defender quarantines a fresh descry.exe.
+
 .PARAMETER MingwBin
     Path to the MSYS2 mingw64 bin directory. Auto-detected when omitted.
 
@@ -55,6 +61,7 @@ param(
     [switch]$Run,
     [switch]$Installer,
     [switch]$Tests,
+    [switch]$Sign,
     [string]$MingwBin
 )
 
@@ -135,6 +142,12 @@ $exe = Join-Path $buildDir "descry.exe"
 if (-not (Test-Path $exe)) { throw "build reported success but $exe is missing." }
 Write-Host "Built: $exe" -ForegroundColor Green
 
+# --- optional: code signing ----------------------------------------------
+if ($Sign) {
+    & (Join-Path $root "tools\sign.ps1") -Required $exe
+    if ($LASTEXITCODE -ne 0) { throw "signing failed ($LASTEXITCODE)" }
+}
+
 # --- optional: unit tests ------------------------------------------------
 if ($Tests) {
     Write-Host "Running unit tests (ctest) ..." -ForegroundColor Green
@@ -145,7 +158,7 @@ if ($Tests) {
 # --- optional: installer -------------------------------------------------
 if ($Installer) {
     Write-Host "Building installer ..." -ForegroundColor Green
-    & (Join-Path $root "build_installer.ps1")
+    & (Join-Path $root "build_installer.ps1") -Sign:$Sign
     if ($LASTEXITCODE -ne 0) { throw "installer build failed ($LASTEXITCODE)" }
 }
 

@@ -145,6 +145,40 @@ ninja -C build
 ./build/descry.exe
 ```
 
+`build.ps1` wraps the same two commands and additionally bundles the MinGW
+runtime DLLs next to the exe; `build.ps1 -Installer` packages
+`dist/Descry-Setup-<version>.exe`.
+
+#### Windows Defender false positives
+
+A freshly built `descry.exe` can be quarantined as
+`Trojan:Win32/Bearfoos.A!ml`. The `!ml` suffix means a machine-learning
+verdict rather than a signature match, and `Bearfoos.A` is Defender's
+catch-all bucket for unsigned binaries it has never seen before. Descry is
+clean — VirusTotal agrees — but a brand-new unsigned build starts from zero
+reputation, so the build is set up to give the classifier as little to work
+with as possible:
+
+- `resources/descry.rc.in` stamps a full `VERSIONINFO` block (company,
+  product, description, version) into the exe, generated from the
+  `DESCRY_VERSION` define in `src/version.h` so it cannot drift.
+- The exe links with `--dynamicbase --high-entropy-va --nxcompat`, so it
+  opts into ASLR and DEP instead of shipping with MinGW's defaults off.
+- `lua_host_create()` removes `os.execute`, `os.exit`, `io.popen` and
+  `package.loadlib` from the plugin sandbox, so the embedded interpreter
+  cannot spawn processes or load native code.
+- The Forge installer is no longer built stripped (`-s -w`).
+
+The durable fix is a code-signing certificate. `tools/sign.ps1` signs
+whatever you point it at when `DESCRY_SIGN_THUMBPRINT` or
+`DESCRY_SIGN_PFX` is set in the environment, and `build.ps1 -Sign` routes
+the exe (and the installer, with `-Installer`) through it. For local work
+only, `tools/make-dev-cert.ps1` mints a self-signed certificate and trusts
+it on this machine; that helps nobody else's computer. If Defender is
+eating your builds mid-iteration, run `tools/dev-defender-setup.ps1` from
+an elevated shell — it restores what was quarantined and excludes `build/`,
+`dist/` and the install directory.
+
 ### macOS (Homebrew)
 
 Apple Silicon and Intel both work; the app renders crisp on Retina and
@@ -236,6 +270,8 @@ src/             - C sources (single-binary)
   tabs.c/h       - open-file tab list + park/restore
 data/            - default vault: sample notes, init.lua, plugins/
 vendor/          - lua 5.4, md4c, nanosvg
+resources/       - .ico, manifest, descry.rc.in (VERSIONINFO template)
+tools/           - sign.ps1, make-dev-cert.ps1, dev-defender-setup.ps1
 ```
 
 ---

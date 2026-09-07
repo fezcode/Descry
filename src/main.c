@@ -9,6 +9,7 @@
 #include "markdown.h"
 #include "regex.h"
 #include "vault.h"
+#include "version.h"
 
 #include <md4c-html.h>
 
@@ -127,7 +128,6 @@ static void resolve_data_paths(void)
     }
 }
 
-#define DESCRY_VERSION "0.86.1"
 #define MARGIN_X         36     /* doc inner padding; bumped for breathing room */
 #define MARGIN_Y         20
 #define INDENT_PX        22
@@ -11045,6 +11045,28 @@ static int ctx_menu_w   (const App* a)
     return w;
 }
 
+/* Bottom edge any popup may reach. The status bar is painted *after* the
+ * context menu (render_status runs last in render_frame), so a menu that
+ * extends past its top edge simply disappears under it — clamp to the top of
+ * the status bar, not to the window bottom. */
+static int ctx_menu_bottom_limit(const App* a)
+{
+    return a->win_h - status_bar_h(a) - 4;
+}
+
+/* Nudge an open popup back inside the visible area. Shared by every
+ * ctx_menu_open_* variant so they can't drift apart. */
+static void ctx_menu_clamp(App* a)
+{
+    int w   = ctx_menu_w(a);
+    int h   = ctx_menu_row_h(a) * ctx_visible_count(a) + 8;
+    int bot = ctx_menu_bottom_limit(a);
+    if (a->ctx_menu_x + w > a->win_w - 4) a->ctx_menu_x = a->win_w - 4 - w;
+    if (a->ctx_menu_y + h > bot)          a->ctx_menu_y = bot - h;
+    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
+    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+}
+
 static void ctx_menu_open(App* a, int x, int y, int target_idx)
 {
     a->ctx_menu_active = true;
@@ -11056,15 +11078,7 @@ static void ctx_menu_open(App* a, int x, int y, int target_idx)
     /* Reset open-anim and per-row hover state so we get a fresh fade-in. */
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
-    /* Keep popup on-screen. */
-    int rh = ctx_menu_row_h(a);
-    int h  = rh * ctx_visible_count(a) + 8;
-    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
-        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
-    if (a->ctx_menu_y + h > a->win_h - 4)
-        a->ctx_menu_y = a->win_h - 4 - h;
-    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
-    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+    ctx_menu_clamp(a);
 }
 
 static void ctx_menu_open_editor(App* a, int x, int y)
@@ -11077,14 +11091,7 @@ static void ctx_menu_open_editor(App* a, int x, int y)
     a->ctx_menu_hover  = 0;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
-    int rh = ctx_menu_row_h(a);
-    int h  = rh * ctx_visible_count(a) + 8;
-    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
-        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
-    if (a->ctx_menu_y + h > a->win_h - 4)
-        a->ctx_menu_y = a->win_h - 4 - h;
-    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
-    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+    ctx_menu_clamp(a);
 }
 
 static void ctx_menu_open_preview(App* a, int x, int y, size_t doc_off)
@@ -11098,14 +11105,7 @@ static void ctx_menu_open_preview(App* a, int x, int y, size_t doc_off)
     a->ctx_menu_preview_doc_off = doc_off;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
-    int rh = ctx_menu_row_h(a);
-    int h  = rh * ctx_visible_count(a) + 8;
-    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
-        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
-    if (a->ctx_menu_y + h > a->win_h - 4)
-        a->ctx_menu_y = a->win_h - 4 - h;
-    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
-    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+    ctx_menu_clamp(a);
 }
 
 /* Open a title-bar dropdown menu. menu_idx is 0..3 (File/Edit/View/Help). */
@@ -11119,14 +11119,7 @@ static void ctx_menu_open_menu(App* a, int menu_idx, int x, int y)
     a->ctx_menu_hover  = 0;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
-    int rh = ctx_menu_row_h(a);
-    int h  = rh * ctx_visible_count(a) + 8;
-    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
-        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
-    if (a->ctx_menu_y + h > a->win_h - 4)
-        a->ctx_menu_y = a->win_h - 4 - h;
-    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
-    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+    ctx_menu_clamp(a);
 }
 
 /* Right-click on a tab. target = tab index. */
@@ -11140,14 +11133,7 @@ static void ctx_menu_open_tab(App* a, int x, int y, int tab_idx)
     a->ctx_menu_hover  = 0;
     a->ctx_menu_open_t = 0.0f;
     for (int r = 0; r < 16; ++r) a->ctx_menu_row_t[r] = 0.0f;
-    int rh = ctx_menu_row_h(a);
-    int h  = rh * ctx_visible_count(a) + 8;
-    if (a->ctx_menu_x + ctx_menu_w(a) > a->win_w - 4)
-        a->ctx_menu_x = a->win_w - 4 - ctx_menu_w(a);
-    if (a->ctx_menu_y + h > a->win_h - 4)
-        a->ctx_menu_y = a->win_h - 4 - h;
-    if (a->ctx_menu_x < 4) a->ctx_menu_x = 4;
-    if (a->ctx_menu_y < 4) a->ctx_menu_y = 4;
+    ctx_menu_clamp(a);
 }
 
 static void ctx_menu_close(App* a) {
@@ -11201,7 +11187,8 @@ static SDL_Rect submenu_box_rect(const App* a)
     /* Flip to the left if the submenu would overflow the right edge. */
     if (x + w > a->win_w - 4) x = a->ctx_menu_x - w + 2;
     if (x < 4) x = 4;
-    if (y + h > a->win_h - 4) y = a->win_h - 4 - h;
+    int bot = ctx_menu_bottom_limit(a);
+    if (y + h > bot) y = bot - h;
     if (y < 4) y = 4;
     return (SDL_Rect){ x, y, w, h };
 }

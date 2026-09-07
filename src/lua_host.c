@@ -49,6 +49,17 @@ static LuaHost* host_self(lua_State* L)
     return *(LuaHost**)lua_getextraspace(L);
 }
 
+/* Remove one function from an already-open stdlib table (`os.execute` etc.). */
+static void drop_stdlib_fn(lua_State* L, const char* lib, const char* fn)
+{
+    lua_getglobal(L, lib);
+    if (lua_istable(L, -1)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, fn);
+    }
+    lua_pop(L, 1);
+}
+
 LuaHost* lua_host_create(void)
 {
     LuaHost* h = calloc(1, sizeof *h);
@@ -56,6 +67,26 @@ LuaHost* lua_host_create(void)
     h->current_plugin = -1;
     host_set_self(h->L, h);
     luaL_openlibs(h->L);
+
+    /* Trim the parts of the stdlib an editor plugin has no business reaching.
+     * The documented way for a plugin to touch the disk is `io` plus
+     * descry.vault.* (see docs/plugins.md), and nothing in that surface needs
+     * to spawn a process, load a native DLL, or take the app down:
+     *
+     *   os.execute / io.popen  run an arbitrary shell command
+     *   os.exit                kills the process, unsaved buffers and all
+     *   package.loadlib        loads and calls into an arbitrary DLL
+     *
+     * Beyond being the right sandbox for a plugin host, this is what stops
+     * descry.exe from behaving like the thing Defender's ML classifier says it
+     * is -- an embedded interpreter that executes commands (the detection was
+     * Trojan:Win32/Bearfoos.A!ml). `io.open`, `os.time`, `os.date`, `os.getenv`
+     * and the rest stay: plugins are documented to use them. */
+    drop_stdlib_fn(h->L, "os", "execute");
+    drop_stdlib_fn(h->L, "os", "exit");
+    drop_stdlib_fn(h->L, "io", "popen");
+    drop_stdlib_fn(h->L, "package", "loadlib");
+
     return h;
 }
 

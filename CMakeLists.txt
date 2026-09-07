@@ -13,6 +13,27 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# --- version ------------------------------------------------------------
+# src/version.h owns the version string (it is what the title bar, the About box
+# and the Lua `descry.version` field read). Parse it back out here instead of
+# writing it down a second time, so the Windows VERSIONINFO resource cannot
+# drift from the running app. CMAKE_CONFIGURE_DEPENDS re-runs configure when the
+# header changes, so bumping the version regenerates the resource.
+set(DESCRY_VERSION_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${DESCRY_VERSION_HEADER}")
+file(STRINGS "${DESCRY_VERSION_HEADER}" _descry_version_line
+     REGEX "^#define[ \t]+DESCRY_VERSION[ \t]+\"[0-9]+\\.[0-9]+\\.[0-9]+\"")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" DESCRY_VERSION "${_descry_version_line}")
+if(NOT DESCRY_VERSION)
+  message(FATAL_ERROR "could not parse DESCRY_VERSION out of ${DESCRY_VERSION_HEADER}")
+endif()
+string(REPLACE "." ";" _descry_version_parts "${DESCRY_VERSION}")
+list(GET _descry_version_parts 0 DESCRY_VERSION_MAJOR)
+list(GET _descry_version_parts 1 DESCRY_VERSION_MINOR)
+list(GET _descry_version_parts 2 DESCRY_VERSION_PATCH)
+message(STATUS "Descry version: ${DESCRY_VERSION}")
+
 # --- vendored Lua 5.4 (no upstream CMake; we ship our own next to it) ----
 add_subdirectory(vendor/lua)
 
@@ -77,11 +98,26 @@ endif()
 if(WIN32)
   # comdlg32: native file dialogs.  wininet: GET remote images in preview.
   target_link_libraries(descry PRIVATE comdlg32 wininet)
-  # Embed the multi-size .ico into the exe so Explorer + taskbar pick it
-  # up automatically. CMake's RC language drives windres on MinGW; the
-  # .rc references descry.ico relative to its own directory.
+  # Embed the multi-size .ico, the manifest and a VERSIONINFO block into the
+  # exe. CMake's RC language drives windres on MinGW. The .rc is generated
+  # from resources/descry.rc.in so VERSIONINFO tracks DESCRY_VERSION; because
+  # the generated file lands in the build tree, the template names the .ico
+  # and .manifest by absolute path via DESCRY_RES_DIR.
   enable_language(RC)
-  target_sources(descry PRIVATE resources/descry.rc)
+  set(DESCRY_RES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
+  configure_file(resources/descry.rc.in "${CMAKE_CURRENT_BINARY_DIR}/descry.rc" @ONLY)
+  target_sources(descry PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/descry.rc")
+
+  # PE hardening. MinGW's ld leaves DEP/ASLR off by default, which is both a
+  # real weakness and a feature Defender's ML classifier reads as "not built
+  # like modern software" -- a bare descry.exe was being quarantined as
+  # Trojan:Win32/Bearfoos.A!ml. --dynamicbase keeps the base relocation table
+  # so the loader can actually rebase us, --high-entropy-va opts into the full
+  # 64-bit address space, --nxcompat marks the image DEP-compatible.
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(descry PRIVATE
+      -Wl,--dynamicbase -Wl,--high-entropy-va -Wl,--nxcompat)
+  endif()
 
   # Bundle the MinGW64 runtime DLLs (SDL2, freetype, harfbuzz, etc. and
   # all their transitive deps) next to the exe so the build dir is
@@ -113,11 +149,13 @@ if(DESCRY_TESTS)
   add_executable(test_markdown tests/test_markdown.c src/markdown.c)
   add_executable(test_graph tests/test_graph.c src/graph.c)
   add_executable(test_inputfield tests/test_inputfield.c src/inputfield.c)
+  add_executable(test_lua_sandbox tests/test_lua_sandbox.c src/lua_host.c)
   target_link_libraries(test_icons PRIVATE m)
   target_link_libraries(test_markdown PRIVATE md4c)
   target_link_libraries(test_graph PRIVATE m)
+  target_link_libraries(test_lua_sandbox PRIVATE lua_static)
   foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
-            test_inputfield)
+            test_inputfield test_lua_sandbox)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -133,4 +171,5 @@ if(DESCRY_TESTS)
   add_test(NAME markdown COMMAND test_markdown)
   add_test(NAME graph COMMAND test_graph)
   add_test(NAME inputfield COMMAND test_inputfield)
+  add_test(NAME lua_sandbox COMMAND test_lua_sandbox)
 endif()
