@@ -7,6 +7,6 @@
  * it in CMAKE_CONFIGURE_DEPENDS so a bump here regenerates that resource on the
  * next build. Keeping the define in its own header is what makes that cheap --
  * a configure dependency on main.c would re-run CMake on every edit to it. */
-#define DESCRY_VERSION "0.87.0"
+#define DESCRY_VERSION "0.88.0"
 
 #endif /* DESCRY_VERSION_H */

@@ -8,6 +8,7 @@
 #include "macos_menu.h"
 #include "markdown.h"
 #include "regex.h"
+#include "svg_extra.h"
 #include "vault.h"
 #include "version.h"
 
@@ -1526,6 +1527,11 @@ static int app_reload_fonts(App* a)
     FontStyle sb = (FontStyle)(a->cfg_font_style      & 3);
     FontStyle si = (FontStyle)(a->cfg_font_style_ide  & 3);
     FontStyle sm = (FontStyle)(a->cfg_font_style_mono & 3);
+
+    /* Last-resort face for SVG <text> whose font-family names nothing this
+     * machine ships -- svg_extra.c has a per-OS table for the usual suspects
+     * but nothing to fall back on beyond it. */
+    svg_extra_set_fallback_font(fp);
 
     a->font_ide               = font_create(a->renderer, fpi, sz, si);
     a->font_body              = font_create(a->renderer, fp, sz,  sb);
@@ -6649,6 +6655,7 @@ static void app_shutdown(App* a)
     if (a->font_code_bold)        font_destroy(a->font_code_bold);
     if (a->font_code_italic)      font_destroy(a->font_code_italic);
     if (a->font_code_bold_italic) font_destroy(a->font_code_bold_italic);
+    svg_extra_shutdown();
     if (a->lua)                   lua_host_destroy(a->lua);
     if (a->renderer)              SDL_DestroyRenderer(a->renderer);
     if (a->window)                SDL_DestroyWindow(a->window);

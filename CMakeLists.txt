@@ -67,6 +67,7 @@ add_executable(descry
   src/regex.c
   src/reveal.c
   src/spell.c
+  src/svg_extra.c
   src/tabs.c
   src/vault.c
 )
@@ -138,7 +139,8 @@ endif()
 # Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips and
 # tab-strip scroll math, the hoswl.h (Hisashi menubar client) DSL compiler /
 # click parser, the icon_raster.c SVG -> RGBA pipeline (supersampling,
-# knockouts), and the reveal.c file-manager command builders.
+# knockouts), the reveal.c file-manager command builders, and the svg_extra.c
+# harvest of the <text>/<image>/<clipPath> elements nanosvg ignores.
 option(DESCRY_TESTS "Build unit tests" OFF)
 if(DESCRY_TESTS)
   enable_testing()
@@ -150,12 +152,19 @@ if(DESCRY_TESTS)
   add_executable(test_graph tests/test_graph.c src/graph.c)
   add_executable(test_inputfield tests/test_inputfield.c src/inputfield.c)
   add_executable(test_lua_sandbox tests/test_lua_sandbox.c src/lua_host.c)
+  # svg_extra.c carries the renderer as well as the parser under test, so it
+  # needs the font stack and the nanosvg implementation (in icon_raster.c) to
+  # link even though these tests only exercise the pure parsing half.
+  add_executable(test_svg_extra tests/test_svg_extra.c src/svg_extra.c
+                 src/icon_raster.c)
   target_link_libraries(test_icons PRIVATE m)
+  target_link_libraries(test_svg_extra PRIVATE
+                        PkgConfig::FREETYPE PkgConfig::HARFBUZZ m)
   target_link_libraries(test_markdown PRIVATE md4c)
   target_link_libraries(test_graph PRIVATE m)
   target_link_libraries(test_lua_sandbox PRIVATE lua_static)
   foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
-            test_inputfield test_lua_sandbox)
+            test_inputfield test_lua_sandbox test_svg_extra)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -172,4 +181,5 @@ if(DESCRY_TESTS)
   add_test(NAME graph COMMAND test_graph)
   add_test(NAME inputfield COMMAND test_inputfield)
   add_test(NAME lua_sandbox COMMAND test_lua_sandbox)
+  add_test(NAME svg_extra COMMAND test_svg_extra)
 endif()

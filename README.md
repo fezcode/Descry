@@ -15,6 +15,11 @@ preview rendering, plugin host — without the Electron tax.
 - **Live preview** of CommonMark via [md4c](https://github.com/mity/md4c)
   — headings, lists, task lists, code fences, block quotes, tables,
   inline styles, links, soft and hard breaks.
+- **Images** in preview — local `png` / `jpg` / `svg`, and `http(s)`
+  URLs fetched on a background thread and cached on disk. SVG goes
+  through nanosvg plus a second pass for the `<text>`, logo `<image>`
+  and rounded-corner `<clipPath>` nanosvg ignores, so a README's
+  shields.io badges keep their labels, logos and corners.
 - **Edit mode** with a real text buffer (undo/redo, multi-byte caret,
   selection, smart Enter for lists, auto-pairs, find/replace). Soft
   word wrap on by default; toggle off (Alt+Z) for a horizontal
@@ -262,7 +267,9 @@ src/             - C sources (single-binary)
   lua_host.c/h   - Lua state, plugin loader, action registry, buffer/
                    vault/event bridge for plugins
   vault.c/h      - recursive directory scan + native dialogs
-  image.c/h      - PNG/JPG decode -> SDL_Texture cache
+  image.c/h      - PNG/JPG/SVG decode -> SDL_Texture cache
+  svg_extra.c/h  - the <text>/<image>/clipPath nanosvg drops, so
+                   README badges render with their labels
   regex.c/h      - in-house regex engine (find/replace)
   mermaid.c/h    - mermaid diagram parse + layout
   graph.c/h      - force-directed wiki-link graph layout

@@ -14,6 +14,8 @@
 #include "nanosvg.h"
 #include "nanosvgrast.h"
 
+#include "svg_extra.h"
+
 #if defined(_WIN32)
   #include <windows.h>
   #include <wininet.h>
@@ -189,14 +191,50 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
     return pixels;
 }
 
+/* Read a whole file. Caller frees. NUL-terminated so parsers that want a
+ * C string (nanosvg) can take it as-is. */
+static char* slurp(const char* path, size_t* out_n)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    /* 32 MB is far past any sane document and keeps a corrupt/hostile file
+     * from asking for an allocation we cannot serve. */
+    if (sz < 0 || sz > 32L * 1024 * 1024) { fclose(f); return NULL; }
+    rewind(f);
+    char* buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = 0;
+    *out_n = n;
+    return buf;
+}
+
 /* SVG → malloc'd RGBA. nanosvg renders vector shapes only: it ignores
  * <script>, CSS, and external references, so there's no remote code
- * execution or hidden network fetch from rasterizing untrusted SVG. */
+ * execution or hidden network fetch from rasterizing untrusted SVG.
+ *
+ * It also ignores <text>, <image> and <clipPath>, which between them are most
+ * of a README badge — svg_extra.c does a second pass over the same source and
+ * composites those onto the buffer nanosvg hands back. */
 static unsigned char* load_svg(const char* path, int* w, int* h)
 {
-    /* nsvgParseFromFile mutates a private copy it reads itself. */
-    NSVGimage* img = nsvgParseFromFile(path, "px", 96.0f);
-    if (!img) return NULL;
+    size_t src_n = 0;
+    char* src = slurp(path, &src_n);
+    if (!src) return NULL;
+
+    /* nsvgParse writes into the string it is given, so it gets the copy. */
+    char* scratch = malloc(src_n + 1);
+    if (!scratch) { free(src); return NULL; }
+    memcpy(scratch, src, src_n + 1);
+    NSVGimage* img = nsvgParse(scratch, "px", 96.0f);
+    free(scratch);
+    if (!img) { free(src); return NULL; }
+
+    SvgExtra* extra = svg_extra_parse(src, src_n);
+    free(src);
 
     int iw = (int)(img->width  + 0.5f);
     int ih = (int)(img->height + 0.5f);
@@ -215,24 +253,27 @@ static unsigned char* load_svg(const char* path, int* w, int* h)
     }
 
     NSVGrasterizer* rast = nsvgCreateRasterizer();
-    if (!rast) { nsvgDelete(img); return NULL; }
+    if (!rast) { nsvgDelete(img); svg_extra_free(extra); return NULL; }
 
     unsigned char* px = calloc((size_t)iw * ih * 4, 1);
-    if (!px) { nsvgDeleteRasterizer(rast); nsvgDelete(img); return NULL; }
+    if (!px) {
+        nsvgDeleteRasterizer(rast); nsvgDelete(img); svg_extra_free(extra);
+        return NULL;
+    }
 
     nsvgRasterize(rast, img, 0, 0, scale, px, iw, ih, iw * 4);
     nsvgDeleteRasterizer(rast);
     nsvgDelete(img);
 
-    /* nanosvg outputs PREMULTIPLIED RGBA; SDL_BLENDMODE_BLEND wants straight
-     * alpha, so un-premultiply (mirrors icons.c). */
-    for (int i = 0; i < iw * ih; ++i) {
-        unsigned char a = px[i*4 + 3];
-        if (a == 0 || a == 255) continue;
-        px[i*4 + 0] = (unsigned char)(px[i*4 + 0] * 255 / a);
-        px[i*4 + 1] = (unsigned char)(px[i*4 + 1] * 255 / a);
-        px[i*4 + 2] = (unsigned char)(px[i*4 + 2] * 255 / a);
-    }
+    /* No un-premultiply pass here: nsvgRasterize ends with its own
+     * nsvg__unpremultiplyAlpha + defringe, so what it hands back is already
+     * the straight alpha SDL_BLENDMODE_BLEND wants. Dividing by alpha a
+     * second time inflated every antialiased edge pixel — for an ordinary
+     * logo it tinted the fringe, and on a badge it pushed the channels past
+     * 255 and wrapped them (a cyan gopher came out green). */
+    if (!svg_extra_empty(extra))
+        svg_extra_render(extra, px, iw, ih, scale);
+    svg_extra_free(extra);
 
     *w = iw; *h = ih;
     return px;
