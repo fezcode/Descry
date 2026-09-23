@@ -6626,6 +6626,7 @@ static void app_shutdown(App* a)
     free(a->hits);
     free(a->sidebar_visible);
     free(a->preview_rows);
+    free(a->pcopy_btns);
     free(a->ptbl_bars);
     for (size_t i = 0; i < a->mmd_cache_count; ++i) {
         free(a->mmd_cache[i].src);
@@ -7261,6 +7262,98 @@ static void ptbl_apply_scroll(App* a, size_t line, int sx, int max_scroll)
     a->doc.lines[line].h_scroll = sx;
 }
 
+/* Copy a preview block to the clipboard. A table copies as its Markdown
+ * source (the full source lines it was parsed from, located through the
+ * src_map), so it pastes back as a table; a code block copies its contents
+ * without the fences. Returns false when there was nothing to copy. */
+static bool preview_copy_block(App* a, size_t i0, size_t i1)
+{
+    if (i0 >= i1 || i1 > a->doc.line_count) return false;
+    const MdLine* first = &a->doc.lines[i0];
+    const MdLine* last  = &a->doc.lines[i1 - 1];
+    char*  out = NULL;
+    size_t n   = 0;
+
+    if (first->kind == LINE_TABLE_HEAD || first->kind == LINE_TABLE_ROW) {
+        size_t lo = first->start, hi = last->start + last->len;
+        size_t s0 = MD_SRC_NONE, s1 = MD_SRC_NONE;
+        for (size_t b = lo; b < hi && b < a->doc.len; ++b)
+            if (a->doc.src_map[b] != MD_SRC_NONE) {
+                if (s0 == MD_SRC_NONE) s0 = a->doc.src_map[b];
+                s1 = a->doc.src_map[b];
+            }
+        if (s0 != MD_SRC_NONE && s1 < a->buf.len && s0 <= s1) {
+            while (s0 > 0 && a->buf.data[s0 - 1] != '\n') s0--;
+            while (s1 < a->buf.len && a->buf.data[s1] != '\n') s1++;
+            if (s1 > s0 && a->buf.data[s1 - 1] == '\r') s1--;
+            n   = s1 - s0;
+            out = malloc(n + 1);
+            if (!out) return false;
+            memcpy(out, a->buf.data + s0, n);
+        }
+    }
+    if (!out) {
+        /* Code block — or a table whose source couldn't be located, which
+         * then copies as tab-separated rows. */
+        size_t cap = 1;
+        for (size_t i = i0; i < i1; ++i) cap += a->doc.lines[i].len + 1;
+        out = malloc(cap);
+        if (!out) return false;
+        for (size_t i = i0; i < i1; ++i) {
+            const MdLine* l = &a->doc.lines[i];
+            if (i > i0) out[n++] = '\n';
+            memcpy(out + n, a->doc.data + l->start, l->len);
+            n += l->len;
+        }
+    }
+    out[n] = 0;
+    SDL_SetClipboardText(out);
+    free(out);
+    a->pcopy_flash_line  = i0;
+    a->pcopy_flash_until = SDL_GetTicks() + 1500;
+    return true;
+}
+
+/* The "Copy" pill at the top-right of a preview table / code block. Shown
+ * while the pointer is over the block (or just after a copy, as "Copied")
+ * so it never sits on top of content permanently; registers its click
+ * rect in pcopy_btns. */
+static void preview_copy_button(App* a, SDL_Rect block, size_t i0, size_t i1)
+{
+    bool flash = a->pcopy_flash_line == i0 &&
+                 !SDL_TICKS_PASSED(SDL_GetTicks(), a->pcopy_flash_until);
+    bool over  = a->pv_mx >= block.x && a->pv_mx < block.x + block.w &&
+                 a->pv_my >= block.y && a->pv_my < block.y + block.h;
+    if (!over && !flash) return;
+
+    Font* f = a->font_ide;
+    const char* label = flash ? "Copied" : "Copy";
+    int tw = font_measure(f, label, strlen(label));
+    int ph = font_line_height(f) + 4;
+    int pw = tw + 16;
+    SDL_Rect pill = { block.x + block.w - pw - 6, block.y + 3, pw, ph };
+    bool hov = a->pv_mx >= pill.x && a->pv_mx < pill.x + pill.w &&
+               a->pv_my >= pill.y && a->pv_my < pill.y + pill.h;
+
+    SDL_SetRenderDrawColor(a->renderer,
+        a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, hov ? 140 : 70);
+    fill_rrect(a->renderer, pill, 5);
+    SDL_Rect in = { pill.x + 1, pill.y + 1, pill.w - 2, pill.h - 2 };
+    SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, 245);
+    fill_rrect(a->renderer, in, 4);
+    font_draw_line(f, label, strlen(label), pill.x + 8,
+                   pill.y + 2 + font_ascent(f),
+                   (hov || flash) ? a->fg_link : a->fg_muted);
+
+    if (a->pcopy_count >= a->pcopy_cap) {
+        a->pcopy_cap = a->pcopy_cap ? a->pcopy_cap * 2 : 8;
+        a->pcopy_btns = realloc(a->pcopy_btns,
+                                a->pcopy_cap * sizeof(*a->pcopy_btns));
+    }
+    a->pcopy_btns[a->pcopy_count++] =
+        (struct PreviewCopyBtn){ .rect = pill, .line0 = i0, .line1 = i1 };
+}
+
 /* Render a contiguous run of LINE_TABLE_HEAD/ROW lines as a grid. Two
  * passes: first collect column count + max pixel-width per column, then
  * lay out cells with padding + a header divider underline. A table wider
@@ -7431,6 +7524,13 @@ static void render_table_run(App* a, size_t i0, size_t i1,
             }
         }
         y += row_h;
+    }
+
+    if (draw) {
+        int bx0 = overflow ? xL : ox;
+        int bx1 = overflow ? xL + avail : ox + total_w;
+        preview_copy_button(a, (SDL_Rect){ bx0, y_top, bx1 - bx0, rows_h },
+                            i0, i1);
     }
 
     if (draw && overflow) {
@@ -7814,8 +7914,22 @@ static int render_preview(App* a, bool draw)
     }
 
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
+    /* A code block's copy button goes on once its last line is laid out, so
+     * it paints over the block's rows and knows the block's full height. */
+    bool   cb_open = false;
+    size_t cb_i0 = 0, cb_i1 = 0;
+    int    cb_y0 = 0;
+    #define CODE_BTN_FLUSH()                                                \
+        do {                                                                \
+            int bx = doc_x_left(a) + MARGIN_X / 2;                          \
+            preview_copy_button(a, (SDL_Rect){ bx, cb_y0,                   \
+                doc_x_right(a) - MARGIN_X / 2 - bx, y - cb_y0 },            \
+                cb_i0, cb_i1);                                              \
+            cb_open = false;                                                \
+        } while (0)
     for (size_t i = 0; i < a->doc.line_count; ++i) {
         MdLine* l = &a->doc.lines[i];
+        if (cb_open && i >= cb_i1) CODE_BTN_FLUSH();
         if (l->kind == LINE_MERMAID) {
             size_t end = i + 1;
             while (end < a->doc.line_count &&
@@ -7860,10 +7974,22 @@ static int render_preview(App* a, bool draw)
             continue;
         }
 
+        if (draw && l->kind == LINE_CODE &&
+            (i == 0 || a->doc.lines[i - 1].kind != LINE_CODE)) {
+            cb_i0 = i;
+            cb_i1 = i + 1;
+            while (cb_i1 < a->doc.line_count &&
+                   a->doc.lines[cb_i1].kind == LINE_CODE) cb_i1++;
+            cb_y0   = y;
+            cb_open = true;
+        }
+
         int y_before = y;
         render_line(a, l, &y, draw);
         l->cached_h = y - y_before;
     }
+    if (cb_open) CODE_BTN_FLUSH();
+    #undef CODE_BTN_FLUSH
     return y + a->scroll_y - doc_y_top(a);
 }
 
@@ -17325,6 +17451,7 @@ static void app_render(App* a)
 
     a->hit_count = 0;        /* refilled by styled_run during preview */
     a->preview_row_count = 0;
+    a->pcopy_count = 0;
 
     if (a->split_preview && !a->viewing_image) {
         /* Live preview: reparse the doc only when the buffer changed since the
@@ -21115,6 +21242,9 @@ static void app_event(App* a, const SDL_Event* e)
             break;
 
         case SDL_WINDOWEVENT:
+            if (e->window.event == SDL_WINDOWEVENT_LEAVE) {
+                a->pv_mx = a->pv_my = -1;    /* hide hover-only preview pills */
+            }
             if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 a->win_w = e->window.data1;
                 a->win_h = e->window.data2;
@@ -21140,6 +21270,8 @@ static void app_event(App* a, const SDL_Event* e)
             bool ui_blocked = overlay_floating_active(a) || a->confirm_active ||
                               a->tinput_active || a->prompt_active ||
                               a->pcfg_active;
+            a->pv_mx = ui_blocked ? -1 : e->motion.x;   /* preview copy pills */
+            a->pv_my = ui_blocked ? -1 : e->motion.y;
             {
                 int cb = ui_blocked ? CB_NONE
                                     : chrome_hit_test(a, e->motion.x, e->motion.y);
@@ -22347,6 +22479,18 @@ static void app_event(App* a, const SDL_Event* e)
                             chip_clicked = 1;
                             break;
                         }
+                    }
+                    if (chip_clicked) break;
+                    /* Table / code-block "Copy" buttons. */
+                    for (size_t ci = 0; ci < a->pcopy_count; ++ci) {
+                        const struct PreviewCopyBtn* cb = &a->pcopy_btns[ci];
+                        if (e->button.x < cb->rect.x ||
+                            e->button.x >= cb->rect.x + cb->rect.w ||
+                            e->button.y < cb->rect.y ||
+                            e->button.y >= cb->rect.y + cb->rect.h) continue;
+                        preview_copy_block(a, cb->line0, cb->line1);
+                        chip_clicked = 1;
+                        break;
                     }
                     if (chip_clicked) break;
                     /* Try wiki-link / task-list click navigation first; if

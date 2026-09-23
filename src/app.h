@@ -189,6 +189,19 @@ typedef struct {
     size_t   preview_row_count;
     size_t   preview_row_cap;
 
+    /* Hover "Copy" buttons at the top-right of preview tables and code
+     * blocks: the per-frame hot list (rebuilt each render_preview), the
+     * block that just got copied (its button reads "Copied" until
+     * pcopy_flash_until), and the last pointer position over the window. */
+    struct PreviewCopyBtn {
+        SDL_Rect rect;
+        size_t   line0, line1;  /* MdLine run [line0, line1) */
+    }*       pcopy_btns;
+    size_t   pcopy_count, pcopy_cap;
+    size_t   pcopy_flash_line;
+    Uint32   pcopy_flash_until;
+    int      pv_mx, pv_my;
+
     /* Wide Markdown tables in preview get a per-table horizontal scrollbar.
      * Offsets persist in MdLine.h_scroll; this list is the per-frame hot-rect
      * map for hit-testing, rebuilt each render_preview. */
