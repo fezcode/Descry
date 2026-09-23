@@ -6673,6 +6673,9 @@ static Font* pick_font(const App* a, LineKind kind, unsigned char style)
         case LINE_CODE: return a->font_code;
         default: break;
     }
+    /* Table header cells are bold throughout, over whatever inline styles
+     * (links, italics, code) the cell carries. */
+    if (kind == LINE_TABLE_HEAD) style |= STYLE_BOLD;
     if (style & STYLE_CODE) return a->font_code;
     /* Math renders in italic serif — the conventional look for variables. */
     if (style & STYLE_MATH)
@@ -6690,6 +6693,7 @@ static SDL_Color pick_color(const App* a, LineKind kind, unsigned char style)
     if (kind == LINE_CODE)                   return a->fg_muted;
     if (style & STYLE_LINK)                  return a->fg_link;
     if (style & STYLE_CODE)                  return a->fg_muted;
+    if (kind == LINE_TABLE_HEAD)             return a->fg_heading;
     if (kind == LINE_QUOTE)                  return a->fg_quote;
     return a->fg;
 }
@@ -6938,7 +6942,7 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
                 }
                 a->preview_rows[a->preview_row_count++] = (struct PreviewRow){
                     .y = row_y, .lh = lh, .x_start = x_start,
-                    .font = base,
+                    .font = base, .kind = line->kind,
                     .byte_start = line->start + row_start,
                     .byte_end   = line->start + w_start,
                 };
@@ -7008,7 +7012,7 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
         }
         a->preview_rows[a->preview_row_count++] = (struct PreviewRow){
             .y = row_y, .lh = lh, .x_start = x_start,
-            .font = base,
+            .font = base, .kind = line->kind,
             .byte_start = line->start + row_start,
             .byte_end   = line->start + len,
         };
@@ -7017,27 +7021,60 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     #undef ROW_CHROME
 }
 
+/* Pixel x of doc byte `upto` within preview row `r`, laid out exactly as
+ * render_line draws it: words measured with their own inline styles (bold,
+ * italic, code, heading fonts all differ in width), spaces with the line's
+ * base font. Measuring the whole row with one font drifted away from the
+ * drawn glyphs on any styled line, so selection didn't follow the mouse. */
+static int preview_row_x(App* a, const struct PreviewRow* r, size_t upto)
+{
+    const char* d = a->doc.data;
+    int x = r->x_start;
+    size_t b = r->byte_start;
+    if (upto > r->byte_end) upto = r->byte_end;
+    while (b < upto) {
+        if (d[b] == ' ') { x += font_measure(r->font, " ", 1); b++; continue; }
+        size_t e = b;
+        while (e < upto && d[e] != ' ') e++;
+        x += styled_run(a, r->kind, d + b, a->doc.style + b, e - b,
+                        0, 0, false);
+        b = e;
+    }
+    return x;
+}
+
 /* Map mouse (mx, my) to a byte offset in doc.data using the per-row map
- * built during the last preview render. Returns 0 if no row matches. */
+ * built during the last preview render. A point between rows (paragraph
+ * gaps, blank lines, below the text) snaps to the nearest row instead of
+ * jumping to the top of the document. Returns 0 only if no rows exist. */
 static size_t preview_position_at(App* a, int mx, int my)
 {
+    struct PreviewRow* best = NULL;
+    int best_d = 0;
     for (size_t i = 0; i < a->preview_row_count; ++i) {
         struct PreviewRow* r = &a->preview_rows[i];
-        if (my < r->y || my >= r->y + r->lh) continue;
-        int x = r->x_start;
-        size_t b = r->byte_start;
-        while (b < r->byte_end) {
-            size_t nxt = b + 1;
-            while (nxt < r->byte_end &&
-                   ((unsigned char)a->doc.data[nxt] & 0xC0) == 0x80) nxt++;
-            int cw = font_measure(r->font, a->doc.data + b, nxt - b);
-            if (x + cw / 2 >= mx) return b;
-            x += cw;
-            b = nxt;
-        }
-        return r->byte_end;
+        int d = my < r->y ? r->y - my
+              : my >= r->y + r->lh ? my - (r->y + r->lh - 1) : 0;
+        if (!best || d < best_d) { best = r; best_d = d; }
+        if (d == 0) break;
     }
-    return 0;
+    if (!best) return 0;
+    struct PreviewRow* r = best;
+    /* Off the row vertically: above snaps to its start, below to its end. */
+    if (best_d > 0) return (my < r->y) ? r->byte_start : r->byte_end;
+    if (mx <= r->x_start) return r->byte_start;
+    size_t b = r->byte_start;
+    int x = r->x_start;
+    while (b < r->byte_end) {
+        size_t nxt = b + 1;
+        while (nxt < r->byte_end &&
+               ((unsigned char)a->doc.data[nxt] & 0xC0) == 0x80) nxt++;
+        int nx = preview_row_x(a, r, nxt);
+        if (x + (nx - x) / 2 >= mx) return b;
+        x = nx;
+        b = nxt;
+    }
+    return r->byte_end;
 }
 
 /* Draw the translucent selection rectangle over preview text. Walks the
@@ -7057,12 +7094,8 @@ static void render_preview_selection(App* a)
         if (hi <= r->byte_start || lo >= r->byte_end) continue;
         size_t s = lo > r->byte_start ? lo : r->byte_start;
         size_t e = hi < r->byte_end   ? hi : r->byte_end;
-        int sx = r->x_start +
-            font_measure(r->font, a->doc.data + r->byte_start,
-                         s - r->byte_start);
-        int ex = r->x_start +
-            font_measure(r->font, a->doc.data + r->byte_start,
-                         e - r->byte_start);
+        int sx = preview_row_x(a, r, s);
+        int ex = preview_row_x(a, r, e);
         SDL_Rect rect = { sx, r->y, ex - sx, r->lh };
         SDL_RenderFillRect(a->renderer, &rect);
     }
@@ -7222,14 +7255,15 @@ static void render_table_run(App* a, size_t i0, size_t i1,
 
     for (size_t i = i0; i < i1; ++i) {
         const MdLine* l = &a->doc.lines[i];
-        Font* cf = (l->kind == LINE_TABLE_HEAD) ? fb : f;
         const char* data = a->doc.data + l->start;
+        const unsigned char* st = a->doc.style + l->start;
         size_t len = l->len;
         size_t cs = 0;
         int col = 0;
         for (size_t j = 0; j <= len && col < MD_PREV_TABLE_COLS; ++j) {
             if (j == len || data[j] == '\t') {
-                int w = font_measure(cf, data + cs, j - cs);
+                int w = styled_run(a, l->kind, data + cs, st + cs, j - cs,
+                                   0, 0, false);
                 if (w > col_w[col]) col_w[col] = w;
                 col++;
                 cs = j + 1;
@@ -7279,6 +7313,7 @@ static void render_table_run(App* a, size_t i0, size_t i1,
         bool is_head = (l->kind == LINE_TABLE_HEAD);
         Font* cf = is_head ? fb : f;
         const char* data = a->doc.data + l->start;
+        const unsigned char* st = a->doc.style + l->start;
         size_t len = l->len;
 
         if (draw) {
@@ -7297,10 +7332,26 @@ static void render_table_run(App* a, size_t i0, size_t i1,
         for (size_t j = 0; j <= len && col < col_count; ++j) {
             if (j == len || data[j] == '\t') {
                 if (draw) {
-                    font_draw_line(cf, data + cs, j - cs,
-                                   cx + pad,
-                                   y + row_pad + font_ascent(cf),
-                                   is_head ? a->fg_heading : a->fg);
+                    /* Styled so links, bold, italics and code inside a cell
+                     * render (and links register click hits) like body text. */
+                    size_t h0 = a->hit_count;
+                    styled_run(a, l->kind, data + cs, st + cs, j - cs,
+                               cx + pad, y + row_pad + font_ascent(cf), true);
+                    /* A scrolled table clips its cells; clip their link hits
+                     * to the same band so a link scrolled out of view can't
+                     * be clicked in the margin. */
+                    if (overflow) {
+                        SDL_Rect band = { xL, y_top, avail, rows_h };
+                        size_t k = h0;
+                        for (size_t h = h0; h < a->hit_count; ++h) {
+                            SDL_Rect r;
+                            if (SDL_IntersectRect(&a->hits[h].rect, &band, &r)) {
+                                a->hits[k] = a->hits[h];
+                                a->hits[k++].rect = r;
+                            }
+                        }
+                        a->hit_count = k;
+                    }
                     /* Vertical separator on the right edge of every cell
                      * except the last. */
                     if (col + 1 < col_count) {
@@ -23355,11 +23406,37 @@ static void app_event(App* a, const SDL_Event* e)
             /* Edit-mode-only navigation / typing keys (not in the action
              * registry; they're tied to edit mode and not user-rebindable). */
             if (a->edit_mode) {
+                /* Word / paragraph jumps — with Shift they extend the
+                 * selection. Ctrl on Windows/Linux, Option on macOS (where
+                 * Cmd+arrows go to line / document ends instead). */
+#if defined(__APPLE__)
+                bool word = (mod & KMOD_ALT) != 0;
+                bool cmd  = (mod & KMOD_GUI) != 0;
+#else
+                bool word = (mod & KMOD_CTRL) != 0;
+                bool cmd  = false;
+#endif
                 switch (k) {
-                    case SDLK_LEFT:      buffer_move_left (&a->buf, sel); break;
-                    case SDLK_RIGHT:     buffer_move_right(&a->buf, sel); break;
-                    case SDLK_UP:        buffer_move_up   (&a->buf, sel); break;
-                    case SDLK_DOWN:      buffer_move_down (&a->buf, sel); break;
+                    case SDLK_LEFT:
+                        if      (cmd)  buffer_move_line_start(&a->buf, sel);
+                        else if (word) buffer_move_word_left (&a->buf, sel);
+                        else           buffer_move_left      (&a->buf, sel);
+                        break;
+                    case SDLK_RIGHT:
+                        if      (cmd)  buffer_move_line_end  (&a->buf, sel);
+                        else if (word) buffer_move_word_right(&a->buf, sel);
+                        else           buffer_move_right     (&a->buf, sel);
+                        break;
+                    case SDLK_UP:
+                        if      (cmd)  buffer_move_doc_start(&a->buf, sel);
+                        else if (word) buffer_move_para_up  (&a->buf, sel);
+                        else           buffer_move_up       (&a->buf, sel);
+                        break;
+                    case SDLK_DOWN:
+                        if      (cmd)  buffer_move_doc_end  (&a->buf, sel);
+                        else if (word) buffer_move_para_down(&a->buf, sel);
+                        else           buffer_move_down     (&a->buf, sel);
+                        break;
                     case SDLK_HOME:
                         if (ctrl) buffer_move_doc_start (&a->buf, sel);
                         else      buffer_move_line_start(&a->buf, sel);

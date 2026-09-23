@@ -1,5 +1,6 @@
 #include "buffer.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -487,6 +488,98 @@ void buffer_move_down(Buffer* b, bool select)
     size_t target = (size_t)b->pref_col < nxt_len
         ? (size_t)b->pref_col : nxt_len;
     b->cursor = nxt_ls + target;
+    b->coalesce = OP_NONE;
+}
+
+/* Word jumps: 0 = space/tab, 1 = punctuation, 2 = word (alnum, '_' and any
+ * non-ASCII byte, so UTF-8 letters count as word characters). A jump skips
+ * whitespace, then one run of a single class, and never crosses a newline in
+ * the same step — a newline is its own stop, as in most editors. */
+static int word_class(unsigned char c)
+{
+    if (c == ' ' || c == '\t' || c == '\r') return 0;
+    if (c >= 0x80 || c == '_' || isalnum(c)) return 2;
+    return 1;
+}
+
+void buffer_move_word_left(Buffer* b, bool select)
+{
+    start_or_clear_selection(b, select);
+    const unsigned char* d = (const unsigned char*)b->data;
+    size_t i = b->cursor;
+    if (i > 0 && d[i - 1] == '\n') {
+        i--;
+    } else {
+        while (i > 0 && d[i - 1] != '\n' && word_class(d[i - 1]) == 0) i--;
+        if (i > 0 && d[i - 1] != '\n') {
+            int cls = word_class(d[i - 1]);
+            while (i > 0 && d[i - 1] != '\n' && word_class(d[i - 1]) == cls) i--;
+        }
+    }
+    b->cursor = i;
+    b->pref_col = (int)(b->cursor - line_start_of(b->data, b->cursor));
+    b->coalesce = OP_NONE;
+}
+
+void buffer_move_word_right(Buffer* b, bool select)
+{
+    start_or_clear_selection(b, select);
+    const unsigned char* d = (const unsigned char*)b->data;
+    size_t i = b->cursor, n = b->len;
+    if (i < n && d[i] == '\n') {
+        i++;
+    } else {
+        while (i < n && d[i] != '\n' && word_class(d[i]) == 0) i++;
+        if (i < n && d[i] != '\n') {
+            int cls = word_class(d[i]);
+            while (i < n && d[i] != '\n' && word_class(d[i]) == cls) i++;
+        }
+    }
+    b->cursor = i;
+    b->pref_col = (int)(b->cursor - line_start_of(b->data, b->cursor));
+    b->coalesce = OP_NONE;
+}
+
+/* A line holding nothing but whitespace separates paragraphs. */
+static bool line_is_blank(const char* s, size_t len, size_t ls)
+{
+    for (size_t i = ls; i < len && s[i] != '\n'; ++i)
+        if (s[i] != ' ' && s[i] != '\t' && s[i] != '\r') return false;
+    return true;
+}
+
+/* Paragraph jumps: to the next / previous blank line (or the document's
+ * end / start), skipping any blank lines the cursor already sits in. */
+void buffer_move_para_down(Buffer* b, bool select)
+{
+    start_or_clear_selection(b, select);
+    size_t ls = line_start_of(b->data, b->cursor);
+    bool   seen_text = !line_is_blank(b->data, b->len, ls);
+    for (;;) {
+        size_t le = line_end_of(b->data, b->len, ls);
+        if (le >= b->len) { b->cursor = b->len; break; }
+        ls = le + 1;
+        bool blank = line_is_blank(b->data, b->len, ls);
+        if (!blank) seen_text = true;
+        else if (seen_text) { b->cursor = ls; break; }
+    }
+    b->pref_col = (int)(b->cursor - line_start_of(b->data, b->cursor));
+    b->coalesce = OP_NONE;
+}
+
+void buffer_move_para_up(Buffer* b, bool select)
+{
+    start_or_clear_selection(b, select);
+    size_t ls = line_start_of(b->data, b->cursor);
+    bool   seen_text = !line_is_blank(b->data, b->len, ls);
+    for (;;) {
+        if (ls == 0) { b->cursor = 0; break; }
+        ls = line_start_of(b->data, ls - 1);
+        bool blank = line_is_blank(b->data, b->len, ls);
+        if (!blank) seen_text = true;
+        else if (seen_text) { b->cursor = ls; break; }
+    }
+    b->pref_col = (int)(b->cursor - line_start_of(b->data, b->cursor));
     b->coalesce = OP_NONE;
 }
 

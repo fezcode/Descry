@@ -94,6 +94,10 @@ void buffer_move_line_start(Buffer* b, bool select);
 void buffer_move_line_end  (Buffer* b, bool select);
 void buffer_move_doc_start (Buffer* b, bool select);
 void buffer_move_doc_end   (Buffer* b, bool select);
+void buffer_move_word_left (Buffer* b, bool select);
+void buffer_move_word_right(Buffer* b, bool select);
+void buffer_move_para_up   (Buffer* b, bool select);
+void buffer_move_para_down (Buffer* b, bool select);
 
 void buffer_set_cursor(Buffer* b, size_t pos, bool select);
 

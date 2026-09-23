@@ -177,6 +177,7 @@ typedef struct {
         int    lh;
         int    x_start;
         Font*  font;
+        int    kind;         /* LineKind of the source line */
         size_t byte_start;
         size_t byte_end;     /* exclusive */
     }*       preview_rows;
