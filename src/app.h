@@ -178,6 +178,11 @@ typedef struct {
         int    x_start;
         Font*  font;
         int    kind;         /* LineKind of the source line */
+        /* Table cell: the bytes are measured as one styled run (as drawn)
+         * and x is limited to [clip_l, clip_r) when clip_r > 0 — the
+         * visible band of a horizontally scrolled table. */
+        bool   cell;
+        int    clip_l, clip_r;
         size_t byte_start;
         size_t byte_end;     /* exclusive */
     }*       preview_rows;

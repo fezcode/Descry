@@ -7032,6 +7032,9 @@ static int preview_row_x(App* a, const struct PreviewRow* r, size_t upto)
     int x = r->x_start;
     size_t b = r->byte_start;
     if (upto > r->byte_end) upto = r->byte_end;
+    if (r->cell && upto > b)
+        return x + styled_run(a, r->kind, d + b, a->doc.style + b, upto - b,
+                              0, 0, false);
     while (b < upto) {
         if (d[b] == ' ') { x += font_measure(r->font, " ", 1); b++; continue; }
         size_t e = b;
@@ -7049,19 +7052,41 @@ static int preview_row_x(App* a, const struct PreviewRow* r, size_t upto)
  * jumping to the top of the document. Returns 0 only if no rows exist. */
 static size_t preview_position_at(App* a, int mx, int my)
 {
-    struct PreviewRow* best = NULL;
-    int best_d = 0;
+    /* Vertical distance of the pointer from a row's band (0 = inside). */
+    #define ROW_DY(r) (my < (r)->y ? (r)->y - my \
+                     : my >= (r)->y + (r)->lh ? my - ((r)->y + (r)->lh - 1) : 0)
+    if (a->preview_row_count == 0) return 0;
+    int min_d = -1;
     for (size_t i = 0; i < a->preview_row_count; ++i) {
-        struct PreviewRow* r = &a->preview_rows[i];
-        int d = my < r->y ? r->y - my
-              : my >= r->y + r->lh ? my - (r->y + r->lh - 1) : 0;
-        if (!best || d < best_d) { best = r; best_d = d; }
-        if (d == 0) break;
+        int d = ROW_DY(&a->preview_rows[i]);
+        if (min_d < 0 || d < min_d) min_d = d;
     }
-    if (!best) return 0;
-    struct PreviewRow* r = best;
-    /* Off the row vertically: above snaps to its start, below to its end. */
-    if (best_d > 0) return (my < r->y) ? r->byte_start : r->byte_end;
+    /* Several rows can share a band — the cells of a table row — so pick
+     * among the nearest ones. Off the band vertically: above snaps to the
+     * band's first byte, below to its last. Inside it: the row (cell)
+     * horizontally nearest the pointer. */
+    struct PreviewRow* r = NULL;
+    size_t snap = 0;
+    int best_dx = 0;
+    for (size_t i = 0; i < a->preview_row_count; ++i) {
+        struct PreviewRow* c = &a->preview_rows[i];
+        if (ROW_DY(c) != min_d) continue;
+        if (min_d > 0) {
+            if (my < c->y) { if (!r || c->byte_start < snap) snap = c->byte_start; }
+            else           { if (!r || c->byte_end   > snap) snap = c->byte_end;   }
+            r = c;
+            continue;
+        }
+        int xs = c->x_start, xe = preview_row_x(a, c, c->byte_end);
+        if (c->clip_r > 0) {
+            if (xs < c->clip_l) xs = c->clip_l;
+            if (xe > c->clip_r) xe = c->clip_r;
+        }
+        int dx = mx < xs ? xs - mx : mx > xe ? mx - xe : 0;
+        if (!r || dx < best_dx) { r = c; best_dx = dx; }
+    }
+    #undef ROW_DY
+    if (min_d > 0) return snap;
     if (mx <= r->x_start) return r->byte_start;
     size_t b = r->byte_start;
     int x = r->x_start;
@@ -7096,6 +7121,11 @@ static void render_preview_selection(App* a)
         size_t e = hi < r->byte_end   ? hi : r->byte_end;
         int sx = preview_row_x(a, r, s);
         int ex = preview_row_x(a, r, e);
+        if (r->clip_r > 0) {
+            if (sx < r->clip_l) sx = r->clip_l;
+            if (ex > r->clip_r) ex = r->clip_r;
+            if (ex <= sx) continue;
+        }
         SDL_Rect rect = { sx, r->y, ex - sx, r->lh };
         SDL_RenderFillRect(a->renderer, &rect);
     }
@@ -7337,6 +7367,26 @@ static void render_table_run(App* a, size_t i0, size_t i1,
                     size_t h0 = a->hit_count;
                     styled_run(a, l->kind, data + cs, st + cs, j - cs,
                                cx + pad, y + row_pad + font_ascent(cf), true);
+                    /* Register the cell for mouse selection; skip one that
+                     * is scrolled wholly out of view. */
+                    int cell_r = cx + col_w[col] + 2 * pad;
+                    if (!overflow || (cell_r > xL && cx < xL + avail)) {
+                        if (a->preview_row_count >= a->preview_row_cap) {
+                            a->preview_row_cap = a->preview_row_cap
+                                ? a->preview_row_cap * 2 : 64;
+                            a->preview_rows = realloc(a->preview_rows,
+                                a->preview_row_cap * sizeof(*a->preview_rows));
+                        }
+                        a->preview_rows[a->preview_row_count++] =
+                            (struct PreviewRow){
+                            .y = y, .lh = row_h, .x_start = cx + pad,
+                            .font = cf, .kind = l->kind, .cell = true,
+                            .clip_l = overflow ? xL : 0,
+                            .clip_r = overflow ? xL + avail : 0,
+                            .byte_start = l->start + cs,
+                            .byte_end   = l->start + j,
+                        };
+                    }
                     /* A scrolled table clips its cells; clip their link hits
                      * to the same band so a link scrolled out of view can't
                      * be clicked in the margin. */
