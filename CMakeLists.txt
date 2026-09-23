@@ -96,6 +96,10 @@ if(APPLE)
   # QuartzCore: CALayer, for the rounded-corner clip in macos_window.m.
   target_link_libraries(descry PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
+if(UNIX AND NOT APPLE)
+  # glibc keeps libm separate, and modern ld won't pick it up transitively.
+  target_link_libraries(descry PRIVATE m)
+endif()
 if(WIN32)
   # comdlg32: native file dialogs.  wininet: GET remote images in preview.
   target_link_libraries(descry PRIVATE comdlg32 wininet)

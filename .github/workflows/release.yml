@@ -1,0 +1,163 @@
+# Cross-platform builds on GitHub's hosted runners.
+#
+# The Windows installer (Descry-Setup-X.Y.Z.exe) is still built locally with
+# Forge and published by the local RELEASE flow. This workflow adds, from
+# the same tag:
+#   - macOS:   Descry-X.Y.Z.dmg + Descry-X.Y.Z-macos-arm64.zip (package_macos.sh)
+#   - Linux:   Descry-X.Y.Z-x86_64.AppImage (linuxdeploy)
+#   - Windows: Descry-X.Y.Z-windows-x64-portable.zip (MSYS2, no installer)
+#
+# Pushing a v* tag builds all three and attaches them to that tag's release
+# once it exists (the local flow creates it right after pushing the tag).
+# A manual run builds from any ref and only keeps the files as workflow
+# artifacts, unless `release_tag` names a release to attach them to.
+
+name: release-builds
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        default: "main"
+      release_tag:
+        description: "Attach to this existing release (empty = artifacts only)"
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14            # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Dependencies
+        run: brew install ninja pkg-config sdl2 freetype harfbuzz libpng jpeg dylibbundler
+      - name: Build + package
+        run: ./package_macos.sh --dmg --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/Descry-*.dmg
+            dist/Descry-*-macos-*.zip
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04        # older glibc = the AppImage runs on more distros
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build pkg-config \
+            libsdl2-dev libfreetype-dev libharfbuzz-dev libpng-dev libjpeg-dev \
+            libfuse2 file
+      - name: Build
+        run: ./build.sh
+      - name: AppImage
+        run: |
+          version="$(sed -n 's/.*#define DESCRY_VERSION "\([0-9.]*\)".*/\1/p' src/version.h)"
+          app=AppDir
+          mkdir -p "$app/usr/bin/plugins"
+          cp build/descry "$app/usr/bin/"
+          # The app pins its cwd to the exe dir and loads plugins/ from there.
+          cp data/plugins/*.lua "$app/usr/bin/plugins/"
+          cp resources/icon_256.png descry.png
+          cat > descry.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Descry
+          Comment=Markdown notes
+          Exec=descry %F
+          Icon=descry
+          Categories=Office;TextEditor;
+          MimeType=text/markdown;
+          Terminal=false
+          EOF
+          curl -fsSLo linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./linuxdeploy --appdir "$app" -d descry.desktop -i descry.png --output appimage
+          mkdir -p dist
+          mv Descry*.AppImage "dist/Descry-${version}-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/Descry-*.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-libjpeg-turbo
+      - name: Build
+        # CMakeLists bundles the MinGW runtime DLLs next to descry.exe.
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Portable zip
+        run: |
+          version="$(sed -n 's/.*#define DESCRY_VERSION "\([0-9.]*\)".*/\1/p' src/version.h)"
+          stage="Descry-${version}-windows-x64"
+          mkdir -p "$stage/plugins" dist
+          cp build/descry.exe build/*.dll "$stage/"
+          cp data/plugins/*.lua "$stage/plugins/"
+          cp LICENSE.txt "$stage/"
+          zip -qr "dist/${stage}-portable.zip" "$stage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Descry-*-portable.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Wait for the release, then attach
+        run: |
+          # The local RELEASE flow creates the release (with the Forge
+          # installer) right after pushing the tag; don't race it.
+          for i in $(seq 1 60); do
+            gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+            echo "waiting for release $TAG ($i/60) ..."; sleep 30
+          done
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null
+          ls -la out
+          gh release upload "$TAG" out/* -R "$GITHUB_REPOSITORY" --clobber
