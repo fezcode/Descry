@@ -220,6 +220,9 @@ static float ease_out_cubic(float t);
  * Defined near the title bar code; app_init registers it. */
 static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
     const SDL_Point* p, void* data);
+#if defined(__APPLE__)
+static int mac_titlebar_dblclick(void* ud, int x, int y, int action);
+#endif
 
 /* App singleton for static menu callbacks that carry no App* (the recent-
  * vaults submenu, via app_recent_dirs_*). Set once at the top of app_init.
@@ -6173,6 +6176,15 @@ static int app_init(App* a, const char* note_path_arg)
      * vs normal content. SDL_HITTEST_DRAGGABLE → HTCAPTION → aero snap and
      * Win+arrow shortcuts work for free. */
     SDL_SetWindowHitTest(a->window, window_hit_test_cb, a);
+#if defined(__APPLE__)
+    {
+        SDL_SysWMinfo wmi;
+        SDL_VERSION(&wmi.version);
+        if (SDL_GetWindowWMInfo(a->window, &wmi))
+            macos_window_install_titlebar_dblclick(
+                (void*)wmi.info.cocoa.window, mac_titlebar_dblclick, a);
+    }
+#endif
 
 #if defined(__APPLE__)
     /* SDL builds the menu bar when it registers the app for the first
@@ -9414,6 +9426,22 @@ static SDL_HitTestResult SDLCALL window_hit_test_cb(SDL_Window* w,
 
     return SDL_HITTEST_NORMAL;
 }
+
+#if defined(__APPLE__)
+/* Double-click on the title bar's drag area (macos_window.m catches it,
+ * since SDL's drag handling swallows it): zoom or minimize, as the user set
+ * in System Settings. Returns 0 for anything that isn't drag area, so the
+ * click reaches SDL untouched. */
+static int mac_titlebar_dblclick(void* ud, int x, int y, int action)
+{
+    App* a = (App*)ud;
+    SDL_Point p = { x, y };
+    if (window_hit_test_cb(a->window, &p, a) != SDL_HITTEST_DRAGGABLE) return 0;
+    if      (action == MACOS_DBL_ZOOM)     titlebar_button_invoke(a, TBB_MAX);
+    else if (action == MACOS_DBL_MINIMIZE) titlebar_button_invoke(a, TBB_MIN);
+    return 1;
+}
+#endif
 
 /* Top-bar buttons. CB_NONE means "not on a button". The order here also
  * fixes the right-to-left layout in render_chrome (rightmost first). */

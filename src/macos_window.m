@@ -40,3 +40,46 @@ void macos_window_set_corner_radius(void* nswindow, float radius)
                        dispatch_get_main_queue(), ^{ [win invalidateShadow]; });
     }
 }
+
+/* What a title-bar double-click should do, per System Settings > Desktop &
+ * Dock ("Double-click a window's title bar to ..."). AppleActionOnDoubleClick
+ * is "Maximize" / "Minimize" / "None"; older systems only have the boolean
+ * AppleMiniaturizeOnDoubleClick. Unset means zoom, the macOS default. */
+static int titlebar_dbl_action(void)
+{
+    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+    NSString* act = [d stringForKey:@"AppleActionOnDoubleClick"];
+    if (act) {
+        if ([act caseInsensitiveCompare:@"Minimize"] == NSOrderedSame) return MACOS_DBL_MINIMIZE;
+        if ([act caseInsensitiveCompare:@"None"] == NSOrderedSame)     return MACOS_DBL_NONE;
+        return MACOS_DBL_ZOOM;
+    }
+    if ([d boolForKey:@"AppleMiniaturizeOnDoubleClick"]) return MACOS_DBL_MINIMIZE;
+    return MACOS_DBL_ZOOM;
+}
+
+static id g_dbl_monitor = nil;
+
+void macos_window_install_titlebar_dblclick(void* nswindow,
+                                            macos_titlebar_dbl_fn fn, void* ud)
+{
+    @autoreleasepool {
+        NSWindow* win = (__bridge NSWindow*)nswindow;
+        if (!win || !fn || g_dbl_monitor) return;
+        __weak NSWindow* weak_win = win;
+        g_dbl_monitor = [NSEvent
+            addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+            handler:^NSEvent* (NSEvent* ev) {
+                NSWindow* w = weak_win;
+                if (!w || [ev window] != w || [ev clickCount] != 2) return ev;
+                NSView* content = [w contentView];
+                if (!content) return ev;
+                NSPoint p = [content convertPoint:[ev locationInWindow] fromView:nil];
+                int x = (int)p.x;
+                int y = [content isFlipped]
+                        ? (int)p.y
+                        : (int)(NSHeight([content bounds]) - p.y);
+                return fn(ud, x, y, titlebar_dbl_action()) ? nil : ev;
+            }];
+    }
+}

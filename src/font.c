@@ -3,6 +3,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_OUTLINE_H
+#include FT_TRUETYPE_TABLES_H
 #include <hb.h>
 #include <hb-ft.h>
 
@@ -339,6 +340,31 @@ Font* font_create(SDL_Renderer* r, const char* ttf_path,
     f->ascent      = (int)lround((f->ft_face->size->metrics.ascender  >> 6) * f->px_to_pt);
     f->descent     = (int)lround(-(f->ft_face->size->metrics.descender >> 6) * f->px_to_pt);
     f->line_height = (int)lround((f->ft_face->size->metrics.height     >> 6) * f->px_to_pt);
+
+    /* Balance the line box around the capitals. Every "centre this label in
+     * a button / pill / row" in the app computes
+     *     baseline = top + (h - line_height) / 2 + ascent
+     * which only looks centred when the font's ascender and descender (plus
+     * line gap) happen to sit symmetrically around its cap height. Consolas
+     * rides ~1.5px high at 13px; other faces (as picked on macOS) are off in
+     * either direction. Re-splitting the same line height so that
+     *     ascent = (line_height + cap_height) / 2
+     * makes that formula put the caps' midpoint exactly on the box's midpoint
+     * for any font. Line height is unchanged, so layout is unaffected; text
+     * only moves within its line by a pixel or two. */
+    if (FT_IS_SCALABLE(f->ft_face) && !f->is_color) {
+        FT_Pos cap26 = 0;   /* cap height, 26.6 raster px */
+        TT_OS2* os2 = (TT_OS2*)FT_Get_Sfnt_Table(f->ft_face, FT_SFNT_OS2);
+        if (os2 && os2->version != 0xFFFF && os2->version >= 2 && os2->sCapHeight > 0)
+            cap26 = FT_MulFix(os2->sCapHeight, f->ft_face->size->metrics.y_scale);
+        else if (FT_Load_Char(f->ft_face, 'H', FT_LOAD_NO_BITMAP) == 0)
+            cap26 = f->ft_face->glyph->metrics.horiBearingY;
+        int cap = (int)lround(cap26 / 64.0 * f->px_to_pt);
+        if (cap > 0 && cap < f->line_height) {
+            f->ascent  = (f->line_height + cap) / 2;
+            f->descent = f->line_height - f->ascent;
+        }
+    }
 
     f->hb_font = hb_ft_font_create_referenced(f->ft_face);
     f->hb_buf  = hb_buffer_create();
