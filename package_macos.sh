@@ -56,9 +56,9 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 
-# --- version (single source of truth: src/main.c) ------------------------
-version="$(sed -n 's/.*#define DESCRY_VERSION "\([0-9.]*\)".*/\1/p' src/main.c | head -n1)"
-[ -n "$version" ] || { echo "could not read DESCRY_VERSION from src/main.c" >&2; exit 1; }
+# --- version (single source of truth: src/version.h) ---------------------
+version="$(sed -n 's/.*#define DESCRY_VERSION "\([0-9.]*\)".*/\1/p' src/version.h | head -n1)"
+[ -n "$version" ] || { echo "could not read DESCRY_VERSION from src/version.h" >&2; exit 1; }
 echo "Descry version : $version"
 
 # --- build ---------------------------------------------------------------
