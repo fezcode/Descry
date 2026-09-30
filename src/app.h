@@ -61,12 +61,14 @@ typedef struct {
 
     /* IDE chrome font (regular only) — title bar, menus, sidebar, status
      * bar, settings overlay, every modal/picker/popup. Independent of the
-     * preview body font so the user can pin chrome to a clean UI sans-serif
+     * text font so the user can pin chrome to a clean UI sans-serif
      * while reading prose in something more bookish. */
     Font* font_ide;
 
-    /* Body font + 3 inline-style variants from the same TTF. Used by the
-     * preview pane only — markdown body text, lists, blockquotes, tables. */
+    /* Text font ("Text font" in settings, font_path) + 3 inline-style
+     * variants from the same TTF: body text, lists, blockquotes, tables and
+     * (with font_h1..h3) headings -- in the preview AND the live-preview
+     * editor. Code uses font_code* ("Code font", font_path_mono). */
     Font* font_body;
     Font* font_body_bold;
     Font* font_body_italic;
@@ -374,15 +376,17 @@ typedef struct {
     size_t   ctx_menu_preview_doc_off;
 
     /* Live font / size config (mutable by the settings page). */
-    char     cfg_font_path[260];        /* preview body */
+    char     cfg_font_path[260];        /* text: prose + headings, both modes */
     char     cfg_font_path_ide[260];    /* chrome / sidebar / overlays */
-    char     cfg_font_path_mono[260];   /* editor + inline code */
+    char     cfg_font_path_mono[260];   /* code: fenced blocks + inline code */
     /* Base style per font slot: 0 regular, 1 bold, 2 italic, 3 bold italic.
      * Inline **bold** / *italic* still layer on top of the base. */
     int      cfg_font_style;
     int      cfg_font_style_ide;
     int      cfg_font_style_mono;
-    int      cfg_font_size;
+    int      cfg_font_size;             /* text font (body) */
+    int      cfg_font_size_ide;         /* IDE font (chrome) */
+    int      cfg_font_size_mono;        /* code font */
     int      cfg_font_size_h1;
     int      cfg_font_size_h2;
     int      cfg_font_size_h3;

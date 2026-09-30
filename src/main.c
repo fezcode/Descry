@@ -1522,6 +1522,8 @@ static int app_reload_fonts(App* a)
                                               : a->cfg_font_path;
     const char* fpm = a->cfg_font_path_mono;
     int sz  = a->cfg_font_size;
+    int szi = a->cfg_font_size_ide;
+    int szm = a->cfg_font_size_mono;
     int sh1 = a->cfg_font_size_h1;
     int sh2 = a->cfg_font_size_h2;
     int sh3 = a->cfg_font_size_h3;
@@ -1536,7 +1538,7 @@ static int app_reload_fonts(App* a)
      * but nothing to fall back on beyond it. */
     svg_extra_set_fallback_font(fp);
 
-    a->font_ide               = font_create(a->renderer, fpi, sz, si);
+    a->font_ide               = font_create(a->renderer, fpi, szi, si);
     a->font_body              = font_create(a->renderer, fp, sz,  sb);
     a->font_body_bold         = font_create(a->renderer, fp, sz,  sb | FONT_STYLE_BOLD);
     a->font_body_italic       = font_create(a->renderer, fp, sz,  sb | FONT_STYLE_ITALIC);
@@ -1544,10 +1546,10 @@ static int app_reload_fonts(App* a)
     a->font_h1                = font_create(a->renderer, fp, sh1, sb);
     a->font_h2                = font_create(a->renderer, fp, sh2, sb);
     a->font_h3                = font_create(a->renderer, fp, sh3, sb);
-    a->font_code              = font_create(a->renderer, fpm, sz, sm);
-    a->font_code_bold         = font_create(a->renderer, fpm, sz, sm | FONT_STYLE_BOLD);
-    a->font_code_italic       = font_create(a->renderer, fpm, sz, sm | FONT_STYLE_ITALIC);
-    a->font_code_bold_italic  = font_create(a->renderer, fpm, sz, FONT_STYLE_BOLD_ITALIC);
+    a->font_code              = font_create(a->renderer, fpm, szm, sm);
+    a->font_code_bold         = font_create(a->renderer, fpm, szm, sm | FONT_STYLE_BOLD);
+    a->font_code_italic       = font_create(a->renderer, fpm, szm, sm | FONT_STYLE_ITALIC);
+    a->font_code_bold_italic  = font_create(a->renderer, fpm, szm, FONT_STYLE_BOLD_ITALIC);
     if (!a->font_ide || !a->font_body || !a->font_body_bold ||
         !a->font_body_italic || !a->font_body_bold_italic ||
         !a->font_h1 || !a->font_h2 || !a->font_h3 ||
@@ -5999,6 +6001,10 @@ static int app_init(App* a, const char* note_path_arg)
     snprintf(a->cfg_font_path_ide,  sizeof a->cfg_font_path_ide,  "%s", font_ide);
     snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono, "%s", font_mono);
     a->cfg_font_size    = sz_body;
+    /* IDE and code sizes default to the text size, so a settings.lua from
+     * before they existed renders exactly as it did. */
+    a->cfg_font_size_ide  = (int)lua_host_cfg_number(a->lua, "font_size_ide",  sz_body);
+    a->cfg_font_size_mono = (int)lua_host_cfg_number(a->lua, "font_size_mono", sz_body);
     a->cfg_font_size_h1 = sz_h1;
     a->cfg_font_size_h2 = sz_h2;
     a->cfg_font_size_h3 = sz_h3;
@@ -13019,11 +13025,13 @@ typedef enum {
     SET_THEME,
     SET_FONT_IDE,       /* chrome / sidebar / overlays */
     SET_FONT_STYLE_IDE, /* regular / bold / italic / bold italic */
-    SET_FONT,           /* preview body (markdown rendering) */
+    SET_SIZE_IDE,
+    SET_FONT,           /* text: prose + headings, both modes */
     SET_FONT_STYLE,
-    SET_FONT_MONO,      /* editor + code blocks */
-    SET_FONT_STYLE_MONO,
     SET_SIZE,
+    SET_FONT_MONO,      /* code blocks + inline code */
+    SET_FONT_STYLE_MONO,
+    SET_SIZE_MONO,
     SET_SIZE_H1,
     SET_SIZE_H2,
     SET_SIZE_H3,
@@ -13064,11 +13072,13 @@ static const char* SETTINGS_LABELS[SET_COUNT] = {
     "Theme",
     "IDE font",
     "IDE font style",
-    "Preview font",
-    "Preview font style",
-    "Editor font",
-    "Editor font style",
-    "Font size",
+    "IDE font size",
+    "Text font",
+    "Text font style",
+    "Text font size",
+    "Code font",
+    "Code font style",
+    "Code font size",
     "H1 size",
     "H2 size",
     "H3 size",
@@ -13141,6 +13151,8 @@ static void settings_value_str(const App* a, SettingsRow r, char* out, size_t ca
             break;
         }
         case SET_SIZE:        snprintf(out, cap, "%d", a->cfg_font_size);    break;
+        case SET_SIZE_IDE:    snprintf(out, cap, "%d", a->cfg_font_size_ide);  break;
+        case SET_SIZE_MONO:   snprintf(out, cap, "%d", a->cfg_font_size_mono); break;
         case SET_SIZE_H1:     snprintf(out, cap, "%d", a->cfg_font_size_h1); break;
         case SET_SIZE_H2:     snprintf(out, cap, "%d", a->cfg_font_size_h2); break;
         case SET_SIZE_H3:     snprintf(out, cap, "%d", a->cfg_font_size_h3); break;
@@ -13234,6 +13246,22 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             if (v < 8)  v = 8;
             if (v > 40) v = 40;
             if (v != a->cfg_font_size) { a->cfg_font_size = v; need_reload_fonts = true; }
+            break;
+        }
+        case SET_SIZE_IDE: {
+            /* The title bar is a fixed 32px, so the chrome font tops out
+             * well before the text font does. */
+            int v = a->cfg_font_size_ide + dir;
+            if (v < 8)  v = 8;
+            if (v > 22) v = 22;
+            if (v != a->cfg_font_size_ide) { a->cfg_font_size_ide = v; need_reload_fonts = true; }
+            break;
+        }
+        case SET_SIZE_MONO: {
+            int v = a->cfg_font_size_mono + dir;
+            if (v < 8)  v = 8;
+            if (v > 40) v = 40;
+            if (v != a->cfg_font_size_mono) { a->cfg_font_size_mono = v; need_reload_fonts = true; }
             break;
         }
         case SET_SIZE_H1: {
@@ -13391,6 +13419,8 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
             snprintf(a->cfg_font_path_mono, sizeof a->cfg_font_path_mono,
                      "%s", platform_default_font_path());
             a->cfg_font_size    = 16;
+            a->cfg_font_size_ide  = 16;
+            a->cfg_font_size_mono = 16;
             a->cfg_font_size_h1 = 28;
             a->cfg_font_size_h2 = 22;
             a->cfg_font_size_h3 = 18;
@@ -13430,7 +13460,7 @@ static void settings_pick_custom_font(App* a, SettingsRow row)
         case SET_FONT:
             dst_cfg = a->cfg_font_path;
             dst_idx = &a->settings_font_idx;
-            slot_name = "preview font";
+            slot_name = "text font";
             break;
         case SET_FONT_IDE:
             dst_cfg = a->cfg_font_path_ide;
@@ -13440,7 +13470,7 @@ static void settings_pick_custom_font(App* a, SettingsRow row)
         case SET_FONT_MONO:
             dst_cfg = a->cfg_font_path_mono;
             dst_idx = &a->settings_font_idx_mono;
-            slot_name = "editor font";
+            slot_name = "code font";
             break;
         default: return;
     }
@@ -13566,14 +13596,19 @@ static int settings_persist(App* a)
         "-- known keys; manual additions outside that set survive\n"
         "-- only until the next save.\n"
         "return {\n");
-    fprintf(f, "    font_path      = "); fputs_lua_string(f, a->cfg_font_path);      fprintf(f, ",\n");
-    fprintf(f, "    font_path_ide  = "); fputs_lua_string(f, a->cfg_font_path_ide);  fprintf(f, ",\n");
-    fprintf(f, "    font_path_mono = "); fputs_lua_string(f, a->cfg_font_path_mono); fprintf(f, ",\n");
+    fprintf(f, "    font_path      = "); fputs_lua_string(f, a->cfg_font_path);
+    fprintf(f, ",  -- Text font: prose + headings, preview and editor\n");
+    fprintf(f, "    font_path_ide  = "); fputs_lua_string(f, a->cfg_font_path_ide);
+    fprintf(f, ",  -- IDE font: chrome, sidebar, menus, overlays\n");
+    fprintf(f, "    font_path_mono = "); fputs_lua_string(f, a->cfg_font_path_mono);
+    fprintf(f, ",  -- Code font: code blocks + inline code\n");
     fprintf(f, "    font_style     = %d,  -- 0 regular 1 bold 2 italic 3 bold italic\n",
             a->cfg_font_style);
     fprintf(f, "    font_style_ide = %d,\n", a->cfg_font_style_ide);
     fprintf(f, "    font_style_mono = %d,\n", a->cfg_font_style_mono);
-    fprintf(f, "    font_size      = %d,\n", a->cfg_font_size);
+    fprintf(f, "    font_size      = %d,  -- Text font size\n", a->cfg_font_size);
+    fprintf(f, "    font_size_ide  = %d,  -- IDE font size\n",  a->cfg_font_size_ide);
+    fprintf(f, "    font_size_mono = %d,  -- Code font size\n", a->cfg_font_size_mono);
     fprintf(f, "    font_size_h1   = %d,\n", a->cfg_font_size_h1);
     fprintf(f, "    font_size_h2   = %d,\n", a->cfg_font_size_h2);
     fprintf(f, "    font_size_h3   = %d,\n", a->cfg_font_size_h3);
@@ -13702,7 +13737,7 @@ typedef struct {
     char font_path[260];
     char font_path_ide[260];
     char font_path_mono[260];
-    int  font_size;
+    int  font_size, font_size_ide, font_size_mono;
     int  font_size_h1;
     int  font_size_h2;
     int  font_size_h3;
@@ -13730,6 +13765,8 @@ static void settings_snapshot_capture(const App* a)
     snprintf(s->font_path_ide,  sizeof s->font_path_ide,  "%s", a->cfg_font_path_ide);
     snprintf(s->font_path_mono, sizeof s->font_path_mono, "%s", a->cfg_font_path_mono);
     s->font_size      = a->cfg_font_size;
+    s->font_size_ide  = a->cfg_font_size_ide;
+    s->font_size_mono = a->cfg_font_size_mono;
     s->font_size_h1   = a->cfg_font_size_h1;
     s->font_size_h2   = a->cfg_font_size_h2;
     s->font_size_h3   = a->cfg_font_size_h3;
@@ -13802,10 +13839,12 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
     diff_str_named(out, cap, "Theme", old_theme, new_theme);
 
     diff_str(out, cap, "IDE font",     s->font_path_ide,  a->cfg_font_path_ide);
-    diff_str(out, cap, "Preview font", s->font_path,      a->cfg_font_path);
-    diff_str(out, cap, "Editor font",  s->font_path_mono, a->cfg_font_path_mono);
+    diff_str(out, cap, "Text font",    s->font_path,      a->cfg_font_path);
+    diff_str(out, cap, "Code font",    s->font_path_mono, a->cfg_font_path_mono);
 
-    diff_int(out, cap, "Font size",    s->font_size,    a->cfg_font_size);
+    diff_int(out, cap, "IDE font size",  s->font_size_ide,  a->cfg_font_size_ide);
+    diff_int(out, cap, "Text font size", s->font_size,      a->cfg_font_size);
+    diff_int(out, cap, "Code font size", s->font_size_mono, a->cfg_font_size_mono);
     diff_int(out, cap, "H1 size",      s->font_size_h1, a->cfg_font_size_h1);
     diff_int(out, cap, "H2 size",      s->font_size_h2, a->cfg_font_size_h2);
     diff_int(out, cap, "H3 size",      s->font_size_h3, a->cfg_font_size_h3);
@@ -13813,9 +13852,9 @@ static void settings_build_diff(const App* a, char* out, size_t cap)
         static const char* ST[4] = { "Regular", "Bold", "Italic", "Bold Italic" };
         diff_str_named(out, cap, "IDE font style",
                        ST[s->font_style_ide & 3], ST[a->cfg_font_style_ide & 3]);
-        diff_str_named(out, cap, "Preview font style",
+        diff_str_named(out, cap, "Text font style",
                        ST[s->font_style & 3], ST[a->cfg_font_style & 3]);
-        diff_str_named(out, cap, "Editor font style",
+        diff_str_named(out, cap, "Code font style",
                        ST[s->font_style_mono & 3], ST[a->cfg_font_style_mono & 3]);
     }
     diff_int(out, cap, "Line spacing", s->line_spacing, a->cfg_line_spacing);
@@ -13878,6 +13917,8 @@ static void settings_snapshot_restore(App* a)
     a->cfg_font_path_ide[sizeof a->cfg_font_path_ide - 1] = 0;
     a->cfg_font_path_mono[sizeof a->cfg_font_path_mono - 1] = 0;
     a->cfg_font_size       = s->font_size;
+    a->cfg_font_size_ide   = s->font_size_ide;
+    a->cfg_font_size_mono  = s->font_size_mono;
     a->cfg_font_size_h1    = s->font_size_h1;
     a->cfg_font_size_h2    = s->font_size_h2;
     a->cfg_font_size_h3    = s->font_size_h3;

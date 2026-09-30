@@ -17,16 +17,19 @@ return {
     -- Start in EDIT instead of PREVIEW. (Toggle any time with Ctrl+E.)
     start_in_edit_mode = false,
 
-    -- Preview body font (prose, lists, quotes, table cells, headings).
-    -- Must be a TrueType file.
+    -- Text font (Settings > "Text font"): prose, lists, quotes, table
+    -- cells and headings, in both PREVIEW and EDIT. Must be a TrueType file.
     font_path      = "C:/Windows/Fonts/consola.ttf",
     -- IDE chrome font: title bar, menus, sidebar, status bar, overlays
     -- and modals. Defaults to font_path if unset.
     font_path_ide  = "C:/Windows/Fonts/consola.ttf",
-    -- Editor + code-block monospace face. Defaults to font_path if unset.
+    -- Code font (Settings > "Code font"): fenced code blocks and inline
+    -- `code`, in both modes. Defaults to font_path if unset.
     font_path_mono = "C:/Windows/Fonts/consola.ttf",
 
-    font_size     = 16,
+    font_size     = 16,      -- Text font size
+    font_size_ide = 16,      -- IDE font size (defaults to font_size)
+    font_size_mono = 16,     -- Code font size (defaults to font_size)
     font_size_h1  = 28,
     font_size_h2  = 22,
     font_size_h3  = 18,
