@@ -142,8 +142,8 @@ endif()
 # --- unit tests (opt-in: -DDESCRY_TESTS=ON, or build.ps1 -Tests) --------
 # Pure-C tests with no SDL/window dependency: tabs.c/buffer.c round-trips and
 # tab-strip scroll math, the hoswl.h (Hisashi menubar client) DSL compiler /
-# click parser, the icon_raster.c SVG -> RGBA pipeline (supersampling,
-# knockouts), the reveal.c file-manager command builders, and the svg_extra.c
+# click parser, the mermaid.c flowchart/sequence parser + layout, the
+# icon_raster.c SVG -> RGBA pipeline (supersampling, knockouts), the reveal.c file-manager command builders, and the svg_extra.c
 # harvest of the <text>/<image>/<clipPath> elements nanosvg ignores.
 option(DESCRY_TESTS "Build unit tests" OFF)
 if(DESCRY_TESTS)
@@ -154,6 +154,7 @@ if(DESCRY_TESTS)
   add_executable(test_reveal tests/test_reveal.c src/reveal.c)
   add_executable(test_markdown tests/test_markdown.c src/markdown.c)
   add_executable(test_graph tests/test_graph.c src/graph.c)
+  add_executable(test_mermaid tests/test_mermaid.c src/mermaid.c)
   add_executable(test_inputfield tests/test_inputfield.c src/inputfield.c)
   add_executable(test_lua_sandbox tests/test_lua_sandbox.c src/lua_host.c)
   # svg_extra.c carries the renderer as well as the parser under test, so it
@@ -168,7 +169,7 @@ if(DESCRY_TESTS)
   target_link_libraries(test_graph PRIVATE m)
   target_link_libraries(test_lua_sandbox PRIVATE lua_static)
   foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
-            test_inputfield test_lua_sandbox test_svg_extra)
+            test_mermaid test_inputfield test_lua_sandbox test_svg_extra)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -183,6 +184,7 @@ if(DESCRY_TESTS)
   add_test(NAME reveal COMMAND test_reveal)
   add_test(NAME markdown COMMAND test_markdown)
   add_test(NAME graph COMMAND test_graph)
+  add_test(NAME mermaid COMMAND test_mermaid)
   add_test(NAME inputfield COMMAND test_inputfield)
   add_test(NAME lua_sandbox COMMAND test_lua_sandbox)
   add_test(NAME svg_extra COMMAND test_svg_extra)

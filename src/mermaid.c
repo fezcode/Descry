@@ -14,11 +14,23 @@
 #define MM_PAD_X      18    /* node label horizontal padding (per side)     */
 #define MM_PAD_Y      12    /* node label vertical padding (per side)       */
 
+/* Sequence diagram limits + spacing. */
+#define MM_SEQ_MAX_ITEMS 1000
+#define MM_SEQ_DEPTH     16
+#define SQ_BOX_GAP    50    /* min gap between neighbouring participant boxes */
+#define SQ_BOX_MIN_W  90    /* min participant box width                      */
+#define SQ_NOTE_PAD   10    /* note label padding (per side)                  */
+#define SQ_FRAME_PAD  14    /* frame inset around its contents                */
+
 typedef struct {
     MmDiagram*  d;
     MmMeasureFn measure;
     void*       mctx;
     int         text_h;
+    /* sequence parse state */
+    int         autonum, autonum_next, autonum_step;
+    int         stack[MM_SEQ_DEPTH];   /* open frame item indices, -1 = box */
+    int         sp;
 } Builder;
 
 /* ---- helpers ----------------------------------------------------------- */
@@ -351,6 +363,415 @@ static void mm_layout(Builder* b)
     free(main_size); free(cross_total); free(layer_cnt); free(main_pos); free(cross_cur);
 }
 
+/* ---- sequence diagrams ------------------------------------------------- */
+
+static int measure(Builder* b, const char* s)
+{
+    return b->measure ? b->measure(b->mctx, s, strlen(s)) : (int)strlen(s) * 8;
+}
+
+/* Copy a label: trim, drop one layer of quotes, turn <br>, <br/>, <br />
+ * into spaces (labels are drawn on a single line). */
+static void seq_copy_text(char* dst, int cap, const char* s, int n)
+{
+    while (n > 0 && isspace((unsigned char)*s))       { s++; n--; }
+    while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+    if (n >= 2 && s[0] == '"' && s[n - 1] == '"') { s++; n -= 2; }
+    int o = 0;
+    for (int i = 0; i < n && o < cap - 1; ) {
+        if (s[i] == '<' && i + 2 < n &&
+            (s[i + 1] == 'b' || s[i + 1] == 'B') &&
+            (s[i + 2] == 'r' || s[i + 2] == 'R')) {
+            int j = i + 3;
+            while (j < n && (s[j] == ' ' || s[j] == '/')) j++;
+            if (j < n && s[j] == '>') { dst[o++] = ' '; i = j + 1; continue; }
+        }
+        dst[o++] = s[i++];
+    }
+    dst[o] = 0;
+}
+
+/* Participant by id (trimmed), created on first mention. */
+static int seq_participant(MmDiagram* d, const char* s, int n)
+{
+    while (n > 0 && isspace((unsigned char)*s))       { s++; n--; }
+    while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+    if (n <= 0) return -1;
+    return node_add(d, s, n);
+}
+
+static MmSeqItem* seq_item_add(MmDiagram* d, MmSeqType type)
+{
+    if (d->item_count >= MM_SEQ_MAX_ITEMS) return NULL;
+    MmSeqItem* ni = realloc(d->items, (size_t)(d->item_count + 1) * sizeof *ni);
+    if (!ni) return NULL;
+    d->items = ni;
+    MmSeqItem* it = &d->items[d->item_count++];
+    memset(it, 0, sizeof *it);
+    it->type = type;
+    it->from = it->to = -1;
+    return it;
+}
+
+/* Message: FROM ARROW [+|-]TO : label */
+static void seq_message(Builder* b, const char* s, int n)
+{
+    static const struct { const char* tok; int dashed, head, both; } AR[] = {
+        { "<<-->>", 1, MM_HEAD_ARROW, 1 }, { "<<->>", 0, MM_HEAD_ARROW, 1 },
+        { "-->>",   1, MM_HEAD_ARROW, 0 }, { "->>",   0, MM_HEAD_ARROW, 0 },
+        { "--x",    1, MM_HEAD_CROSS, 0 }, { "-x",    0, MM_HEAD_CROSS, 0 },
+        { "--)",    1, MM_HEAD_ASYNC, 0 }, { "-)",    0, MM_HEAD_ASYNC, 0 },
+        { "-->",    1, MM_HEAD_NONE,  0 }, { "->",    0, MM_HEAD_NONE,  0 },
+    };
+    int colon = 0;
+    while (colon < n && s[colon] != ':') colon++;
+    for (int p = 1; p < colon; ++p) {
+        for (size_t k = 0; k < sizeof AR / sizeof AR[0]; ++k) {
+            int tl = (int)strlen(AR[k].tok);
+            if (p + tl > colon || memcmp(s + p, AR[k].tok, (size_t)tl) != 0)
+                continue;
+            int q = p + tl;
+            while (q < colon && (s[q] == '+' || s[q] == '-' || s[q] == ' ')) q++;
+            int from = seq_participant(b->d, s, p);
+            int to   = seq_participant(b->d, s + q, colon - q);
+            if (from < 0 || to < 0) return;
+            MmSeqItem* it = seq_item_add(b->d, MM_SEQ_MSG);
+            if (!it) return;
+            it->from = from; it->to = to;
+            it->dashed = AR[k].dashed; it->head = AR[k].head; it->both = AR[k].both;
+            if (colon < n)
+                seq_copy_text(it->label, (int)sizeof it->label,
+                              s + colon + 1, n - colon - 1);
+            if (b->autonum) {
+                it->number = b->autonum_next;
+                b->autonum_next += b->autonum_step;
+            }
+            return;
+        }
+    }
+}
+
+static int is_frame_kw(const char* w, int n)
+{
+    return ci_eq(w, n, "loop") || ci_eq(w, n, "alt") || ci_eq(w, n, "opt") ||
+           ci_eq(w, n, "par")  || ci_eq(w, n, "critical") ||
+           ci_eq(w, n, "break") || ci_eq(w, n, "rect");
+}
+
+static void seq_line(Builder* b, const char* s, int n)
+{
+    MmDiagram* d = b->d;
+    if (n > 0 && s[n - 1] == ';') n--;
+    int t = 0;
+    while (t < n && !isspace((unsigned char)s[t]) && s[t] != ':') t++;
+    const char* rest = s + t;
+    int rn = n - t;
+    while (rn > 0 && isspace((unsigned char)*rest)) { rest++; rn--; }
+
+    if (ci_eq(s, t, "create")) { seq_line(b, rest, rn); return; }
+
+    if (ci_eq(s, t, "participant") || ci_eq(s, t, "actor")) {
+        int u = 0;
+        while (u < rn && !isspace((unsigned char)rest[u])) u++;
+        int idx = seq_participant(d, rest, u);
+        if (idx < 0) return;
+        int v = u;
+        while (v < rn && isspace((unsigned char)rest[v])) v++;
+        int w = v;
+        while (w < rn && !isspace((unsigned char)rest[w])) w++;
+        MmNode* nd = &d->nodes[idx];
+        if (ci_eq(rest + v, w - v, "as"))
+            seq_copy_text(nd->label, (int)sizeof nd->label, rest + w, rn - w);
+        nd->shape = ci_eq(s, t, "actor") ? MM_SHAPE_STADIUM : MM_SHAPE_RECT;
+        return;
+    }
+
+    if (ci_eq(s, t, "autonumber")) {
+        if (ci_eq(rest, rn, "off")) { b->autonum = 0; return; }
+        int start = 1, step = 1;
+        if (rn > 0) {
+            char* end = NULL;
+            long v1 = strtol(rest, &end, 10);
+            if (end != rest) {
+                start = (int)v1;
+                long v2 = strtol(end, &end, 10);
+                if (v2 > 0) step = (int)v2;
+            }
+        }
+        b->autonum = 1; b->autonum_next = start; b->autonum_step = step;
+        return;
+    }
+
+    if (ci_eq(s, t, "note")) {
+        int place;
+        int u = 0;
+        while (u < rn && !isspace((unsigned char)rest[u])) u++;
+        if      (ci_eq(rest, u, "over"))  place = MM_NOTE_OVER;
+        else if (ci_eq(rest, u, "left"))  place = MM_NOTE_LEFT;
+        else if (ci_eq(rest, u, "right")) place = MM_NOTE_RIGHT;
+        else return;
+        if (place != MM_NOTE_OVER) {           /* skip "of" */
+            while (u < rn && isspace((unsigned char)rest[u])) u++;
+            int v = u;
+            while (v < rn && !isspace((unsigned char)rest[v])) v++;
+            if (!ci_eq(rest + u, v - u, "of")) return;
+            u = v;
+        }
+        int colon = u;
+        while (colon < rn && rest[colon] != ':') colon++;
+        int comma = u;
+        while (comma < colon && rest[comma] != ',') comma++;
+        int a = seq_participant(d, rest + u, comma - u);
+        if (a < 0) return;
+        int c = comma < colon
+              ? seq_participant(d, rest + comma + 1, colon - comma - 1) : a;
+        if (c < 0) c = a;
+        MmSeqItem* it = seq_item_add(d, MM_SEQ_NOTE);
+        if (!it) return;
+        it->from = a; it->to = c; it->place = place;
+        if (colon < rn)
+            seq_copy_text(it->label, (int)sizeof it->label,
+                          rest + colon + 1, rn - colon - 1);
+        return;
+    }
+
+    if (is_frame_kw(s, t)) {
+        MmSeqItem* it = seq_item_add(d, MM_SEQ_FRAME);
+        if (!it) return;
+        if (!ci_eq(s, t, "rect")) {           /* rect only tints; no tag */
+            int kl = t < (int)sizeof it->kw - 1 ? t : (int)sizeof it->kw - 1;
+            for (int k = 0; k < kl; ++k)
+                it->kw[k] = (char)tolower((unsigned char)s[k]);
+            it->kw[kl] = 0;
+            seq_copy_text(it->label, (int)sizeof it->label, rest, rn);
+        }
+        if (b->sp < MM_SEQ_DEPTH) b->stack[b->sp++] = d->item_count - 1;
+        return;
+    }
+
+    if (ci_eq(s, t, "box")) {                  /* participant group: ignored */
+        if (b->sp < MM_SEQ_DEPTH) b->stack[b->sp++] = -1;
+        return;
+    }
+
+    if (ci_eq(s, t, "else") || ci_eq(s, t, "and") || ci_eq(s, t, "option")) {
+        int fr = b->sp > 0 ? b->stack[b->sp - 1] : -1;
+        if (fr < 0) return;
+        MmSeqItem* it = seq_item_add(d, MM_SEQ_DIVIDER);
+        if (!it) return;
+        it->from = fr;
+        seq_copy_text(it->label, (int)sizeof it->label, rest, rn);
+        return;
+    }
+
+    if (ci_eq(s, t, "end")) {
+        if (b->sp <= 0) return;
+        int fr = b->stack[--b->sp];
+        if (fr < 0) return;
+        MmSeqItem* it = seq_item_add(d, MM_SEQ_END);
+        if (it) it->from = fr;
+        return;
+    }
+
+    if (ci_eq(s, t, "title") || ci_eq(s, t, "activate") ||
+        ci_eq(s, t, "deactivate") || ci_eq(s, t, "destroy") ||
+        ci_eq(s, t, "link") || ci_eq(s, t, "links") ||
+        ci_eq(s, t, "properties") || ci_eq(s, t, "details") ||
+        ci_eq(s, t, "accTitle") || ci_eq(s, t, "accDescr"))
+        return;
+
+    seq_message(b, s, n);
+}
+
+/* Push participant c (and everything right of it) so its center sits at
+ * least `need` px right of participant a's. */
+static void seq_require(int* cx, int n, int a, int c, int need)
+{
+    if (a < 0 || c >= n || a >= c) return;
+    int have = cx[c] - cx[a];
+    if (have >= need) return;
+    for (int k = c; k < n; ++k) cx[k] += need - have;
+}
+
+static void seq_extend(int* lo, int* hi, int x0, int x1)
+{
+    if (x0 < *lo) *lo = x0;
+    if (x1 > *hi) *hi = x1;
+}
+
+static void seq_layout(Builder* b)
+{
+    MmDiagram* d = b->d;
+    int n = d->node_count;
+    if (n == 0) return;
+    int th = b->text_h;
+    int bh = th + 2 * MM_PAD_Y;
+
+    int* cx = calloc((size_t)n, sizeof(int));
+    if (!cx) return;
+    for (int i = 0; i < n; ++i) {
+        MmNode* nd = &d->nodes[i];
+        nd->w = measure(b, nd->label) + 2 * MM_PAD_X;
+        if (nd->w < SQ_BOX_MIN_W) nd->w = SQ_BOX_MIN_W;
+        nd->h = bh;
+        cx[i] = i == 0 ? nd->w / 2
+                       : cx[i - 1] + (d->nodes[i - 1].w + nd->w) / 2 + SQ_BOX_GAP;
+    }
+
+    /* Widen columns so labels fit, narrowest spans first so a long message
+     * across several columns only adds what the short ones didn't. */
+    for (int span = 0; span < n; ++span) {
+        for (int k = 0; k < d->item_count; ++k) {
+            const MmSeqItem* it = &d->items[k];
+            if (it->type != MM_SEQ_MSG && it->type != MM_SEQ_NOTE) continue;
+            int a = it->from < it->to ? it->from : it->to;
+            int c = it->from < it->to ? it->to : it->from;
+            if (c - a != span) continue;
+            if (it->type == MM_SEQ_MSG) {
+                int lw = measure(b, it->label) + 24;
+                if (span == 0) {
+                    int loop = lw > MM_SEQ_SELF_W + 8 ? lw : MM_SEQ_SELF_W + 8;
+                    if (a + 1 < n)
+                        seq_require(cx, n, a, a + 1,
+                                    loop + 16 + d->nodes[a + 1].w / 2);
+                } else {
+                    seq_require(cx, n, a, c, lw);
+                }
+            } else {
+                int nw = measure(b, it->label) + 2 * SQ_NOTE_PAD + 20;
+                if (it->place == MM_NOTE_RIGHT && a + 1 < n)
+                    seq_require(cx, n, a, a + 1, nw + d->nodes[a + 1].w / 2);
+                else if (it->place == MM_NOTE_LEFT && a > 0)
+                    seq_require(cx, n, a - 1, a, nw + d->nodes[a - 1].w / 2);
+                else if (it->place == MM_NOTE_OVER && c > a)
+                    seq_require(cx, n, a, c, nw - 48);
+            }
+        }
+    }
+
+    /* Rows, top to bottom (y relative to the top of the boxes). Frames are
+     * sized as they close: the box wraps everything inside, inner frames
+     * included, then widens its parent. */
+    int stack[MM_SEQ_DEPTH], lo[MM_SEQ_DEPTH], hi[MM_SEQ_DEPTH];
+    int sp = 0;
+    int y = bh + 24;
+    int minx = 0, maxx = cx[n - 1] + d->nodes[n - 1].w / 2;
+    for (int k = 0; k <= d->item_count; ++k) {
+        int at_end = (k == d->item_count);
+        MmSeqItem* it = at_end ? NULL : &d->items[k];
+
+        if (at_end || it->type == MM_SEQ_END) {
+            /* Close one frame — or, past the last row, every unclosed one. */
+            while (sp > 0) {
+                if (!at_end && stack[sp - 1] != it->from) break;  /* untracked */
+                --sp;
+                int fi = stack[sp];
+                MmSeqItem* fr = &d->items[fi];
+                int fl = lo[sp], fh = hi[sp];
+                if (fl > fh) { fl = cx[0] - d->nodes[0].w / 2; fh = fl + 120; }
+                fr->x = fl - SQ_FRAME_PAD;
+                fr->w = fh - fl + 2 * SQ_FRAME_PAD;
+                int need = measure(b, fr->kw) + measure(b, fr->label) + 50;
+                for (int j = fi + 1; j < k; ++j)
+                    if (d->items[j].type == MM_SEQ_DIVIDER && d->items[j].from == fi) {
+                        int dw = measure(b, d->items[j].label) + 40;
+                        if (dw > need) need = dw;
+                    }
+                if (fr->w < need) fr->w = need;
+                y += 6;
+                fr->h = y - fr->y;
+                for (int j = fi + 1; j < k; ++j)
+                    if (d->items[j].type == MM_SEQ_DIVIDER && d->items[j].from == fi) {
+                        d->items[j].x = fr->x;
+                        d->items[j].w = fr->w;
+                    }
+                if (!at_end) it->y = y;
+                y += 16;
+                if (sp > 0) seq_extend(&lo[sp - 1], &hi[sp - 1], fr->x, fr->x + fr->w);
+                seq_extend(&minx, &maxx, fr->x, fr->x + fr->w);
+                if (!at_end) break;
+            }
+            continue;
+        }
+
+        int x0 = 0, x1 = 0, has_x = 0;
+        switch (it->type) {
+        case MM_SEQ_MSG: {
+            int lw = it->label[0] ? measure(b, it->label) : 0;
+            int lh = it->label[0] ? th : 0;
+            int a = cx[it->from], c = cx[it->to];
+            int num = it->number ? 10 : 0;     /* autonumber badge radius */
+            it->y = y + lh + 4;
+            if (it->from == it->to) {
+                x0 = a - num;
+                x1 = a + (lw + 8 > MM_SEQ_SELF_W + 6 ? lw + 8 : MM_SEQ_SELF_W + 6);
+                y = it->y + 18 + 22;
+            } else {
+                int m = (a + c) / 2;
+                x0 = (a < c ? a : c) - num;
+                x1 = (a < c ? c : a) + num;
+                if (m - lw / 2 < x0) x0 = m - lw / 2;
+                if (m + lw / 2 > x1) x1 = m + lw / 2;
+                y = it->y + 22;
+            }
+            it->x = x0; it->w = x1 - x0;
+            has_x = 1;
+            break;
+        }
+        case MM_SEQ_NOTE: {
+            int nw = measure(b, it->label) + 2 * SQ_NOTE_PAD;
+            if (nw < 60) nw = 60;
+            int a = cx[it->from], c = cx[it->to];
+            if (a > c) { int tmp = a; a = c; c = tmp; }
+            if      (it->place == MM_NOTE_RIGHT) it->x = a + 10;
+            else if (it->place == MM_NOTE_LEFT)  it->x = a - 10 - nw;
+            else if (c > a && c - a + 48 >= nw) { it->x = a - 24; nw = c - a + 48; }
+            else                                 it->x = (a + c) / 2 - nw / 2;
+            it->w = nw;
+            it->y = y;
+            it->h = th + 16;
+            y += it->h + 16;
+            x0 = it->x; x1 = it->x + it->w; has_x = 1;
+            break;
+        }
+        case MM_SEQ_FRAME:
+            it->y = y;
+            y += th + 18;
+            if (sp < MM_SEQ_DEPTH) {
+                stack[sp] = k; lo[sp] = 1 << 30; hi[sp] = -(1 << 30); ++sp;
+            }
+            break;
+        case MM_SEQ_DIVIDER:
+            y += 4;
+            it->y = y;
+            y += th + 14;
+            break;
+        default:
+            break;
+        }
+        if (has_x) {
+            if (sp > 0) seq_extend(&lo[sp - 1], &hi[sp - 1], x0, x1);
+            seq_extend(&minx, &maxx, x0, x1);
+        }
+    }
+    d->life_bottom = y + 8;
+
+    /* Shift everything so the leftmost element sits at MM_MARGIN. */
+    int dx = MM_MARGIN - minx;
+    for (int i = 0; i < n; ++i) {
+        d->nodes[i].x = cx[i] - d->nodes[i].w / 2 + dx;
+        d->nodes[i].y = MM_MARGIN;
+    }
+    for (int k = 0; k < d->item_count; ++k) {
+        d->items[k].x += dx;
+        d->items[k].y += MM_MARGIN;
+    }
+    d->life_bottom += MM_MARGIN;
+    d->width  = maxx - minx + 2 * MM_MARGIN;
+    d->height = d->life_bottom + bh + MM_MARGIN;
+    free(cx);
+}
+
 /* ---- public ------------------------------------------------------------ */
 
 MmDiagram* mermaid_build(const char* src, size_t len,
@@ -359,7 +780,7 @@ MmDiagram* mermaid_build(const char* src, size_t len,
     MmDiagram* d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->status = MM_EMPTY;
-    Builder b = { d, measure, mctx, text_h };
+    Builder b = { d, measure, mctx, text_h, 0, 1, 1, {0}, 0 };
 
     int header_done = 0;
     size_t i = 0;
@@ -392,12 +813,17 @@ MmDiagram* mermaid_build(const char* src, size_t len,
                 else if (ci_eq(line + u, v - u, "LR")) d->dir = MM_DIR_LR;
                 else if (ci_eq(line + u, v - u, "RL")) d->dir = MM_DIR_RL;
                 else d->dir = MM_DIR_TB;
+            } else if (ci_eq(line, t, "sequenceDiagram")) {
+                d->status = MM_OK;
+                d->kind   = MM_KIND_SEQUENCE;
             } else {
                 d->status = MM_UNSUPPORTED;
             }
             continue;
         }
         if (d->status != MM_OK) continue;
+
+        if (d->kind == MM_KIND_SEQUENCE) { seq_line(&b, line, llen); continue; }
 
         if (ci_eq(line, t, "subgraph") || ci_eq(line, t, "end") ||
             ci_eq(line, t, "direction") || ci_eq(line, t, "classDef") ||
@@ -416,7 +842,10 @@ MmDiagram* mermaid_build(const char* src, size_t len,
     }
 
     if (d->status == MM_OK && d->node_count == 0) d->status = MM_EMPTY;
-    if (d->status == MM_OK) mm_layout(&b);
+    if (d->status == MM_OK) {
+        if (d->kind == MM_KIND_SEQUENCE) seq_layout(&b);
+        else                             mm_layout(&b);
+    }
     return d;
 }
 
@@ -425,5 +854,6 @@ void mermaid_free(MmDiagram* d)
     if (!d) return;
     free(d->nodes);
     free(d->edges);
+    free(d->items);
     free(d);
 }

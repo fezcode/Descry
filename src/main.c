@@ -7754,6 +7754,159 @@ static void mmd_draw_graph(App* a, const MmDiagram* d, int tx, int ty)
     }
 }
 
+/* Horizontal message head with its tip at (x,y); dir = +1 points right. */
+static void mmd_seq_head(App* a, int x, int y, int dir, int head, SDL_Color c)
+{
+    SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, c.a);
+    if (head == MM_HEAD_ARROW) {                      /* filled triangle */
+        for (int k = 0; k <= 10; ++k) {
+            int hw = k / 2;
+            SDL_RenderDrawLine(a->renderer, x - dir * k, y - hw, x - dir * k, y + hw);
+        }
+    } else if (head == MM_HEAD_ASYNC) {               /* open chevron */
+        SDL_RenderDrawLine(a->renderer, x, y, x - dir * 10, y - 5);
+        SDL_RenderDrawLine(a->renderer, x, y, x - dir * 10, y + 5);
+    } else if (head == MM_HEAD_CROSS) {
+        int cx = x - dir * 6;
+        SDL_RenderDrawLine(a->renderer, cx - 5, y - 5, cx + 5, y + 5);
+        SDL_RenderDrawLine(a->renderer, cx - 5, y + 5, cx + 5, y - 5);
+    }
+}
+
+/* Participant box (top or bottom of its lifeline). */
+static void mmd_seq_box(App* a, const MmNode* nd, SDL_Rect r)
+{
+    int rad = nd->shape == MM_SHAPE_STADIUM ? r.h / 2 : 5;
+    SDL_SetRenderDrawColor(a->renderer, a->bg_code.r, a->bg_code.g, a->bg_code.b, 255);
+    fill_rrect(a->renderer, r, rad);
+    SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 200);
+    draw_rrect(a->renderer, r, rad);
+    int lw = font_measure(a->font_body, nd->label, strlen(nd->label));
+    font_draw_line(a->font_body, nd->label, strlen(nd->label),
+                   r.x + (r.w - lw) / 2,
+                   r.y + (r.h - font_line_height(a->font_body)) / 2
+                       + font_ascent(a->font_body), a->fg);
+}
+
+/* Draw a sequence diagram translated so layout (0,0) maps to (tx,ty). */
+static void mmd_draw_sequence(App* a, const MmDiagram* d, int tx, int ty)
+{
+    SDL_Color line_c = { a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 220 };
+    int bh = font_line_height(a->font_body), ba = font_ascent(a->font_body);
+    int ih = font_line_height(a->font_ide),  ia = font_ascent(a->font_ide);
+
+    /* Frames and their dividers sit behind everything else. */
+    for (int k = 0; k < d->item_count; ++k) {
+        const MmSeqItem* it = &d->items[k];
+        if (it->type == MM_SEQ_FRAME) {
+            SDL_Rect r = { it->x + tx, it->y + ty, it->w, it->h };
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 14);
+            fill_rrect(a->renderer, r, 4);
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 120);
+            draw_rrect(a->renderer, r, 4);
+            int lx = r.x + 8;
+            if (it->kw[0]) {
+                int kw = font_measure(a->font_ide, it->kw, strlen(it->kw));
+                SDL_Rect tag = { r.x, r.y, kw + 16, ih + 6 };
+                SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 60);
+                fill_rrect(a->renderer, tag, 4);
+                font_draw_line(a->font_ide, it->kw, strlen(it->kw),
+                               r.x + 8, r.y + 3 + ia, a->fg);
+                lx = tag.x + tag.w + 8;
+            }
+            if (it->label[0]) {
+                char buf[180];
+                snprintf(buf, sizeof buf, "[%s]", it->label);
+                font_draw_line(a->font_ide, buf, strlen(buf), lx, r.y + 3 + ia,
+                               a->fg_muted);
+            }
+        } else if (it->type == MM_SEQ_DIVIDER) {
+            int y = it->y + ty;
+            SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 120);
+            mmd_dashed_line(a, it->x + tx, y, it->x + tx + it->w, y);
+            if (it->label[0]) {
+                char buf[180];
+                snprintf(buf, sizeof buf, "[%s]", it->label);
+                font_draw_line(a->font_ide, buf, strlen(buf),
+                               it->x + tx + 8, y + 5 + ia, a->fg_muted);
+            }
+        }
+    }
+
+    /* Lifelines, then the participant boxes at both ends. */
+    for (int i = 0; i < d->node_count; ++i) {
+        const MmNode* nd = &d->nodes[i];
+        int cx = nd->x + nd->w / 2 + tx;
+        SDL_SetRenderDrawColor(a->renderer, a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 110);
+        mmd_dashed_line(a, cx, nd->y + nd->h + ty, cx, d->life_bottom + ty);
+        mmd_seq_box(a, nd, (SDL_Rect){ nd->x + tx, nd->y + ty, nd->w, nd->h });
+        mmd_seq_box(a, nd, (SDL_Rect){ nd->x + tx, d->life_bottom + ty, nd->w, nd->h });
+    }
+
+    for (int k = 0; k < d->item_count; ++k) {
+        const MmSeqItem* it = &d->items[k];
+        if (it->type == MM_SEQ_NOTE) {
+            SDL_Rect r = { it->x + tx, it->y + ty, it->w, it->h };
+            SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, 255);
+            fill_rrect(a->renderer, r, 4);
+            SDL_SetRenderDrawColor(a->renderer, a->fg_link.r, a->fg_link.g, a->fg_link.b, 40);
+            fill_rrect(a->renderer, r, 4);
+            SDL_SetRenderDrawColor(a->renderer, a->fg_link.r, a->fg_link.g, a->fg_link.b, 150);
+            draw_rrect(a->renderer, r, 4);
+            int lw = font_measure(a->font_body, it->label, strlen(it->label));
+            font_draw_line(a->font_body, it->label, strlen(it->label),
+                           r.x + (r.w - lw) / 2, r.y + (r.h - bh) / 2 + ba, a->fg);
+            continue;
+        }
+        if (it->type != MM_SEQ_MSG) continue;
+        if (it->from < 0 || it->to < 0 ||
+            it->from >= d->node_count || it->to >= d->node_count) continue;
+        const MmNode* A = &d->nodes[it->from];
+        const MmNode* B = &d->nodes[it->to];
+        int x1 = A->x + A->w / 2 + tx, x2 = B->x + B->w / 2 + tx;
+        int y = it->y + ty;
+        int lw = it->label[0] ? font_measure(a->font_body, it->label, strlen(it->label)) : 0;
+
+        SDL_SetRenderDrawColor(a->renderer, line_c.r, line_c.g, line_c.b, line_c.a);
+        if (it->from == it->to) {
+            int xr = x1 + MM_SEQ_SELF_W, y2 = y + 18;
+            if (it->dashed) {
+                mmd_dashed_line(a, x1, y, xr, y);
+                mmd_dashed_line(a, xr, y, xr, y2);
+                mmd_dashed_line(a, xr, y2, x1 + 1, y2);
+            } else {
+                SDL_RenderDrawLine(a->renderer, x1, y, xr, y);
+                SDL_RenderDrawLine(a->renderer, xr, y, xr, y2);
+                SDL_RenderDrawLine(a->renderer, xr, y2, x1 + 1, y2);
+            }
+            mmd_seq_head(a, x1 + 1, y2, -1, it->head, line_c);
+            if (lw) font_draw_line(a->font_body, it->label, strlen(it->label),
+                                   x1 + 8, y - 4 - bh + ba, a->fg);
+        } else {
+            int dir = x2 > x1 ? 1 : -1;
+            int tip = x2 - dir;                  /* stop just short of the lifeline */
+            if (it->dashed) mmd_dashed_line(a, x1, y, tip, y);
+            else            SDL_RenderDrawLine(a->renderer, x1, y, tip, y);
+            mmd_seq_head(a, tip, y, dir, it->head, line_c);
+            if (it->both) mmd_seq_head(a, x1 + dir, y, -dir, it->head, line_c);
+            if (lw) font_draw_line(a->font_body, it->label, strlen(it->label),
+                                   (x1 + x2) / 2 - lw / 2, y - 4 - bh + ba, a->fg);
+        }
+
+        if (it->number) {
+            char num[16];
+            snprintf(num, sizeof num, "%d", it->number);
+            int nw = font_measure(a->font_ide, num, strlen(num));
+            int dia = (nw + 8 > ih ? nw + 8 : ih);
+            SDL_Rect badge = { x1 - dia / 2, y - ih / 2, dia, ih };
+            SDL_SetRenderDrawColor(a->renderer, a->fg_link.r, a->fg_link.g, a->fg_link.b, 255);
+            fill_rrect(a->renderer, badge, ih / 2);
+            font_draw_line(a->font_ide, num, strlen(num),
+                           badge.x + (badge.w - nw) / 2, badge.y + ia, a->bg);
+        }
+    }
+}
+
 static void mmd_bar_push(App* a, int idx, SDL_Rect view,
                          SDL_Rect ht, SDL_Rect hth, SDL_Rect vt, SDL_Rect vth,
                          int max_x, int max_y)
@@ -7871,7 +8024,10 @@ static void render_mermaid_block(App* a, size_t i0, size_t i1,
         SDL_Rect saved; SDL_bool had = SDL_RenderIsClipEnabled(a->renderer);
         if (had) SDL_RenderGetClipRect(a->renderer, &saved);
         SDL_RenderSetClipRect(a->renderer, &view);
-        mmd_draw_graph(a, d, view.x - ent->scroll_x, view.y - ent->scroll_y);
+        if (d->kind == MM_KIND_SEQUENCE)
+            mmd_draw_sequence(a, d, view.x - ent->scroll_x, view.y - ent->scroll_y);
+        else
+            mmd_draw_graph(a, d, view.x - ent->scroll_x, view.y - ent->scroll_y);
         if (had) SDL_RenderSetClipRect(a->renderer, &saved);
         else     SDL_RenderSetClipRect(a->renderer, NULL);
     }
