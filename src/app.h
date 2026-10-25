@@ -55,6 +55,7 @@ typedef struct {
 typedef struct {
     SDL_Window*   window;
     SDL_Renderer* renderer;
+    SDL_Texture* app_icon;
     int           win_w;
     int           win_h;
     float         dpi_scale;    /* device pixels / logical points; 1.0 std DPI */

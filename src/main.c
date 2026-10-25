@@ -1,4 +1,5 @@
 #include "app.h"
+#include "app_icon.h"
 #include "buffer.h"
 #include "font.h"
 #include "icons.h"
@@ -6153,6 +6154,18 @@ static int app_init(App* a, const char* note_path_arg)
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!a->renderer) { fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError()); return -1; }
     SDL_SetRenderDrawBlendMode(a->renderer, SDL_BLENDMODE_BLEND);
+    /* The embedded raster matches the executable icon and needs no external files. */
+    {
+        uint8_t pixels[64 * 64 * 4];
+        icon_render_rgba(pixels, 64);
+        SDL_Surface* icon = SDL_CreateRGBSurfaceWithFormatFrom(
+            pixels, 64, 64, 32, 64 * 4, SDL_PIXELFORMAT_RGBA32);
+        if (icon) {
+            SDL_SetWindowIcon(a->window, icon);
+            a->app_icon = SDL_CreateTextureFromSurface(a->renderer, icon);
+            SDL_FreeSurface(icon);
+        }
+    }
     /* Event watch that lets the resize badge actually render while the
      * user drags an edge — on Windows the main loop is blocked inside
      * Defwindowproc during the drag, but our watch fires synchronously
@@ -6676,6 +6689,7 @@ static void app_shutdown(App* a)
     if (a->font_code_bold_italic) font_destroy(a->font_code_bold_italic);
     svg_extra_shutdown();
     if (a->lua)                   lua_host_destroy(a->lua);
+    if (a->app_icon)              SDL_DestroyTexture(a->app_icon);
     if (a->renderer)              SDL_DestroyRenderer(a->renderer);
     if (a->window)                SDL_DestroyWindow(a->window);
     SDL_Quit();
@@ -9436,8 +9450,13 @@ static void render_titlebar(App* a, int TBH)
             fill_rrect(a->renderer, ir, 4);
         }
     }
-    icon_draw(a->renderer, ICON_FOLDER_OPEN,
-              icon_x, icon_pad, icon_sz, a->fg_link);
+    if (a->app_icon) {
+        SDL_Rect icon_rect = { icon_x, icon_pad, icon_sz, icon_sz };
+        SDL_RenderCopy(a->renderer, a->app_icon, NULL, &icon_rect);
+    } else {
+        icon_draw(a->renderer, ICON_FOLDER_OPEN,
+                  icon_x, icon_pad, icon_sz, a->fg_link);
+    }
     int x = icon_x + icon_sz + 10;
 
     /* Menu items: File / Edit / View / Help. Skipped when the system menu

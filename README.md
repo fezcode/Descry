@@ -354,3 +354,8 @@ table and use Shift+wheel or a horizontal swipe.
 ## Author
 
 [fezcode](mailto:samil.bulbul@gmail.com)
+
+## Application icon
+
+The approved transparent artwork is `resources/icon-master.png`. Run `python resources/make_icon.py` with Python and Pillow to regenerate the PNG sizes, Windows ICO and raster-backed SVG wrapper. Generated assets are committed; normal builds do not require Python.
+`src/app_icon.h` embeds the same artwork for the runtime window and title bar.

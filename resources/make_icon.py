@@ -1,194 +1,140 @@
-"""Generate descry.ico (and per-size PNGs) from a procedural design.
-
-Design: gradient amber->teal rounded-square backdrop, geometric "D"
-in cream with a small relocated dot accent inside the bowl.
-
-Run from repo root:  python resources/make_icon.py
-Outputs:             resources/descry.ico  +  resources/icon_<N>.png
+"""Export the approved transparent master. Requires Python and Pillow.
+Generated files are committed; normal application builds do not need Python.
 """
+from pathlib import Path
+import argparse
+import base64
+import io
+import struct
+from PIL import Image
 
-from __future__ import annotations
-
-import os
-from PIL import Image, ImageDraw
-
-OUT_DIR = os.path.join(os.path.dirname(__file__))
-
-SIZES = [16, 24, 32, 48, 64, 128, 256]
-
-# Render at 4x oversample then downsample for smooth edges. Skip oversampling
-# for tiny sizes — we want the geometry to snap to whole pixels.
-SUPERSAMPLE = {16: 4, 24: 4, 32: 4, 48: 4, 64: 4, 128: 4, 256: 4}
-
-# Palette
-AMBER = (200, 145, 95)         # #C8915F  warm top-left
-TEAL = (31, 59, 71)            # #1F3B47  cool bottom-right
-CREAM = (244, 236, 224)        # #F4ECE0  letterform
-CREAM_GLOW = (255, 248, 232)   # softer halo for the dot at large sizes
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = {'app': 'Descry', 'assets': 'resources', 'stem': 'descry-icon', 'ico': 'resources/descry.ico', 'master': 'resources/icon-master.png', 'pattern': 'icon_{size}.png', 'header': 'src/app_icon.h'}
+SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
-def lerp(a: int, b: int, t: float) -> int:
-    return int(a + (b - a) * t)
+def png_bytes(image):
+    stream = io.BytesIO()
+    image.save(stream, format='PNG')
+    return stream.getvalue()
 
 
-def make_gradient(size: int) -> Image.Image:
-    """Diagonal gradient amber (top-left) to teal (bottom-right)."""
-    img = Image.new("RGB", (size, size))
-    px = img.load()
-    for y in range(size):
-        for x in range(size):
-            t = (x + y) / (2.0 * (size - 1))
-            r = lerp(AMBER[0], TEAL[0], t)
-            g = lerp(AMBER[1], TEAL[1], t)
-            b = lerp(AMBER[2], TEAL[2], t)
-            px[x, y] = (r, g, b)
-    return img
+def c_array(name, data):
+    lines = [f'static const unsigned char {name}[] = {{']
+    lines += ['    ' + ','.join(str(b) for b in data[i:i+24]) + ',' for i in range(0, len(data), 24)]
+    return '\n'.join(lines + ['};\n'])
 
 
-def rounded_mask(size: int, radius: int) -> Image.Image:
-    """Antialiased rounded-square alpha mask."""
-    mask = Image.new("L", (size, size), 0)
-    d = ImageDraw.Draw(mask)
-    d.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=255)
-    return mask
+def pack_rgba(image):
+    # PackBits over whole RGBA pixels: high bit = repeat; low 7 bits = count-1.
+    raw = image.tobytes()
+    pixels = [raw[i:i+4] for i in range(0, len(raw), 4)]
+    out = bytearray()
+    i = 0
+    while i < len(pixels):
+        end = i + 1
+        while end < min(i+128, len(pixels)) and pixels[end] == pixels[i]:
+            end += 1
+        if end-i >= 3:
+            out.append(128 | (end-i-1))
+            out.extend(pixels[i])
+        else:
+            end = i
+            while end < min(i+128, len(pixels)):
+                if end+2 < len(pixels) and pixels[end] == pixels[end+1] == pixels[end+2]:
+                    break
+                end += 1
+            out.append(end-i-1)
+            out.extend(b''.join(pixels[i:end]))
+        i = end
+    return out
 
 
-def draw_d(img: Image.Image, S: int, draw_dot: bool) -> None:
-    """Draw the 'D' letterform centered in the icon, plus optional dot.
-
-    Geometry: stem on the left, bowl as a circle whose center sits ON the
-    stem's right edge. The visible right half is the bowl; the (hidden)
-    left half tucks behind the stem so they glue flush at top + bottom,
-    producing a real D shape rather than a stem-and-detached-circle.
-    """
-    # Bounding box for the letterform inside the icon.
-    pad = int(S * 0.18)
-    inner = S - 2 * pad
-    stem_w = max(2, int(inner * 0.22))
-
-    # Bowl is a circle whose diameter == letter height. The bowl center
-    # sits on the stem's right edge, so the visible right half is a
-    # half-disk glued flush to the stem.
-    bowl_r = inner // 2
-    visible_w = stem_w + bowl_r          # actual rendered letter width
-    # Center the letter horizontally inside the bounding box.
-    lx = pad + (inner - visible_w) // 2
-    ly = pad
-    lh = inner
-
-    cx_bowl = lx + stem_w
-    cy_bowl = ly + lh // 2
-
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
-
-    # Outer bowl — full circle. We draw onto a temp layer so we can erase
-    # the left half cleanly (PIL has no half-disk primitive).
-    outer = (
-        cx_bowl - bowl_r,
-        cy_bowl - bowl_r,
-        cx_bowl + bowl_r,
-        cy_bowl + bowl_r,
-    )
-    bowl_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    bd = ImageDraw.Draw(bowl_layer)
-    bd.ellipse(outer, fill=CREAM + (255,))
-    # Punch the inner bowl (full ellipse — left half lands in the area
-    # we're about to erase, so no harm).
-    inner_r = bowl_r - stem_w
-    inner_box = (
-        cx_bowl - inner_r,
-        cy_bowl - inner_r,
-        cx_bowl + inner_r,
-        cy_bowl + inner_r,
-    )
-    bd.ellipse(inner_box, fill=(0, 0, 0, 0))
-    # Erase the left half so only the right half-disc remains. This is
-    # what makes the bowl glue flush to the stem instead of looping
-    # around it.
-    bd.rectangle(
-        (cx_bowl - bowl_r - 1, cy_bowl - bowl_r - 1,
-         cx_bowl, cy_bowl + bowl_r + 1),
-        fill=(0, 0, 0, 0),
-    )
-
-    # Composite the half-bowl onto the letter layer.
-    layer = Image.alpha_composite(layer, bowl_layer)
-    ld = ImageDraw.Draw(layer)
-
-    # Stem — rectangle from letter's left edge to the bowl edge. Drawn
-    # last so it covers the bowl's flat edge cleanly.
-    ld.rectangle(
-        (lx, ly, cx_bowl, ly + lh),
-        fill=CREAM + (255,),
-    )
-
-    # Optional dot inside the bowl (relocated i-dot). Skip at small sizes.
-    if draw_dot and S >= 32 * 4:
-        dot_d = max(2, int(inner * 0.13))
-        # Position: upper area of the inner bowl, slightly right of center.
-        cx = cx_bowl + int(inner_r * 0.20)
-        cy = cy_bowl - int(inner_r * 0.40)
-        dot_box = (
-            cx - dot_d // 2,
-            cy - dot_d // 2,
-            cx + dot_d // 2,
-            cy + dot_d // 2,
-        )
-        if S >= 128 * 4:
-            halo_d = dot_d * 2
-            halo_box = (
-                cx - halo_d // 2,
-                cy - halo_d // 2,
-                cx + halo_d // 2,
-                cy + halo_d // 2,
-            )
-            ld.ellipse(halo_box, fill=CREAM_GLOW + (60,))
-        ld.ellipse(dot_box, fill=CREAM + (255,))
-
-    img.alpha_composite(layer)
+def runtime_header(frames):
+    parts = ['/* Generated from icon-master.png. Do not edit; run the icon exporter. */',
+             '#ifndef APP_ICON_RASTER_H\n#define APP_ICON_RASTER_H',
+             '#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>']
+    for size in SIZES:
+        parts.append(c_array(f'app_icon_{size}', pack_rgba(frames[size])))
+    parts.append('''static void icon_render_rgba(uint8_t *rgba, int size) {
+    if (!rgba || size < 1 || size > 4096) return;
+    const unsigned char *data = app_icon_256;
+    int source_size = 256;
+    switch (size) {''')
+    for size in SIZES:
+        parts.append(f'    case {size}: data = app_icon_{size}; source_size = {size}; break;')
+    parts.append('''    }
+    size_t count = (size_t)source_size * source_size;
+    uint8_t *pixels = size == source_size ? rgba : (uint8_t *)malloc(count * 4);
+    if (!pixels) { memset(rgba, 0, (size_t)size * size * 4); return; }
+    size_t pos = 0;
+    while (pos < count) {
+        unsigned token = *data++;
+        size_t run = (token & 127) + 1;
+        if (token & 128) {
+            for (size_t i = 0; i < run; ++i) memcpy(pixels + (pos+i)*4, data, 4);
+            data += 4;
+        } else {
+            memcpy(pixels + pos*4, data, run*4);
+            data += run*4;
+        }
+        pos += run;
+    }
+    if (pixels != rgba) {
+        /* Compatibility for unusual sizes. Bundle artwork uses full-resolution PNGs. */
+        for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x)
+            memcpy(rgba + ((size_t)y*size+x)*4,
+                   pixels + ((size_t)(y*source_size/size)*source_size+x*source_size/size)*4, 4);
+        free(pixels);
+    }
+}
+#endif
+''')
+    return '\n'.join(parts)
 
 
-def render_icon(size: int) -> Image.Image:
-    """Render one icon at the requested target size."""
-    ss = SUPERSAMPLE.get(size, 4)
-    S = size * ss
-    radius = int(S * 0.22)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path, default=ROOT / CONFIG['master'])
+    parser.add_argument('--out', type=Path, default=ROOT / CONFIG['ico'])
+    parser.add_argument('--assets-dir', type=Path, default=ROOT / CONFIG['assets'])
+    parser.add_argument('--png-sizes', type=int, nargs='+', default=list(SIZES) + [512, 1024])
+    args = parser.parse_args()
+    if any(n < 1 or n > 1024 for n in args.png_sizes):
+        parser.error('PNG sizes must be between 1 and 1024.')
+    with Image.open(args.source) as image:
+        if image.width != image.height:
+            parser.error('The master must be square.')
+        master = image.convert('RGBA')
+    if master.getchannel('A').getextrema()[0] != 0:
+        parser.error('The master must retain a transparent background.')
+    args.assets_dir.mkdir(parents=True, exist_ok=True)
+    frames = {n: master.resize((n,n), Image.Resampling.LANCZOS)
+              for n in sorted(set(SIZES + (512,1024) + tuple(args.png_sizes)))}
+    pngs = {n: png_bytes(frame) for n, frame in frames.items()}
+    for n in args.png_sizes:
+        (args.assets_dir / CONFIG['pattern'].format(size=n)).write_bytes(pngs[n])
+    (args.assets_dir / (CONFIG['stem'] + '.png')).write_bytes(pngs[1024])
+    encoded = base64.b64encode(pngs[1024]).decode('ascii')
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">\n'
+           f'<title>{CONFIG["app"]} application icon</title>\n'
+           f'<image width="1024" height="1024" href="data:image/png;base64,{encoded}"/>\n</svg>\n')
+    (args.assets_dir / (CONFIG['stem'] + '.svg')).write_text(svg, encoding='utf8')
+    offset = 6 + 16 * len(SIZES)
+    directory = bytearray(struct.pack('<HHH', 0, 1, len(SIZES)))
+    for n in SIZES:
+        directory.extend(struct.pack('<BBBBHHII', n % 256, n % 256, 0, 0, 1, 32, len(pngs[n]), offset))
+        offset += len(pngs[n])
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_bytes(directory + b''.join(pngs[n] for n in SIZES))
+    if CONFIG.get('header'):
+        (ROOT / CONFIG['header']).write_text(runtime_header(frames), encoding='utf8')
+    if CONFIG.get('png_header'):
+        text = '/* Generated from the approved master by tools/make-icon.py. */\n#ifndef TARMAN_LOGO_PNG_H\n#define TARMAN_LOGO_PNG_H\n'
+        text += '\n'.join(c_array(f'LOGO_PNG_{n}', pngs[n]) for n in (32,64,256))
+        (ROOT / CONFIG['png_header']).write_text(text + '\n#endif\n', encoding='utf8')
+    print(f'{CONFIG["app"]}: exported transparent PNGs, SVG wrapper, ICO and runtime assets')
 
-    # Background (gradient + rounded clip)
-    bg = make_gradient(S).convert("RGBA")
-    mask = rounded_mask(S, radius)
-    bg.putalpha(mask)
 
-    # Letterform on top
-    draw_dot = size >= 32
-    draw_d(bg, S, draw_dot)
-
-    if ss > 1:
-        bg = bg.resize((size, size), Image.LANCZOS)
-    return bg
-
-
-def main() -> None:
-    pngs = []
-    for sz in SIZES:
-        img = render_icon(sz)
-        out_png = os.path.join(OUT_DIR, f"icon_{sz}.png")
-        img.save(out_png, "PNG")
-        pngs.append(img)
-        print(f"  wrote {out_png}")
-
-    # Multi-size .ico — Pillow takes a base image plus the size list.
-    ico_path = os.path.join(OUT_DIR, "descry.ico")
-    base = pngs[-1]  # 256x256
-    base.save(
-        ico_path,
-        format="ICO",
-        sizes=[(s, s) for s in SIZES],
-        append_images=pngs[:-1],
-    )
-    print(f"  wrote {ico_path}")
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

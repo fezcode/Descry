@@ -112,6 +112,8 @@ if(WIN32)
   set(DESCRY_RES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
   configure_file(resources/descry.rc.in "${CMAKE_CURRENT_BINARY_DIR}/descry.rc" @ONLY)
   target_sources(descry PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/descry.rc")
+  set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/descry.rc" PROPERTIES
+    OBJECT_DEPENDS "${DESCRY_RES_DIR}/descry.ico;${DESCRY_RES_DIR}/descry.manifest")
 
   # PE hardening. MinGW's ld leaves DEP/ASLR off by default, which is both a
   # real weakness and a feature Defender's ML classifier reads as "not built
