@@ -117,6 +117,18 @@ preview rendering, plugin host — without the Electron tax.
 
 ![Tags and lists](docs/screenshots/tags-and-lists.png)
 
+### Knit theme
+
+Ported from [Fezcodex](https://fezcode.com)'s Knit theme: the window becomes
+a hand-knitted sweater. Chrome, sidebar and status bar are stockinette wool,
+labels are charted in a stitch font, Fair Isle bands frame the page and the
+note sits on a cream felt patch with a red running stitch. Edit mode stays on
+the wool inside a gold stitch. Pick **Knit** under Settings → Theme.
+
+![Knit theme, preview](docs/screenshots/knit-preview.png)
+
+![Knit theme, live preview split](docs/screenshots/knit-split.png)
+
 ---
 
 ## Stack

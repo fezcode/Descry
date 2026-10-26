@@ -5,6 +5,7 @@
 #include "icons.h"
 #include "image.h"
 #include "inputfield.h"
+#include "knit.h"
 #include "lua_host.h"
 #include "macos_menu.h"
 #include "markdown.h"
@@ -306,6 +307,8 @@ static void draw_rrect(SDL_Renderer* r, SDL_Rect rect, int radius)
  * then a hairline edge in muted at very low alpha. Now rounded. */
 #define CARD_RADIUS  6
 
+static bool knit_on(const App* a);
+
 static void overlay_card(App* a, SDL_Rect box)
 {
     SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 90);
@@ -319,6 +322,10 @@ static void overlay_card(App* a, SDL_Rect box)
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 70);
     draw_rrect(a->renderer, box, CARD_RADIUS);
+
+    /* Knit: every card is a felt patch with a red running stitch. */
+    if (knit_on(a) && box.w > 40 && box.h > 30)
+        knit_running_stitch(a->knit, box, 5, (SDL_Color){ 184, 54, 44, 200 });
 }
 
 /* ----------------------------- theme presets ---------------------------- */
@@ -846,6 +853,18 @@ static const Theme g_themes[] = {
         {221, 232, 250, 180}, {  9, 105, 218, 255},
     },
 
+    /* --- Fezcodex --- */
+    /* Knit — fezcodex's hand-knitted sweater: Fair Isle navy wool, cream
+     * yarn, wheat and lemon colourwork, poppy-red running stitch */
+    { "Knit",
+        { 44,  74, 124, 255}, {240, 230, 211, 255}, {232, 197,  26, 255},
+        {203, 185, 155, 255}, {224, 147, 107, 255},
+        { 33,  58,  99, 255}, {170, 163, 155, 255},
+        { 24,  43,  74, 255}, { 33,  58,  99, 255}, {138,  53,  41, 255},
+        { 24,  43,  74, 255}, {210, 178, 106, 255},
+        {195,  32,  43, 150}, {232, 197,  26, 255},
+    },
+
     /* --- British Premier League (EPL) Clubs --- */
     /* EPL: Arsenal — Emirates Stadium red, gold, and white */
     { "EPL: Arsenal",
@@ -1347,10 +1366,52 @@ static int theme_find(const char* name)
 
 /* Forward decl. */
 typedef struct App App_;     /* keep gcc happy if App not yet pulled in */
+static void theme_set(App* a, const Theme* t);
+
 static void theme_apply(App* a, int idx)
 {
     if (idx < 0 || idx >= G_THEME_COUNT) return;
-    const Theme* t = &g_themes[idx];
+    theme_set(a, &g_themes[idx]);
+}
+
+/* Snapshot the live palette (the inverse of theme_set). */
+static void theme_capture(const App* a, Theme* t)
+{
+    t->bg = a->bg; t->fg = a->fg;
+    t->fg_heading = a->fg_heading; t->fg_quote = a->fg_quote;
+    t->fg_link = a->fg_link;
+    t->bg_code = a->bg_code; t->fg_muted = a->fg_muted;
+    t->bg_sidebar = a->bg_sidebar;
+    t->bg_sidebar_hover = a->bg_sidebar_hover;
+    t->bg_sidebar_active = a->bg_sidebar_active;
+    t->bg_status = a->bg_status; t->fg_status = a->fg_status;
+    t->bg_selection = a->bg_selection; t->fg_cursor = a->fg_cursor;
+}
+
+/* --- Knit -------------------------------------------------------------- */
+/* The Knit theme is more than a palette: chrome, sidebar and status bar are
+ * knitted wool (knit.c), labels are charted in the stitch fonts, and the
+ * note and every overlay sit on cream felt patches. The "Knit" entry in
+ * g_themes is the wool palette (text on wool); KNIT_FELT is the ink-on-felt
+ * palette swapped in while the document and overlays draw. */
+static const Theme KNIT_FELT = { "Knit Felt",
+    {239, 230, 214, 255}, { 46,  36,  28, 255}, { 29,  22,  16, 255},
+    {110,  92,  74, 255}, {138,  53,  41, 255},
+    {228, 216, 194, 255}, {110,  92,  74, 255},
+    {228, 216, 194, 255}, {222, 208, 184, 255}, {210, 178, 106, 255},
+    {228, 216, 194, 255}, {110,  92,  74, 255},
+    {210, 178, 106, 150}, {195,  32,  43, 255},
+};
+
+static bool knit_on(const App* a)
+{
+    return a->knit && a->settings_theme_idx >= 0 &&
+           a->settings_theme_idx < G_THEME_COUNT &&
+           !strcmp(g_themes[a->settings_theme_idx].name, "Knit");
+}
+
+static void theme_set(App* a, const Theme* t)
+{
     a->bg = t->bg; a->fg = t->fg;
     a->fg_heading = t->fg_heading; a->fg_quote = t->fg_quote;
     a->fg_link = t->fg_link;
@@ -1720,14 +1781,69 @@ static int status_bar_h(const App* a)
 
 /* Top y at which document content begins, after the chrome bar + a bit of
  * internal padding. Replaces every previous bare `MARGIN_Y - scroll_y`. */
+static int doc_margin_y(const App* a)
+{
+    /* Knit: room for the peerie band and the felt's stitched edge. */
+    return knit_on(a) ? MARGIN_Y + 18 : MARGIN_Y;
+}
+
 static int doc_y_top(const App* a)
 {
-    return chrome_bar_h(a) + MARGIN_Y;
+    return chrome_bar_h(a) + doc_margin_y(a);
 }
 
 static int viewport_h(const App* a)
 {
-    return a->win_h - status_bar_h(a) - chrome_bar_h(a) - 2 * MARGIN_Y;
+    return a->win_h - status_bar_h(a) - chrome_bar_h(a) - 2 * doc_margin_y(a);
+}
+
+/* Knit: the felt patch the current pane's document sits on, between the
+ * peerie bands, with a wool gutter for the scrollbar on the right. */
+static SDL_Rect knit_felt_rect(const App* a)
+{
+    int band = knit_band_h(a->knit, KNIT_BAND_PEERIE);
+    int xL = doc_x_left(a), xR = doc_x_right(a);
+    int top = chrome_bar_h(a) + band + 6;
+    int bot = a->win_h - status_bar_h(a) - band - 6;
+    return (SDL_Rect){ xL + 10, top, xR - xL - 10 - 14, bot - top };
+}
+
+/* Inside the running stitch: where document text may draw. */
+static SDL_Rect knit_text_clip(const App* a)
+{
+    SDL_Rect f = knit_felt_rect(a);
+    return (SDL_Rect){ f.x + 10, f.y + 10, f.w - 20, f.h - 20 };
+}
+
+static void font_draw_elided(Font* f, const char* text, size_t len,
+                             int x, int baseline, int max_w, SDL_Color c);
+
+/* Width of a knitted label, or of the IDE-font fallback when the text has
+ * characters the stitch font can't chart. */
+static int klabel_w(const App* a, const char* s, KnitFont f)
+{
+    int w = knit_text_w(a->knit, s, strlen(s), f);
+    return w >= 0 ? w : font_measure(a->font_ide, s, strlen(s));
+}
+
+/* Knit a label vertically centred on cy, elided to max_w (<= 0: no limit).
+ * Falls back to the IDE font in the same yarn colour. Returns the width. */
+static int klabel(App* a, const char* s, KnitFont f, int x, int cy,
+                  KnitYarn y, int max_w)
+{
+    int th = knit_text_h(a->knit, f);
+    int w  = knit_text(a->knit, s, strlen(s), f, x, cy - th / 2, y, max_w);
+    if (w >= 0) return w;
+    SDL_Color c = knit_yarn(y);
+    int asc  = font_ascent(a->font_ide);
+    int base = cy - (asc + font_descent(a->font_ide)) / 2 + asc;
+    int fw   = font_measure(a->font_ide, s, strlen(s));
+    if (max_w > 0 && fw > max_w) {
+        font_draw_elided(a->font_ide, s, strlen(s), x, base, max_w, c);
+        return max_w;
+    }
+    font_draw_line(a->font_ide, s, strlen(s), x, base, c);
+    return fw;
 }
 
 static int max_scroll(const App* a)
@@ -6166,6 +6282,7 @@ static int app_init(App* a, const char* note_path_arg)
             SDL_FreeSurface(icon);
         }
     }
+    a->knit = knit_create(a->renderer);
     /* Event watch that lets the resize badge actually render while the
      * user drags an edge — on Windows the main loop is blocked inside
      * Defwindowproc during the drag, but our watch fires synchronously
@@ -6690,6 +6807,7 @@ static void app_shutdown(App* a)
     svg_extra_shutdown();
     if (a->lua)                   lua_host_destroy(a->lua);
     if (a->app_icon)              SDL_DestroyTexture(a->app_icon);
+    knit_destroy(a->knit);
     if (a->renderer)              SDL_DestroyRenderer(a->renderer);
     if (a->window)                SDL_DestroyWindow(a->window);
     SDL_Quit();
@@ -8858,6 +8976,7 @@ static int render_editor(App* a)
 
     SDL_Rect clip = { xL, chrome_bar_h(a), doc_x_right(a) - xL,
                       a->win_h - status_bar_h(a) - chrome_bar_h(a) };
+    if (knit_on(a)) clip = knit_text_clip(a);
     SDL_RenderSetClipRect(a->renderer, &clip);
 
     bool   has_sel = buffer_has_selection(b);
@@ -9468,13 +9587,28 @@ static void render_titlebar(App* a, int TBH)
     } else
     for (int i = 0; i < MENU_COUNT; ++i) {
         const char* label = MENU_LABELS[i];
-        int lw = font_measure(a->font_ide, label, strlen(label));
+        bool knit = knit_on(a);
+        int lw = knit ? klabel_w(a, label, KNIT_FONT_SMALL)
+                      : font_measure(a->font_ide, label, strlen(label));
         int item_w = lw + 16;
         SDL_Rect r = { x, 2, item_w, TBH - 4 };
         a->menu_rects[i] = r;
         float t  = a->menu_hover_t[i];
         float et = ease_out_cubic(t);
         bool is_open = (a->menu_open == i);
+        if (knit) {
+            /* Knit: a bark swatch under the open / hovered menu. */
+            if (is_open || t > 0.3f) {
+                SDL_Rect sr = { x, 4, item_w, TBH - 8 };
+                knit_fill(a->knit, sr, YARN_BARK);
+                SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 90);
+                SDL_RenderDrawRect(a->renderer, &sr);
+            }
+            klabel(a, label, KNIT_FONT_SMALL, x + 8, TBH / 2,
+                   (is_open || t > 0.3f) ? YARN_LEMON : YARN_CREAM, 0);
+            x += item_w + 2;
+            continue;
+        }
         if (is_open || t > 0.005f) {
             SDL_SetRenderDrawColor(a->renderer,
                 a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
@@ -9493,6 +9627,17 @@ static void render_titlebar(App* a, int TBH)
         const char* title = (a->fm_present && a->fm_title[0])
                             ? a->fm_title
                             : (a->note_path ? vault_basename(a->note_path) : "Descry");
+        if (knit_on(a) && knit_text_ok(title, strlen(title))) {
+            /* Knit: the title knitted in the big stitch font, wheat. */
+            int kw = knit_text_w(a->knit, title, strlen(title), KNIT_FONT_BIG);
+            int min_x = x + 16, max_x = titlebar_content_right(a);
+            int tx = (a->win_w - kw) / 2;
+            if (tx < min_x) tx = min_x;
+            if (max_x - tx > 40)
+                knit_text(a->knit, title, strlen(title), KNIT_FONT_BIG, tx,
+                          (TBH - knit_text_h(a->knit, KNIT_FONT_BIG)) / 2,
+                          YARN_WHEAT, max_x - tx);
+        } else {
         int tw = font_measure(a->font_ide, title, strlen(title));
         int min_x = x + 16;
         int max_x = titlebar_content_right(a);
@@ -9502,6 +9647,7 @@ static void render_titlebar(App* a, int TBH)
         if (tx >= min_x && tx + tw <= max_x) {
             font_draw_line(a->font_ide, title, strlen(title),
                            tx, by, a->fg_muted);
+        }
         }
     }
 
@@ -9724,7 +9870,14 @@ static void render_chrome(App* a)
     SDL_Rect bg = { 0, 0, a->win_w, H };
     SDL_SetRenderDrawColor(a->renderer,
         a->bg_status.r, a->bg_status.g, a->bg_status.b, 255);
-    SDL_RenderFillRect(a->renderer, &bg);
+    bool knit = knit_on(a);
+    if (knit) {
+        /* Knit: peat title bar over a bark tool row. */
+        knit_fill(a->knit, (SDL_Rect){ 0, 0, a->win_w, TBH }, YARN_PEAT);
+        knit_fill(a->knit, (SDL_Rect){ 0, TBH, a->win_w, H - TBH }, YARN_BARK);
+    } else {
+        SDL_RenderFillRect(a->renderer, &bg);
+    }
 
     /* Hairline divider between title bar and tool row. */
     SDL_Rect tbdiv = { 0, TBH, a->win_w, 1 };
@@ -9760,6 +9913,16 @@ static void render_chrome(App* a)
         })
     if (a->vault.dir) {
         const char* vault = vault_basename(a->vault.dir);
+        if (knit) {
+            /* VAULT / — knitted, as fezcodex's navbar crumb. */
+            int cy = TBH + CRH / 2;
+            int vw = klabel_w(a, vault, KNIT_FONT_SMALL);
+            a->crumb_rect_vault = (SDL_Rect){ bx - 4, TBH + 4, vw + 8, CRH - 8 };
+            klabel(a, vault, KNIT_FONT_SMALL, bx, cy,
+                   a->crumb_hover_t[0] > 0.3f ? YARN_LEMON : YARN_OAT, 0);
+            bx += vw + 8;
+            bx += klabel(a, "/", KNIT_FONT_SMALL, bx, cy, YARN_GOLD, 0) + 8;
+        } else {
         int vw = font_measure(a->font_ide, vault, strlen(vault));
         a->crumb_rect_vault = (SDL_Rect){ bx - 4, TBH + 4, vw + 8, CRH - 8 };
         SDL_Color vc = CRUMB_COLOR(a->fg_muted, a->crumb_hover_t[0]);
@@ -9775,6 +9938,7 @@ static void render_chrome(App* a)
         font_draw_line(a->font_ide, "\xe2\x80\xba", 3,    /* › */
                        bx, by, a->fg_muted);
         bx += font_measure(a->font_ide, "\xe2\x80\xba", 3) + 6;
+        }
     }
     #undef CRUMB_COLOR
 
@@ -9803,9 +9967,11 @@ static void render_chrome(App* a)
         const char* path = is_active ? a->note_path : a->tabs.items[i].path;
         tab_dirty[i] = is_active ? a->buf.dirty : a->tabs.items[i].buf.dirty;
         tab_name[i]  = path ? vault_basename(path) : "(unsaved)";
-        int nw_full  = font_measure(a->font_ide, tab_name[i], strlen(tab_name[i]));
-        tab_nw[i]    = nw_full > 160 ? 160 : nw_full;
-        int pad = 10, gap_dirty = tab_dirty[i] ? 12 : 0, close_w = 16;
+        int nw_full  = knit ? klabel_w(a, tab_name[i], KNIT_FONT_SMALL)
+                            : font_measure(a->font_ide, tab_name[i], strlen(tab_name[i]));
+        int nw_cap   = knit ? 200 : 160;
+        tab_nw[i]    = nw_full > nw_cap ? nw_cap : nw_full;
+        int pad = 10, gap_dirty = tab_dirty[i] ? (knit ? 18 : 12) : 0, close_w = 16;
         tab_w[i] = pad + tab_nw[i] + gap_dirty + close_w + 4;
         if (is_active) { active_cx = content_w; active_cw = tab_w[i]; }
         content_w += tab_w[i] + 2;
@@ -9850,7 +10016,30 @@ static void render_chrome(App* a)
         a->tab_hits[i].close_rect = close_r;
         a->tab_strip_count++;
         bool visible = sx + tw_ > strip_x0 && sx < strip_x1;
-        if (visible) {
+        if (visible && knit) {
+            /* Knit: the active tab is a walnut swatch (the page's wool)
+             * hemmed in gold; hover is a lighter bark-on-walnut. */
+            int cy = tab_top + tab_h / 2;
+            if (is_active || is_hover) {
+                knit_fill(a->knit, tr, is_active ? YARN_WALNUT : YARN_DENIM);
+                SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 90);
+                SDL_RenderDrawRect(a->renderer, &tr);
+            }
+            int tx = sx + pad;
+            tx += klabel(a, tab_name[i], KNIT_FONT_SMALL, tx, cy,
+                         is_active ? YARN_CREAM : YARN_OAT, nw) + 6;
+            if (tab_dirty[i])
+                klabel(a, "\xe2\x99\xa5", KNIT_FONT_SMALL, tx, cy, YARN_POPPY, 0);
+            if (is_hover || is_active)
+                klabel(a, "X", KNIT_FONT_SMALL, close_r.x + 3, cy,
+                       is_active ? YARN_WHEAT : YARN_OAT, 0);
+            if (is_active) {
+                SDL_Color g = knit_yarn(YARN_GOLD);
+                SDL_Rect ul = { tr.x + 3, tab_top + tab_h - 3, tw_ - 6, 2 };
+                SDL_SetRenderDrawColor(a->renderer, g.r, g.g, g.b, 255);
+                SDL_RenderFillRect(a->renderer, &ul);
+            }
+        } else if (visible) {
             if (is_active || is_hover) {
                 SDL_SetRenderDrawColor(a->renderer,
                     a->bg_sidebar_hover.r, a->bg_sidebar_hover.g,
@@ -9881,7 +10070,7 @@ static void render_chrome(App* a)
      * title-bar divider so that hairline stays continuous. */
     {
         int fade_w = strip_w / 3 < 28 ? strip_w / 3 : 28;
-        SDL_Color bgc = a->bg_status;
+        SDL_Color bgc = knit ? knit_yarn(YARN_BARK) : a->bg_status;
         for (int i = 0; i < fade_w; ++i) {
             float t = 1.0f - (float)i / (float)fade_w;
             Uint8 alpha = (Uint8)(255.0f * t * t);
@@ -10019,6 +10208,21 @@ static void render_chrome(App* a)
             int bb = (int)(a->bg_sidebar_active.b +
                           (a->bg_sidebar_hover.b - a->bg_sidebar_active.b) * et);
             fill = (SDL_Color){ (Uint8)br, (Uint8)bg, (Uint8)bb, 255 };
+        }
+        if (knit) {
+            /* Knit: a knitted button. EDIT is poppy with cream yarn,
+             * PREVIEW gold with peat; hover lifts the caption. */
+            SDL_Rect pr_ = { pill_x, pill_y, pill_w, pill_h };
+            knit_fill(a->knit, pr_, active ? YARN_POPPY : YARN_GOLD);
+            SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 110);
+            SDL_RenderDrawRect(a->renderer, &pr_);
+            const char* kl = active ? "EDIT" : "PREVIEW";
+            int kw = klabel_w(a, kl, KNIT_FONT_TIGHT);
+            KnitYarn ky = active ? (et > 0.3f ? YARN_LEMON : YARN_CREAM)
+                                 : (et > 0.3f ? YARN_INK : YARN_PEAT);
+            klabel(a, kl, KNIT_FONT_TIGHT, pill_x + (pill_w - kw) / 2,
+                   pill_y + pill_h / 2, ky, pill_w - 6);
+            return;
         }
         SDL_Color pill_c = fill;
         pill_c.a = (Uint8)(active ? 255 : (200 + 30 * pr));
@@ -10199,6 +10403,10 @@ static int sidebar_item_height(const App* a) { return font_line_height(a->font_i
  * line + 16px of breathing room). */
 static int sidebar_items_top  (const App* a)
 {
+    /* Knit: a knitted vault title over a zigzag band. */
+    if (knit_on(a))
+        return chrome_bar_h(a) + 10 + knit_text_h(a->knit, KNIT_FONT_BIG) +
+               6 + knit_band_h(a->knit, KNIT_BAND_ZIGZAG) + 8;
     return chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
 }
 
@@ -10325,11 +10533,130 @@ static void font_draw_elided(Font* f, const char* text, size_t len,
                    baseline, c);
 }
 
+/* The Knit sidebar: peat wool with a gold seam, the vault name knitted in
+ * the big stitch font over a zigzag band, rows charted in the stitch font.
+ * The selected row is a gold swatch, the hovered one bark. Same geometry
+ * as render_sidebar so hit-testing is shared. */
+static void render_sidebar_knit(App* a)
+{
+    Knit* k   = a->knit;
+    int   top = chrome_bar_h(a);
+    int   sw  = a->sidebar_w;
+    knit_fill(k, (SDL_Rect){ 0, top, sw, a->win_h - top }, YARN_PEAT);
+
+    SDL_Color gold = knit_yarn(YARN_GOLD);
+    SDL_SetRenderDrawColor(a->renderer, gold.r, gold.g, gold.b, 255);
+    SDL_Rect seam = { sw - 3, top, 2, a->win_h - top };
+    SDL_RenderFillRect(a->renderer, &seam);
+    SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 120);
+    SDL_Rect edge = { sw - 1, top, 1, a->win_h - top };
+    SDL_RenderFillRect(a->renderer, &edge);
+
+    const char* title = a->vault.dir ? vault_basename(a->vault.dir) : "vault";
+    int big_h = knit_text_h(k, KNIT_FONT_BIG);
+    int hy    = top + 10;
+    klabel(a, title, KNIT_FONT_BIG, SIDEBAR_PAD_X, hy + big_h / 2, YARN_GOLD,
+           sw - 2 * SIDEBAR_PAD_X - 4);
+    knit_band(k, (SDL_Rect){ 0, hy + big_h + 6, sw - 3, 0 }, KNIT_BAND_ZIGZAG);
+
+    SDL_Rect clip = {
+        0, sidebar_items_top(a),
+        sw - 3, a->win_h - sidebar_items_top(a) - status_bar_h(a)
+    };
+    SDL_RenderSetClipRect(a->renderer, &clip);
+
+    int item_h = sidebar_item_height(a);
+    int item_y = sidebar_items_top(a) - a->sidebar_scroll_y;
+
+    if (a->sidebar_visible_count == 0) {
+        const char* msg = (a->vault.count == 0) ? "(no .md files in vault)"
+                                                : "(no items visible)";
+        klabel(a, msg, KNIT_FONT_TIGHT, SIDEBAR_PAD_X, item_y + item_h / 2,
+               YARN_OAT, sw - 2 * SIDEBAR_PAD_X);
+    }
+
+    SDL_Color oat = knit_yarn(YARN_OAT);
+    for (int row = 0; row < a->sidebar_visible_count; ++row) {
+        int vi = a->sidebar_visible[row];
+        VaultItem* it = &a->vault.items[vi];
+        bool is_sel = vi == a->vault.selected;
+        bool is_hov = vi == a->sidebar_hover;
+        int  depth  = it->depth;
+        int  cy     = item_y + item_h / 2;
+
+        if (item_y + item_h < clip.y || item_y > clip.y + clip.h) {
+            item_y += item_h;
+            continue;
+        }
+        if (is_sel || is_hov) {
+            SDL_Rect sr = { 4, item_y + 1, sw - 11, item_h - 2 };
+            knit_fill(k, sr, is_sel ? YARN_GOLD : YARN_BARK);
+            SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 90);
+            SDL_RenderDrawRect(a->renderer, &sr);
+        }
+
+        /* Tree guides, a faint oat thread. */
+        SDL_SetRenderDrawColor(a->renderer, oat.r, oat.g, oat.b, 55);
+        for (int d = 0; d < depth; ++d) {
+            int gx = SIDEBAR_PAD_X + d * SIDEBAR_INDENT_STEP + 5;
+            bool continues = sidebar_ancestor_continues(a, row, d + 1);
+            int bot = (d == depth - 1 && !continues) ? cy : item_y + item_h;
+            SDL_RenderDrawLine(a->renderer, gx, item_y, gx, bot);
+            if (d == depth - 1)
+                SDL_RenderDrawLine(a->renderer, gx + 1, cy,
+                    SIDEBAR_PAD_X + depth * SIDEBAR_INDENT_STEP - 2, cy);
+        }
+
+        KnitYarn ink   = is_sel ? YARN_PEAT : (it->is_dir ? YARN_WHEAT : YARN_CREAM);
+        KnitYarn quiet = is_sel ? YARN_BARK : YARN_OAT;
+        int x_indent = SIDEBAR_PAD_X + depth * SIDEBAR_INDENT_STEP;
+        int x_icon   = x_indent + 14;
+        int icon_h   = knit_icon_h(k, KNIT_ICON_FILE);
+        if (it->is_dir) {
+            KnitIcon caret = it->collapsed ? KNIT_ICON_CARET_RIGHT
+                                           : KNIT_ICON_CARET_DOWN;
+            int cw = knit_icon_w(k, caret);
+            knit_icon(k, caret, x_indent + (12 - cw) / 2, cy - icon_h / 2, quiet);
+            knit_icon(k, it->collapsed ? KNIT_ICON_FOLDER : KNIT_ICON_FOLDER_OPEN,
+                      x_icon, cy - icon_h / 2, ink);
+        } else {
+            knit_icon(k, KNIT_ICON_FILE, x_icon, cy - icon_h / 2, ink);
+        }
+        int x_text = x_icon + knit_icon_w(k, KNIT_ICON_FILE) + 7;
+
+        /* Right-edge widget (folder count / dirty heart), measured first so
+         * the name elides before it. */
+        char cnt[16];
+        int  right_w = 0;
+        cnt[0] = 0;
+        if (it->is_dir) {
+            int count = sidebar_folder_file_count(a, vi);
+            if (count > 0) {
+                snprintf(cnt, sizeof cnt, "%d", count);
+                right_w = klabel_w(a, cnt, KNIT_FONT_TIGHT) + 8;
+            }
+        } else if (is_sel && a->buf.dirty) {
+            snprintf(cnt, sizeof cnt, "\xe2\x99\xa5");          /* ♥ */
+            right_w = klabel_w(a, cnt, KNIT_FONT_TIGHT) + 8;
+        }
+        klabel(a, it->name, KNIT_FONT_TIGHT, x_text, cy, ink,
+               sw - SIDEBAR_PAD_X - right_w - x_text);
+        if (cnt[0]) {
+            int cw = klabel_w(a, cnt, KNIT_FONT_TIGHT);
+            klabel(a, cnt, KNIT_FONT_TIGHT, sw - SIDEBAR_PAD_X - cw, cy,
+                   it->is_dir ? quiet : YARN_POPPY, 0);
+        }
+        item_y += item_h;
+    }
+    SDL_RenderSetClipRect(a->renderer, NULL);
+}
+
 static void render_sidebar(App* a)
 {
     if (!a->sidebar_open) return;
 
     sidebar_compute_visible(a);
+    if (knit_on(a)) { render_sidebar_knit(a); return; }
 
     SDL_Rect bg = { 0, chrome_bar_h(a), a->sidebar_w,
                     a->win_h - chrome_bar_h(a) };
@@ -15016,7 +15343,8 @@ static void render_outline_panel(App* a)
     SDL_Rect bg = { px, top, pw, ph };
     SDL_SetRenderDrawColor(a->renderer,
         a->bg_sidebar.r, a->bg_sidebar.g, a->bg_sidebar.b, 255);
-    SDL_RenderFillRect(a->renderer, &bg);
+    if (knit_on(a)) knit_fill(a->knit, bg, YARN_PEAT);
+    else            SDL_RenderFillRect(a->renderer, &bg);
     SDL_Rect div = { px, top, 1, ph };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 60);
@@ -16759,6 +17087,12 @@ static void render_window_border(App* a)
     SDL_RenderSetClipRect(a->renderer, NULL);
 
     bool      resizing = SDL_GetTicks() < a->resize_show_until;
+    /* Knit: a knitted selvedge, gold (lemon while resizing). */
+    if (knit_on(a)) {
+        knit_frame(a->knit, a->win_w, a->win_h,
+                   resizing ? YARN_LEMON : YARN_GOLD);
+        return;
+    }
     SDL_Color c        = resizing ? a->fg_link : a->fg_muted;
     int       t        = resizing ? 2 : 1;
     Uint8     alpha    = resizing ? 200 : 150;
@@ -16807,6 +17141,24 @@ static void render_resize_badge(App* a)
     char label[64];
     snprintf(label, sizeof label, "%d x %d", a->win_w, a->win_h);
 
+    /* Knit: a bark swatch, lemon digits knitted in the big stitch font,
+     * hemmed with a gold running stitch. */
+    if (knit_on(a)) {
+        int kw = knit_text_w(a->knit, label, strlen(label), KNIT_FONT_BIG);
+        int kh = knit_text_h(a->knit, KNIT_FONT_BIG);
+        int w = kw + 2 * 26, h = kh + 2 * 18;
+        SDL_Rect r = { (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
+        SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 80);
+        SDL_Rect sh = { r.x + 1, r.y + 3, w, h };
+        SDL_RenderFillRect(a->renderer, &sh);
+        knit_fill(a->knit, r, YARN_BARK);
+        knit_running_stitch(a->knit, r, 6, knit_yarn(YARN_GOLD));
+        knit_text(a->knit, label, strlen(label), KNIT_FONT_BIG,
+                  r.x + 26, r.y + 18, YARN_LEMON, 0);
+        a->wants_anim_frame = true;
+        return;
+    }
+
     Font* f = a->font_h2 ? a->font_h2 : a->font_ide;
     int sz_y = font_line_height(f);
     int lw   = font_measure(f, label, strlen(label));
@@ -16824,8 +17176,9 @@ static void render_resize_badge(App* a)
         (Uint8)(alpha * 0.6f));
     draw_rrect(a->renderer, (SDL_Rect){x, y, w, h}, 14);
 
-    SDL_Color tc = a->fg;
-    tc.a = alpha;
+    /* The pill is always dark, so the text is always light (a->fg is dark
+     * on light themes). */
+    SDL_Color tc = { 240, 240, 245, alpha };
     font_draw_line(f, label, strlen(label),
                    x + pad_x,
                    y + pad_y + font_ascent(f),
@@ -16940,16 +17293,29 @@ static void render_status(App* a)
     SDL_Rect bg = { 0, sy, a->win_w, sh };
     SDL_SetRenderDrawColor(a->renderer,
         a->bg_status.r, a->bg_status.g, a->bg_status.b, 255);
-    SDL_RenderFillRect(a->renderer, &bg);
+    /* Knit: peat wool, a gold hem, and every caption knitted. */
+    bool knit = knit_on(a);
+    int  cy   = sy + sh / 2;
+    if (knit) knit_fill(a->knit, bg, YARN_PEAT);
+    else      SDL_RenderFillRect(a->renderer, &bg);
 
     /* Hairline divider above status bar. */
     SDL_Rect div = { 0, sy - 1, a->win_w, 1 };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 70);
+    if (knit) {
+        SDL_Color g = knit_yarn(YARN_GOLD);
+        SDL_SetRenderDrawColor(a->renderer, g.r, g.g, g.b, 255);
+        div = (SDL_Rect){ 0, sy, a->win_w, 2 };
+    }
     SDL_RenderFillRect(a->renderer, &div);
 
     uint32_t now = SDL_GetTicks();
     if (a->notification_msg && now < a->notification_until) {
+        if (knit)
+            klabel(a, a->notification_msg, KNIT_FONT_SMALL, 12, cy,
+                   YARN_LEMON, a->win_w - 24);
+        else
         font_draw_line(a->font_ide, a->notification_msg,
                        strlen(a->notification_msg),
                        12, by, a->fg_link);
@@ -16989,9 +17355,14 @@ static void render_status(App* a)
     /* Mode prefix in accent color, then the rest in muted. */
     const char* mode = a->edit_mode ? "EDIT" : "PREVIEW";
     int x = 12;
+    if (knit) {
+        x += klabel(a, mode, KNIT_FONT_SMALL, x, cy, YARN_LEMON, 0) + 14;
+        klabel(a, buf, KNIT_FONT_SMALL, x, cy, YARN_WHEAT, a->win_w / 2 - x);
+    } else {
     font_draw_line(a->font_ide, mode, strlen(mode), x, by, a->fg_link);
     x += font_measure(a->font_ide, mode, strlen(mode)) + 12;
     font_draw_line(a->font_ide, buf, strlen(buf), x, by, a->fg_status);
+    }
 
     /* Right-aligned cluster: word count, then Ln/Col position. Position is
      * always shown (the buffer cursor is meaningful even in preview); the
@@ -17012,9 +17383,11 @@ static void render_status(App* a)
         char pos[80];
         snprintf(pos, sizeof pos, "Ln %zu / %zu  Col %zu",
                  line + 1, total, col + 1);
-        int pw = font_measure(a->font_ide, pos, strlen(pos));
+        int pw = knit ? klabel_w(a, pos, KNIT_FONT_SMALL)
+                      : font_measure(a->font_ide, pos, strlen(pos));
         rx -= pw;
-        font_draw_line(a->font_ide, pos, strlen(pos), rx, by, accent_muted);
+        if (knit) klabel(a, pos, KNIT_FONT_SMALL, rx, cy, YARN_OAT, 0);
+        else font_draw_line(a->font_ide, pos, strlen(pos), rx, by, accent_muted);
         rx -= 18;     /* gap before next item */
     }
 
@@ -17023,9 +17396,11 @@ static void render_status(App* a)
      * Preserve policy. Empty buffers default to LF. */
     {
         const char* eol = buf_detect_line_endings(&a->buf) == 2 ? "CRLF" : "LF";
-        int ew = font_measure(a->font_ide, eol, strlen(eol));
+        int ew = knit ? klabel_w(a, eol, KNIT_FONT_SMALL)
+                      : font_measure(a->font_ide, eol, strlen(eol));
         rx -= ew;
-        font_draw_line(a->font_ide, eol, strlen(eol), rx, by, accent_muted);
+        if (knit) klabel(a, eol, KNIT_FONT_SMALL, rx, cy, YARN_OAT, 0);
+        else font_draw_line(a->font_ide, eol, strlen(eol), rx, by, accent_muted);
         rx -= 18;
     }
 
@@ -17038,9 +17413,11 @@ static void render_status(App* a)
     }
     char wc[64];
     word_count_str(buf_word_count(wd, wl), wc, sizeof wc);
-    int wc_w = font_measure(a->font_ide, wc, strlen(wc));
+    int wc_w = knit ? klabel_w(a, wc, KNIT_FONT_SMALL)
+                    : font_measure(a->font_ide, wc, strlen(wc));
     rx -= wc_w;
-    font_draw_line(a->font_ide, wc, strlen(wc), rx, by, accent_muted);
+    if (knit) klabel(a, wc, KNIT_FONT_SMALL, rx, cy, YARN_OAT, 0);
+    else font_draw_line(a->font_ide, wc, strlen(wc), rx, by, accent_muted);
 }
 
 static void render_search_overlay(App* a);
@@ -17686,12 +18063,57 @@ static bool graph_handle_event(App* a, const SDL_Event* e)
     }
 }
 
+/* Knit: wool behind everything and the peerie bands framing the document
+ * area. Drawn right after the clear; sidebar, outline panel, chrome and
+ * status bar knit their own wool over it. */
+static void knit_backdrop(App* a)
+{
+    knit_fill(a->knit, (SDL_Rect){ 0, 0, a->win_w, a->win_h }, YARN_WALNUT);
+    int x0 = a->sidebar_open ? a->sidebar_w : 0;
+    int x1 = a->win_w - (a->outline_pinned ? a->outline_panel_w : 0);
+    int band = knit_band_h(a->knit, KNIT_BAND_PEERIE);
+    knit_band(a->knit, (SDL_Rect){ x0, chrome_bar_h(a) + 2, x1 - x0, 0 },
+              KNIT_BAND_PEERIE);
+    knit_band(a->knit,
+              (SDL_Rect){ x0, a->win_h - status_bar_h(a) - band - 2, x1 - x0, 0 },
+              KNIT_BAND_PEERIE);
+}
+
+/* Knit: frame the current pane until knit_doc_end. The preview is a felt
+ * patch read in ink; the editor stays on the wool (text in the wool
+ * palette) inside a gold running stitch, like fezcodex's dark patch.
+ * Text is clipped inside the stitch either way. */
+static void knit_doc_begin(App* a, Theme* wool, bool editor)
+{
+    theme_capture(a, wool);
+    if (editor) {
+        knit_running_stitch(a->knit, knit_felt_rect(a), 7,
+                            (SDL_Color){ 201, 149, 43, 205 });
+    } else {
+        knit_felt(a->knit, knit_felt_rect(a));
+        theme_set(a, &KNIT_FELT);
+    }
+    SDL_Rect c = knit_text_clip(a);
+    SDL_RenderSetClipRect(a->renderer, &c);
+}
+
+static void knit_doc_end(App* a, const Theme* wool)
+{
+    SDL_RenderSetClipRect(a->renderer, NULL);
+    theme_set(a, wool);
+}
+
 static void app_render(App* a)
 {
     app_animate(a);
 
+    bool  knit = knit_on(a);
+    Theme wool;
+    if (knit) knit_set_scale(a->knit, a->dpi_scale);
+
     SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, a->bg.a);
     SDL_RenderClear(a->renderer);
+    if (knit) knit_backdrop(a);
 
     a->hit_count = 0;        /* refilled by styled_run during preview */
     a->preview_row_count = 0;
@@ -17710,37 +18132,56 @@ static void app_render(App* a)
          * borrows a->scroll_y for the duration of its pass (swap in/out) so
          * its render body stays unchanged while keeping an independent scroll. */
         a->render_pane = PANE_LEFT;
+        if (knit) knit_doc_begin(a, &wool, true);
         a->doc_height_px = render_editor(a);
+        if (knit) {
+            SDL_Rect c = knit_text_clip(a);
+            SDL_RenderSetClipRect(a->renderer, &c);
+        }
         render_find_highlights(a);
+        if (knit) knit_doc_end(a, &wool);
 
         a->render_pane = PANE_RIGHT;
+        if (knit) knit_doc_begin(a, &wool, false);
         int saved_scroll = a->scroll_y;
         a->scroll_y = a->preview_scroll_y;
         a->preview_doc_height_px = render_preview(a, true);
         render_preview_selection(a);
         a->preview_scroll_y = a->scroll_y;       /* render may have clamped */
         a->scroll_y = saved_scroll;
+        if (knit) knit_doc_end(a, &wool);
 
         a->render_pane = PANE_FULL;
 
-        int dx = split_divider_x(a);
-        SDL_Rect dv = { dx, chrome_bar_h(a), 1,
-                        a->win_h - chrome_bar_h(a) - status_bar_h(a) };
-        SDL_SetRenderDrawColor(a->renderer,
-            a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 90);
-        SDL_RenderFillRect(a->renderer, &dv);
+        /* Knit: the wool between the two patches is the divider. */
+        if (!knit) {
+            int dx = split_divider_x(a);
+            SDL_Rect dv = { dx, chrome_bar_h(a), 1,
+                            a->win_h - chrome_bar_h(a) - status_bar_h(a) };
+            SDL_SetRenderDrawColor(a->renderer,
+                a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 90);
+            SDL_RenderFillRect(a->renderer, &dv);
+        }
     } else {
+        if (knit) knit_doc_begin(a, &wool, a->edit_mode);
         if (a->edit_mode) a->doc_height_px = render_editor(a);
         else              a->doc_height_px = render_preview(a, true);
+        if (knit) {
+            SDL_Rect c = knit_text_clip(a);
+            SDL_RenderSetClipRect(a->renderer, &c);
+        }
 
         if (!a->edit_mode) render_preview_selection(a);
         if (a->edit_mode) render_find_highlights(a);
+        if (knit) knit_doc_end(a, &wool);
     }
     render_scrollbar(a);
     render_hscrollbar(a);
     render_sidebar(a);
     render_outline_panel(a);
     render_chrome(a);
+    /* Knit: overlays, menus and modals are felt patches too. */
+    if (knit) { theme_capture(a, &wool); theme_set(a, &KNIT_FELT); }
     render_search_overlay(a);
     render_switcher(a);
     render_cmdp(a);
@@ -17758,7 +18199,9 @@ static void app_render(App* a)
     graph_render(a);
     render_template_picker(a);
     render_dnd_ghost(a);
+    if (knit) theme_set(a, &wool);
     render_status(a);
+    if (knit) theme_set(a, &KNIT_FELT);
     /* Resize badge / link tooltip / confirm + text-input modals render
      * LAST so they sit on top of everything else, including overlays
      * that may still be visible. */
@@ -17775,6 +18218,7 @@ static void app_render(App* a)
     render_prompt_modal(a);
     render_confirm_modal(a);
     render_eol_picker(a);
+    if (knit) theme_set(a, &wool);
 
     /* Themed window frame on top of everything (accent-highlighted while
      * resizing). */

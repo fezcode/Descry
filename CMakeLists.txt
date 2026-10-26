@@ -61,6 +61,7 @@ add_executable(descry
   src/icons.c
   src/image.c
   src/inputfield.c
+  src/knit.c
   src/lua_host.c
   src/markdown.c
   src/mermaid.c
