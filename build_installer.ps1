@@ -22,19 +22,13 @@ $outDir  = Join-Path $PSScriptRoot "dist"
 $output  = Join-Path $outDir "Descry-Setup-$version.exe"
 $signer  = Join-Path $PSScriptRoot "tools\sign.ps1"
 
-Write-Host "Building forge.exe (windowsgui) from D:\Workhammer\Forge..."
-Push-Location "D:\Workhammer\Forge"
-try {
-    # -H windowsgui: no console window when the installer runs.
-    # Deliberately NOT stripped (-s -w): a stripped, symbol-free Go binary that
-    # unpacks an exe plus a pile of DLLs is the exact shape Defender's ML
-    # classifier scores as a dropper. Keeping the symbol and DWARF tables costs
-    # a few MB and makes the installer look like what it is.
-    & go build -tags "desktop,production" -ldflags "-H windowsgui" -o build\forge.exe ./cmd/forge
-    if ($LASTEXITCODE -ne 0) { throw "go build forge.exe failed ($LASTEXITCODE)" }
-} finally {
-    Pop-Location
+Write-Host "Checking prebuilt Forge 2..."
+$forgeRoot = Split-Path (Split-Path $forge -Parent) -Parent
+foreach ($relative in @('build/forge.exe', 'build/stub.exe', 'build/wizard/Forge.Wizard.exe', 'build/wizard/libSkiaSharp.dll', 'build/wizard/libHarfBuzzSharp.dll')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $forgeRoot $relative))) { throw "Missing $relative. Run gobake build in $forgeRoot first." }
 }
+$forgeVersion = & $forge --version
+if ($LASTEXITCODE -ne 0 -or $forgeVersion -notmatch '^forge v2\.') { throw 'Forge 2 is required.' }
 
 # Sign the payload before it is packaged: signing the installer afterwards
 # would not reach the exe inside it.
