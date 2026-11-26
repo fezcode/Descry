@@ -8,8 +8,8 @@ icon    = "resources/descry.ico"
 publisher = "Fezcode"
 
 [ui]
-# available themes: atelier, aurora, console, mica, vellum
-theme = "mica"
+# available themes: glass, huh, console, mica
+theme = "glass"
 
 [install]
 default_dir = "${PROGRAMFILES}/Descry"
