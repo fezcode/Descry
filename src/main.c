@@ -10,6 +10,8 @@
 #include "macos_menu.h"
 #include "markdown.h"
 #include "regex.h"
+#include "scriptorium.h"
+#include "scriptorium_core.h"
 #include "svg_extra.h"
 #include "vault.h"
 #include "version.h"
@@ -308,6 +310,10 @@ static void draw_rrect(SDL_Renderer* r, SDL_Rect rect, int radius)
 #define CARD_RADIUS  6
 
 static bool knit_on(const App* a);
+static bool scriptorium_on(const App* a);
+/* Scriptorium: the thread overlay cards are framed in. Gold, but the
+ * confirm modal switches it to cinnabar round its own card. */
+static ScrInk g_scr_card_ink = SCR_GOLD;
 
 static void overlay_card(App* a, SDL_Rect box)
 {
@@ -326,6 +332,14 @@ static void overlay_card(App* a, SDL_Rect box)
     /* Knit: every card is a felt patch with a red running stitch. */
     if (knit_on(a) && box.w > 40 && box.h > 30)
         knit_running_stitch(a->knit, box, 5, (SDL_Color){ 184, 54, 44, 200 });
+    /* Scriptorium: every card is hemmed with a row of cross stitches (two
+     * deep when the card is big enough to spare the room). */
+    if (scriptorium_on(a) && box.w > 60 && box.h > 40) {
+        int depth = (box.w > 260 && box.h > 120) ? 2 : 1;
+        scr_frame(a->scriptorium,
+                  (SDL_Rect){ box.x + 2, box.y + 2, box.w - 4, box.h - 4 },
+                  depth, g_scr_card_ink);
+    }
 }
 
 /* ----------------------------- theme presets ---------------------------- */
@@ -864,6 +878,16 @@ static const Theme g_themes[] = {
         { 24,  43,  74, 255}, {210, 178, 106, 255},
         {195,  32,  43, 150}, {232, 197,  26, 255},
     },
+    /* Scriptorium — an illuminated manuscript: parchment, sepia ink,
+     * cinnabar rubrics, gold leaf, lapis links, verdigris quotes */
+    { "Scriptorium",
+        {232, 220, 198, 255}, { 74,  58,  42, 255}, {178,  45,  58, 255},
+        {107, 122,  74, 255}, { 63,  90, 140, 255},
+        {223, 209, 182, 255}, {140, 122,  98, 255},
+        {226, 213, 188, 255}, {217, 202, 172, 255}, {210, 192, 156, 255},
+        {226, 213, 188, 255}, {110,  92,  70, 255},
+        {176, 138,  60, 110}, {178,  45,  58, 255},
+    },
 
     /* --- British Premier League (EPL) Clubs --- */
     /* EPL: Arsenal — Emirates Stadium red, gold, and white */
@@ -1372,6 +1396,10 @@ static void theme_apply(App* a, int idx)
 {
     if (idx < 0 || idx >= G_THEME_COUNT) return;
     theme_set(a, &g_themes[idx]);
+    /* A theme can change how tall a preview row lays out (Scriptorium's
+     * drop cap), so the cached row heights don't survive a switch. */
+    for (size_t i = 0; i < a->doc.line_count; ++i)
+        a->doc.lines[i].cached_h = -1;
 }
 
 /* Snapshot the live palette (the inverse of theme_set). */
@@ -1408,6 +1436,18 @@ static bool knit_on(const App* a)
     return a->knit && a->settings_theme_idx >= 0 &&
            a->settings_theme_idx < G_THEME_COUNT &&
            !strcmp(g_themes[a->settings_theme_idx].name, "Knit");
+}
+
+/* --- Scriptorium ------------------------------------------------------- */
+/* The other material theme: an illuminated manuscript (scriptorium.c).
+ * Borders are cross-stitched, chrome is lettered in a pixel hand, numbers
+ * in the chrome are Roman, and the page gets a drop cap and marginalia.
+ * One parchment palette serves document, chrome and overlays alike. */
+static bool scriptorium_on(const App* a)
+{
+    return a->scriptorium && a->settings_theme_idx >= 0 &&
+           a->settings_theme_idx < G_THEME_COUNT &&
+           !strcmp(g_themes[a->settings_theme_idx].name, "Scriptorium");
 }
 
 static void theme_set(App* a, const Theme* t)
@@ -1835,6 +1875,34 @@ static int klabel(App* a, const char* s, KnitFont f, int x, int cy,
     int w  = knit_text(a->knit, s, strlen(s), f, x, cy - th / 2, y, max_w);
     if (w >= 0) return w;
     SDL_Color c = knit_yarn(y);
+    int asc  = font_ascent(a->font_ide);
+    int base = cy - (asc + font_descent(a->font_ide)) / 2 + asc;
+    int fw   = font_measure(a->font_ide, s, strlen(s));
+    if (max_w > 0 && fw > max_w) {
+        font_draw_elided(a->font_ide, s, strlen(s), x, base, max_w, c);
+        return max_w;
+    }
+    font_draw_line(a->font_ide, s, strlen(s), x, base, c);
+    return fw;
+}
+
+/* Scriptorium: klabel's twins. A label in the hand, vertically centred on
+ * cy, its first letter in `initial` (pass `ink` for none), elided to max_w;
+ * falls back to the IDE font in the same ink for text the hand can't chart. */
+static int slabel_w(const App* a, const char* s, ScrFont f)
+{
+    int w = scr_text_w(a->scriptorium, s, strlen(s), f);
+    return w >= 0 ? w : font_measure(a->font_ide, s, strlen(s));
+}
+
+static int slabel(App* a, const char* s, ScrFont f, int x, int cy,
+                  ScrInk ink, ScrInk initial, int max_w)
+{
+    int th = scr_text_h(a->scriptorium, f);
+    int w  = scr_text(a->scriptorium, s, strlen(s), f, x, cy - th / 2,
+                      ink, initial, max_w);
+    if (w >= 0) return w;
+    SDL_Color c = scr_ink(ink);
     int asc  = font_ascent(a->font_ide);
     int base = cy - (asc + font_descent(a->font_ide)) / 2 + asc;
     int fw   = font_measure(a->font_ide, s, strlen(s));
@@ -3044,7 +3112,9 @@ static void render_confirm_modal(App* a)
 
     overlay_backdrop(a);
     SDL_Rect box = confirm_box_rect(a);
+    g_scr_card_ink = SCR_CINNABAR;
     overlay_card(a, box);
+    g_scr_card_ink = SCR_GOLD;
 
     int sz_y = font_line_height(a->font_ide);
     int btn_h = sz_y + 16;
@@ -6283,6 +6353,8 @@ static int app_init(App* a, const char* note_path_arg)
         }
     }
     a->knit = knit_create(a->renderer);
+    a->scriptorium = scr_create(a->renderer);
+    a->scr_dropcap_line = -1;
     /* Event watch that lets the resize badge actually render while the
      * user drags an edge — on Windows the main loop is blocked inside
      * Defwindowproc during the drag, but our watch fires synchronously
@@ -6808,6 +6880,7 @@ static void app_shutdown(App* a)
     if (a->lua)                   lua_host_destroy(a->lua);
     if (a->app_icon)              SDL_DestroyTexture(a->app_icon);
     knit_destroy(a->knit);
+    scr_destroy(a->scriptorium);
     if (a->renderer)              SDL_DestroyRenderer(a->renderer);
     if (a->window)                SDL_DestroyWindow(a->window);
     SDL_Quit();
@@ -6927,7 +7000,12 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     /* Thematic break: one crisp rule across the column, vertically centred
      * in a normal line step. (Previously the block was dropped entirely.) */
     if (line->kind == LINE_HR) {
-        if (draw) {
+        if (draw && scriptorium_on(a)) {
+            /* Scriptorium: the rule is a row of gold stitches. */
+            scr_stitch_row(a->scriptorium, xL + MARGIN_X,
+                           y + (lh - scr_cell(a->scriptorium)) / 2,
+                           wrap_r - (xL + MARGIN_X), SCR_GOLD);
+        } else if (draw) {
             int ry = y + lh / 2;
             SDL_Rect r = { xL + MARGIN_X, ry, wrap_r - (xL + MARGIN_X), 1 };
             if (a->dpi_scale > 1.5f) r.h = 2;
@@ -7060,12 +7138,34 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
     const unsigned char* style = a->doc.style + line->start;
     size_t               len   = line->len;
 
-    int x = x_start;
+    /* Scriptorium: the paragraph render_preview picked gets an illuminated
+     * initial. The tile stands two rows tall at the paragraph's left edge;
+     * the letter itself is skipped in the text, and the rows beside the
+     * tile start to its right (row_x0), recording that in their PreviewRow
+     * so selection and click mapping follow. */
+    bool dropcap = a->scr_dropcap_line >= 0 &&
+                   line == &a->doc.lines[a->scr_dropcap_line];
+    int  cap_sz  = dropcap ? 2 * lh - 4 : 0;
+    int  cap_bot = y + cap_sz;
+    #define ROW_X0(y_row) ((dropcap && (y_row) < cap_bot) ? x_start + cap_sz + 8 \
+                                                          : x_start)
+    if (dropcap && draw)
+        scr_dropcap(a->scriptorium, (SDL_Rect){ x_start, y + 2, cap_sz, cap_sz },
+                    data[0]);
+
+    /* The initial stays part of its row for selection and copying: the
+     * first row records byte 0 and starts one letter-width left of the
+     * text, so every later byte maps to where it is actually drawn. */
+    bool cap_first = dropcap;
+    int  cap_lw    = dropcap ? styled_run(a, line->kind, data, style, 1,
+                                          0, 0, false) : 0;
+    int row_x0 = ROW_X0(y);
+    int x = row_x0;
     int row_y = y;
     size_t row_start = 0;            /* first byte of the visual row */
-    size_t i = 0;
+    size_t i = dropcap ? 1 : 0;
     while (i < len) {
-        if (x == x_start) {
+        if (x == row_x0) {
             /* Trim leading spaces at the start of a visual row — but NOT
              * for code lines, where leading whitespace is significant
              * (Python indents, nested braces, etc.). */
@@ -7082,7 +7182,7 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
         int w = styled_run(a, line->kind, data + w_start, style + w_start,
                            w_len, 0, 0, false);
 
-        if (x != x_start && x + w > wrap_r) {
+        if (x != row_x0 && x + w > wrap_r) {
             /* Close the wrapped-off row before starting the next. */
             if (draw) {
                 if (a->preview_row_count >= a->preview_row_cap) {
@@ -7092,16 +7192,19 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
                         a->preview_row_cap * sizeof(*a->preview_rows));
                 }
                 a->preview_rows[a->preview_row_count++] = (struct PreviewRow){
-                    .y = row_y, .lh = lh, .x_start = x_start,
+                    .y = row_y, .lh = lh,
+                    .x_start = row_x0 - (cap_first ? cap_lw : 0),
                     .font = base, .kind = line->kind,
-                    .byte_start = line->start + row_start,
+                    .byte_start = line->start + (cap_first ? 0 : row_start),
                     .byte_end   = line->start + w_start,
                 };
             }
+            cap_first = false;
             y += lh;
             row_y = y;
             ROW_CHROME(y);
-            x = x_start;
+            row_x0 = ROW_X0(y);
+            x = row_x0;
             i = w_start;
             continue;
         }
@@ -7162,13 +7265,17 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
                 a->preview_row_cap * sizeof(*a->preview_rows));
         }
         a->preview_rows[a->preview_row_count++] = (struct PreviewRow){
-            .y = row_y, .lh = lh, .x_start = x_start,
+            .y = row_y, .lh = lh,
+            .x_start = row_x0 - (cap_first ? cap_lw : 0),
             .font = base, .kind = line->kind,
-            .byte_start = line->start + row_start,
+            .byte_start = line->start + (cap_first ? 0 : row_start),
             .byte_end   = line->start + len,
         };
     }
-    *y_inout = y + lh;
+    y += lh;
+    if (dropcap && y < cap_bot + 6) y = cap_bot + 6;   /* never under the tile */
+    *y_inout = y;
+    #undef ROW_X0
     #undef ROW_CHROME
 }
 
@@ -8219,6 +8326,26 @@ static int render_preview(App* a, bool draw)
         a->row_cache_wrap_w = a->win_w;
     }
 
+    /* Scriptorium: the note's opening paragraph gets a drop cap — the first
+     * block after any headings, if it is a plain paragraph starting with an
+     * unstyled ASCII letter. Anything else (a list, code, a link, a bold
+     * word, a non-Latin letter) and the note simply has none. */
+    bool scr = scriptorium_on(a);
+    a->scr_dropcap_line = -1;
+    for (size_t i = 0; scr && i < a->doc.line_count; ++i) {
+        const MdLine* l = &a->doc.lines[i];
+        if (l->kind == LINE_BLANK || (l->kind >= LINE_H1 && l->kind <= LINE_H6))
+            continue;
+        if (l->kind == LINE_NORMAL && l->indent == 0 && l->len > 0) {
+            const char* d = a->doc.data + l->start;
+            bool ok = (d[0] >= 'A' && d[0] <= 'Z') || (d[0] >= 'a' && d[0] <= 'z');
+            for (size_t k = 0; ok && k < l->len && d[k] != ' '; ++k)
+                if (a->doc.style[l->start + k]) ok = false;
+            if (ok) a->scr_dropcap_line = (int)i;
+        }
+        break;
+    }
+
     y += render_frontmatter_pill(a, doc_x_left(a), y, draw);
     /* A code block's copy button goes on once its last line is laid out, so
      * it paints over the block's rows and knows the block's full height. */
@@ -8296,6 +8423,19 @@ static int render_preview(App* a, bool draw)
     }
     if (cb_open) CODE_BTN_FLUSH();
     #undef CODE_BTN_FLUSH
+    a->scr_dropcap_line = -1;
+    /* Scriptorium: a snail closes the note, as a scribe's colophon. It is
+     * part of the document's height, so it scrolls with the text. */
+    if (scr && a->doc.line_count > 0) {
+        Scriptorium* s = a->scriptorium;
+        int ow = scr_orn_w(s, SCR_ORN_SNAIL), oh = scr_orn_h(s, SCR_ORN_SNAIL);
+        if (doc_x_right(a) - doc_x_left(a) - 2 * MARGIN_X >= ow) {
+            if (draw && y + 16 + oh > 0 && y + 16 < win_h)
+                scr_ornament(s, SCR_ORN_SNAIL,
+                             doc_x_right(a) - MARGIN_X - ow, y + 16);
+            y += oh + 28;
+        }
+    }
     return y + a->scroll_y - doc_y_top(a);
 }
 
@@ -9588,7 +9728,9 @@ static void render_titlebar(App* a, int TBH)
     for (int i = 0; i < MENU_COUNT; ++i) {
         const char* label = MENU_LABELS[i];
         bool knit = knit_on(a);
+        bool scr  = scriptorium_on(a);
         int lw = knit ? klabel_w(a, label, KNIT_FONT_SMALL)
+               : scr  ? slabel_w(a, label, SCR_FONT_SMALL)
                       : font_measure(a->font_ide, label, strlen(label));
         int item_w = lw + 16;
         SDL_Rect r = { x, 2, item_w, TBH - 4 };
@@ -9606,6 +9748,20 @@ static void render_titlebar(App* a, int TBH)
             }
             klabel(a, label, KNIT_FONT_SMALL, x + 8, TBH / 2,
                    (is_open || t > 0.3f) ? YARN_LEMON : YARN_CREAM, 0);
+            x += item_w + 2;
+            continue;
+        }
+        if (scr) {
+            /* Scriptorium: a rubricated initial; vellum under the open or
+             * hovered menu. */
+            if (is_open || t > 0.005f) {
+                SDL_Color v = scr_ink(SCR_VELLUM);
+                SDL_SetRenderDrawColor(a->renderer, v.r, v.g, v.b,
+                                       (Uint8)(is_open ? 255 : 255 * et));
+                fill_rrect(a->renderer, r, 3);
+            }
+            slabel(a, label, SCR_FONT_SMALL, x + 8, TBH / 2,
+                   SCR_INK, SCR_CINNABAR, 0);
             x += item_w + 2;
             continue;
         }
@@ -9637,6 +9793,23 @@ static void render_titlebar(App* a, int TBH)
                 knit_text(a->knit, title, strlen(title), KNIT_FONT_BIG, tx,
                           (TBH - knit_text_h(a->knit, KNIT_FONT_BIG)) / 2,
                           YARN_WHEAT, max_x - tx);
+        } else if (scriptorium_on(a) && scr_text_ok(title, strlen(title))) {
+            /* Scriptorium: the title in the big hand, with the gable
+             * ornament at the right when the bar has room to spare. */
+            Scriptorium* s = a->scriptorium;
+            int sw_ = scr_text_w(s, title, strlen(title), SCR_FONT_BIG);
+            int min_x = x + 16, max_x = titlebar_content_right(a);
+            int tx = (a->win_w - sw_) / 2;
+            if (tx < min_x) tx = min_x;
+            int drawn = 0;
+            if (max_x - tx > 40)
+                drawn = scr_text(s, title, strlen(title), SCR_FONT_BIG, tx,
+                                 (TBH - scr_text_h(s, SCR_FONT_BIG)) / 2,
+                                 SCR_INK, SCR_CINNABAR, max_x - tx - 8);
+            int ow = scr_orn_w(s, SCR_ORN_PEDIMENT);
+            if (max_x - (tx + drawn) >= 160 && max_x - ow - 12 > tx + drawn + 24)
+                scr_ornament(s, SCR_ORN_PEDIMENT, max_x - ow - 12,
+                             TBH - scr_orn_h(s, SCR_ORN_PEDIMENT) - 1);
         } else {
         int tw = font_measure(a->font_ide, title, strlen(title));
         int min_x = x + 16;
@@ -9871,6 +10044,7 @@ static void render_chrome(App* a)
     SDL_SetRenderDrawColor(a->renderer,
         a->bg_status.r, a->bg_status.g, a->bg_status.b, 255);
     bool knit = knit_on(a);
+    bool scr  = scriptorium_on(a);
     if (knit) {
         /* Knit: peat title bar over a bark tool row. */
         knit_fill(a->knit, (SDL_Rect){ 0, 0, a->win_w, TBH }, YARN_PEAT);
@@ -9922,6 +10096,16 @@ static void render_chrome(App* a)
                    a->crumb_hover_t[0] > 0.3f ? YARN_LEMON : YARN_OAT, 0);
             bx += vw + 8;
             bx += klabel(a, "/", KNIT_FONT_SMALL, bx, cy, YARN_GOLD, 0) + 8;
+        } else if (scr) {
+            /* Scriptorium: the vault in faded ink (ink on hover), a gold
+             * solidus after it. */
+            int cy = TBH + CRH / 2;
+            int vw = slabel_w(a, vault, SCR_FONT_SMALL);
+            a->crumb_rect_vault = (SDL_Rect){ bx - 4, TBH + 4, vw + 8, CRH - 8 };
+            ScrInk vi = a->crumb_hover_t[0] > 0.3f ? SCR_INK : SCR_FADED;
+            slabel(a, vault, SCR_FONT_SMALL, bx, cy, vi, vi, 0);
+            bx += vw + 8;
+            bx += slabel(a, "/", SCR_FONT_SMALL, bx, cy, SCR_GOLD, SCR_GOLD, 0) + 8;
         } else {
         int vw = font_measure(a->font_ide, vault, strlen(vault));
         a->crumb_rect_vault = (SDL_Rect){ bx - 4, TBH + 4, vw + 8, CRH - 8 };
@@ -9968,6 +10152,7 @@ static void render_chrome(App* a)
         tab_dirty[i] = is_active ? a->buf.dirty : a->tabs.items[i].buf.dirty;
         tab_name[i]  = path ? vault_basename(path) : "(unsaved)";
         int nw_full  = knit ? klabel_w(a, tab_name[i], KNIT_FONT_SMALL)
+                     : scr  ? slabel_w(a, tab_name[i], SCR_FONT_SMALL)
                             : font_measure(a->font_ide, tab_name[i], strlen(tab_name[i]));
         int nw_cap   = knit ? 200 : 160;
         tab_nw[i]    = nw_full > nw_cap ? nw_cap : nw_full;
@@ -10037,6 +10222,31 @@ static void render_chrome(App* a)
                 SDL_Color g = knit_yarn(YARN_GOLD);
                 SDL_Rect ul = { tr.x + 3, tab_top + tab_h - 3, tw_ - 6, 2 };
                 SDL_SetRenderDrawColor(a->renderer, g.r, g.g, g.b, 255);
+                SDL_RenderFillRect(a->renderer, &ul);
+            }
+        } else if (visible && scr) {
+            /* Scriptorium: the active tab is a leaf of the page itself with
+             * a cinnabar rule under it; a gold dot marks unsaved work. */
+            int cy = tab_top + tab_h / 2;
+            if (is_active || is_hover) {
+                SDL_Color f = is_active ? scr_ink(SCR_PARCHMENT)
+                                        : scr_ink(SCR_VELLUM);
+                SDL_SetRenderDrawColor(a->renderer, f.r, f.g, f.b, 255);
+                fill_rrect(a->renderer, tr, 3);
+            }
+            ScrInk ti = is_active ? SCR_INK : SCR_FADED;
+            int tx = sx + pad;
+            tx += slabel(a, tab_name[i], SCR_FONT_SMALL, tx, cy, ti, ti, nw) + 5;
+            if (tab_dirty[i])
+                slabel(a, "\xc2\xb7", SCR_FONT_SMALL, tx, cy,
+                       SCR_GOLD, SCR_GOLD, 0);
+            if (is_hover || is_active)
+                slabel(a, "x", SCR_FONT_SMALL, close_r.x + 4, cy,
+                       SCR_CINNABAR, SCR_CINNABAR, 0);
+            if (is_active) {
+                SDL_Color c = scr_ink(SCR_CINNABAR);
+                SDL_Rect ul = { tr.x + 3, tab_top + tab_h - 2, tw_ - 6, 2 };
+                SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, 255);
                 SDL_RenderFillRect(a->renderer, &ul);
             }
         } else if (visible) {
@@ -10224,6 +10434,25 @@ static void render_chrome(App* a)
                    pill_y + pill_h / 2, ky, pill_w - 6);
             return;
         }
+        if (scr) {
+            /* Scriptorium: a vellum label ruled in cinnabar (EDIT) or gold
+             * (PREVIEW); hover deepens the vellum. */
+            SDL_Rect pr_ = { pill_x, pill_y, pill_w, pill_h };
+            SDL_Color v  = et > 0.3f ? a->bg_sidebar_active : scr_ink(SCR_VELLUM);
+            SDL_Color ln = scr_ink(active ? SCR_CINNABAR : SCR_GOLD);
+            SDL_SetRenderDrawColor(a->renderer, v.r, v.g, v.b, 255);
+            SDL_RenderFillRect(a->renderer, &pr_);
+            SDL_SetRenderDrawColor(a->renderer, ln.r, ln.g, ln.b, 255);
+            SDL_RenderDrawRect(a->renderer, &pr_);
+            SDL_Rect in_ = { pill_x + 2, pill_y + 2, pill_w - 4, pill_h - 4 };
+            SDL_RenderDrawRect(a->renderer, &in_);
+            const char* sl = active ? "EDIT" : "PREVIEW";
+            int sw_ = slabel_w(a, sl, SCR_FONT_SMALL);
+            ScrInk si = active ? SCR_CINNABAR : SCR_INK;
+            slabel(a, sl, SCR_FONT_SMALL, pill_x + (pill_w - sw_) / 2,
+                   pill_y + pill_h / 2, si, si, pill_w - 6);
+            return;
+        }
         SDL_Color pill_c = fill;
         pill_c.a = (Uint8)(active ? 255 : (200 + 30 * pr));
         pill_draw(a->renderer, pill_x, pill_y, pill_w, pill_h,
@@ -10407,6 +10636,10 @@ static int sidebar_items_top  (const App* a)
     if (knit_on(a))
         return chrome_bar_h(a) + 10 + knit_text_h(a->knit, KNIT_FONT_BIG) +
                6 + knit_band_h(a->knit, KNIT_BAND_ZIGZAG) + 8;
+    /* Scriptorium: the vault name is a rubric band. */
+    if (scriptorium_on(a))
+        return chrome_bar_h(a) + scr_cell(a->scriptorium) + 4 +
+               scr_rubric_h(a->scriptorium) + 8;
     return chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
 }
 
@@ -10651,12 +10884,150 @@ static void render_sidebar_knit(App* a)
     SDL_RenderSetClipRect(a->renderer, NULL);
 }
 
+/* The Scriptorium sidebar: the vault name as a rubric, rows in the hand
+ * (folders with a rubricated initial), the selected row on darker vellum
+ * with a cinnabar bar, and a candle in the empty space at the foot — lit
+ * while the open note has unsaved work. Same geometry as render_sidebar so
+ * hit-testing is shared. */
+static void render_sidebar_scriptorium(App* a)
+{
+    Scriptorium* s = a->scriptorium;
+    int top  = chrome_bar_h(a);
+    int sw   = a->sidebar_w;
+    int cell = scr_cell(s);
+    int rw   = sw - cell - 1;                  /* rows stop short of the seam */
+
+    SDL_Rect bg = { 0, top, sw, a->win_h - top };
+    SDL_SetRenderDrawColor(a->renderer,
+        a->bg_sidebar.r, a->bg_sidebar.g, a->bg_sidebar.b, 255);
+    SDL_RenderFillRect(a->renderer, &bg);
+
+    const char* title = a->vault.dir ? vault_basename(a->vault.dir) : "vault";
+    SDL_Rect band = { cell + 2, top + cell + 4, rw - cell - 3, 0 };
+    if (!scr_rubric(s, band, title)) {
+        SDL_Color c = scr_ink(SCR_CINNABAR);
+        int h = scr_rubric_h(s);
+        font_draw_elided(a->font_ide, title, strlen(title), band.x + 8,
+            band.y + (h - font_ascent(a->font_ide) - font_descent(a->font_ide)) / 2
+                   + font_ascent(a->font_ide),
+            band.w - 16, c);
+    }
+
+    int items_top = sidebar_items_top(a);
+    int bot       = a->win_h - status_bar_h(a) - cell;
+    SDL_Rect clip = { 0, items_top, rw, bot - items_top };
+    SDL_RenderSetClipRect(a->renderer, &clip);
+
+    int item_h = sidebar_item_height(a);
+    int item_y = items_top - a->sidebar_scroll_y;
+
+    if (a->sidebar_visible_count == 0) {
+        const char* msg = (a->vault.count == 0) ? "(no .md files in vault)"
+                                                : "(no items visible)";
+        slabel(a, msg, SCR_FONT_SMALL, SIDEBAR_PAD_X + cell, item_y + item_h / 2,
+               SCR_FADED, SCR_FADED, rw - 2 * SIDEBAR_PAD_X - cell);
+    }
+
+    SDL_Color faded = scr_ink(SCR_FADED), cin = scr_ink(SCR_CINNABAR);
+    SDL_Color gold  = scr_ink(SCR_GOLD);
+    for (int row = 0; row < a->sidebar_visible_count; ++row) {
+        int vi = a->sidebar_visible[row];
+        VaultItem* it = &a->vault.items[vi];
+        bool is_sel = vi == a->vault.selected;
+        bool is_hov = vi == a->sidebar_hover;
+        int  depth  = it->depth;
+        int  cy     = item_y + item_h / 2;
+
+        if (item_y + item_h < clip.y || item_y > clip.y + clip.h) {
+            item_y += item_h;
+            continue;
+        }
+        if (is_sel || is_hov) {
+            SDL_Color f = is_sel ? a->bg_sidebar_active : a->bg_sidebar_hover;
+            SDL_Rect sr = { cell + 1, item_y, rw - cell - 1, item_h };
+            SDL_SetRenderDrawColor(a->renderer, f.r, f.g, f.b, 255);
+            SDL_RenderFillRect(a->renderer, &sr);
+        }
+        if (is_sel) {
+            SDL_Rect bar = { cell + 1, item_y, 3, item_h };
+            SDL_SetRenderDrawColor(a->renderer, cin.r, cin.g, cin.b, 255);
+            SDL_RenderFillRect(a->renderer, &bar);
+        }
+
+        SDL_SetRenderDrawColor(a->renderer, faded.r, faded.g, faded.b, 70);
+        for (int d = 0; d < depth; ++d) {
+            int gx = SIDEBAR_PAD_X + d * SIDEBAR_INDENT_STEP + 8;
+            bool continues = sidebar_ancestor_continues(a, row, d + 1);
+            int gb = (d == depth - 1 && !continues) ? cy : item_y + item_h;
+            SDL_RenderDrawLine(a->renderer, gx, item_y, gx, gb);
+            if (d == depth - 1)
+                SDL_RenderDrawLine(a->renderer, gx + 1, cy,
+                    SIDEBAR_PAD_X + depth * SIDEBAR_INDENT_STEP - 2, cy);
+        }
+
+        int x_indent = SIDEBAR_PAD_X + depth * SIDEBAR_INDENT_STEP;
+        int x_text   = x_indent + 16;
+        if (it->is_dir)
+            icon_draw(a->renderer,
+                      it->collapsed ? ICON_CARET_RIGHT : ICON_CARET_DOWN,
+                      x_indent, item_y + (item_h - SIDEBAR_ICON_SZ) / 2,
+                      SIDEBAR_ICON_SZ, cin);
+
+        /* Right-edge widget (folder count / unsaved dot), measured first so
+         * the name elides before it. */
+        char cnt[24];
+        int  right_w = 0;
+        cnt[0] = 0;
+        if (it->is_dir) {
+            int count = sidebar_folder_file_count(a, vi);
+            if (count > 0) {
+                scr_roman((unsigned)count, cnt, sizeof cnt);
+                right_w = slabel_w(a, cnt, SCR_FONT_SMALL) + 8;
+            }
+        } else if (is_sel && a->buf.dirty) {
+            right_w = 12;
+        }
+        int right = rw - SIDEBAR_PAD_X + 4;
+        if (right - right_w - x_text > 0)
+            slabel(a, it->name, SCR_FONT_SMALL, x_text, cy, SCR_INK,
+                   it->is_dir ? SCR_CINNABAR : SCR_INK, right - right_w - x_text);
+        if (cnt[0]) {
+            int cw = slabel_w(a, cnt, SCR_FONT_SMALL);
+            slabel(a, cnt, SCR_FONT_SMALL, right - cw, cy,
+                   SCR_FADED, SCR_FADED, 0);
+        } else if (right_w) {
+            SDL_Rect dot = { right - 6, cy - 2, 4, 4 };
+            SDL_SetRenderDrawColor(a->renderer, gold.r, gold.g, gold.b, 255);
+            SDL_RenderFillRect(a->renderer, &dot);
+        }
+        item_y += item_h;
+    }
+
+    /* The candle, in whatever is left below the last row. */
+    bool lit  = a->buf.dirty;
+    ScrOrnament co = lit ? SCR_ORN_CANDLE_LIT : SCR_ORN_CANDLE;
+    int  ow = scr_orn_w(s, co), oh = scr_orn_h(s, co);
+    if (sw >= 150 && bot - item_y >= oh + 24 && bot - items_top >= oh + 24) {
+        int ox = cell + 12, oy = bot - oh - 10;
+        scr_ornament(s, co, ox, oy);
+        int tx = ox + ow + 10, th = scr_text_h(s, SCR_FONT_SMALL);
+        if (lit && rw - tx > 90) {
+            scr_text(s, "Save thy work", 13, SCR_FONT_SMALL, tx,
+                     oy + oh - 2 * th - 14, SCR_CINNABAR, SCR_CINNABAR, rw - tx - 4);
+            scr_text(s, "before dark.", 12, SCR_FONT_SMALL, tx,
+                     oy + oh - th - 9, SCR_CINNABAR, SCR_CINNABAR, rw - tx - 4);
+        }
+    }
+    SDL_RenderSetClipRect(a->renderer, NULL);
+}
+
 static void render_sidebar(App* a)
 {
     if (!a->sidebar_open) return;
 
     sidebar_compute_visible(a);
     if (knit_on(a)) { render_sidebar_knit(a); return; }
+    if (scriptorium_on(a)) { render_sidebar_scriptorium(a); return; }
 
     SDL_Rect bg = { 0, chrome_bar_h(a), a->sidebar_w,
                     a->win_h - chrome_bar_h(a) };
@@ -14906,6 +15277,9 @@ static void picker_adjust(App* a, int delta)
     *ch = (unsigned char)v;
     /* Mark as custom so the persisted theme name doesn't shadow on reload. */
     a->settings_theme_idx = -1;
+    /* Leaving a named theme can change preview row heights (see theme_apply). */
+    for (size_t i = 0; i < a->doc.line_count; ++i)
+        a->doc.lines[i].cached_h = -1;
 }
 
 static int picker_row_h(const App* a) { return font_line_height(a->font_ide) + 8; }
@@ -15275,13 +15649,27 @@ static int outline_panel_row_h(const App* a) {
     return font_line_height(a->font_ide) + 8;
 }
 
+/* Top of the pinned panel's rows, below its header. Shared by the renderer
+ * and the hit test. Scriptorium's rubric header can be taller than the
+ * plain one, so it reserves its real height. */
+static int outline_panel_rows_top(const App* a)
+{
+    int top = chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
+    if (scriptorium_on(a)) {
+        int need = chrome_bar_h(a) + scr_cell(a->scriptorium) + 4 +
+                   scr_rubric_h(a->scriptorium) + 8;
+        if (need > top) top = need;
+    }
+    return top;
+}
+
 /* Hit-test the pinned panel: returns outline entry index, or -1. */
 static int outline_panel_hit_test(const App* a, int mx, int my)
 {
     if (!a->outline_pinned) return -1;
     int px = outline_panel_x(a);
     if (mx < px || mx >= a->win_w) return -1;
-    int top = chrome_bar_h(a) + font_line_height(a->font_ide) + 18;
+    int top = outline_panel_rows_top(a);
     int bot = a->win_h - status_bar_h(a);
     if (my < top || my >= bot) return -1;
     int rh = outline_panel_row_h(a);
@@ -15355,17 +15743,40 @@ static void render_outline_panel(App* a)
     char header[80];
     snprintf(header, sizeof header, "Outline  \xc2\xb7  %d",
              a->outline_count);
+    bool scr = scriptorium_on(a);
+    int rows_top = outline_panel_rows_top(a);
+    if (scr) {
+        /* Scriptorium: a rubric with the count in Roman numerals at its
+         * right, and a chapel in the empty space at the foot. */
+        Scriptorium* s = a->scriptorium;
+        int cell = scr_cell(s), rh_ = scr_rubric_h(s);
+        int by_  = top + cell + 4;
+        SDL_Rect band = { px + cell + 3, by_, pw - 2 * cell - 6, 0 };
+        scr_rubric(s, band, "Outline");
+        char cnt[24];
+        scr_roman((unsigned)a->outline_count, cnt, sizeof cnt);
+        int cw = slabel_w(a, cnt, SCR_FONT_SMALL);
+        if (band.w > 150 + cw)
+            slabel(a, cnt, SCR_FONT_SMALL, band.x + band.w - cw - 8,
+                   by_ + rh_ / 2, SCR_CINNABAR, SCR_CINNABAR, 0);
+        int ow = scr_orn_w(s, SCR_ORN_CHAPEL), oh = scr_orn_h(s, SCR_ORN_CHAPEL);
+        int rows_bot = rows_top - a->outline_scroll +
+                       a->outline_count * outline_panel_row_h(a);
+        if (pw >= ow + 40 && bot - cell - rows_bot >= oh + 24)
+            scr_ornament(s, SCR_ORN_CHAPEL, px + pw - ow - 14,
+                         bot - cell - oh - 8);
+    } else {
     font_draw_line(a->font_ide, header, strlen(header),
                    px + 12, header_y + font_ascent(a->font_ide),
                    a->fg);
 
-    int rows_top = top + font_line_height(a->font_ide) + 18;
     /* Hairline divider under the header so it reads as a section, not as
      * just another row in the list. */
     SDL_Rect hdiv = { px + 12, rows_top - 6, pw - 24, 1 };
     SDL_SetRenderDrawColor(a->renderer,
         a->fg_muted.r, a->fg_muted.g, a->fg_muted.b, 70);
     SDL_RenderFillRect(a->renderer, &hdiv);
+    }
 
     SDL_Rect clip = { px + 1, rows_top - 2, pw - 1, bot - rows_top };
     SDL_RenderSetClipRect(a->renderer, &clip);
@@ -17093,6 +17504,12 @@ static void render_window_border(App* a)
                    resizing ? YARN_LEMON : YARN_GOLD);
         return;
     }
+    /* Scriptorium: a cross-stitched border, gold (cinnabar while resizing). */
+    if (scriptorium_on(a)) {
+        scr_frame(a->scriptorium, (SDL_Rect){ 1, 1, a->win_w - 2, a->win_h - 2 },
+                  1, resizing ? SCR_CINNABAR : SCR_GOLD);
+        return;
+    }
     SDL_Color c        = resizing ? a->fg_link : a->fg_muted;
     int       t        = resizing ? 2 : 1;
     Uint8     alpha    = resizing ? 200 : 150;
@@ -17155,6 +17572,27 @@ static void render_resize_badge(App* a)
         knit_running_stitch(a->knit, r, 6, knit_yarn(YARN_GOLD));
         knit_text(a->knit, label, strlen(label), KNIT_FONT_BIG,
                   r.x + 26, r.y + 18, YARN_LEMON, 0);
+        a->wants_anim_frame = true;
+        return;
+    }
+    /* Scriptorium: a vellum label stitched in cinnabar, the size in Roman
+     * numerals in the big hand. */
+    if (scriptorium_on(a)) {
+        Scriptorium* s = a->scriptorium;
+        char roman[96];
+        scr_romanize(label, roman, sizeof roman);
+        int tw = scr_text_w(s, roman, strlen(roman), SCR_FONT_BIG);
+        int th = scr_text_h(s, SCR_FONT_BIG);
+        int w = tw + 2 * 30, h = th + 2 * 24;
+        SDL_Rect r = { (a->win_w - w) / 2, (a->win_h - h) / 2, w, h };
+        SDL_Color v = scr_ink(SCR_VELLUM);
+        SDL_SetRenderDrawColor(a->renderer, 0, 0, 0, 60);
+        SDL_RenderFillRect(a->renderer, &(SDL_Rect){ r.x + 2, r.y + 3, w, h });
+        SDL_SetRenderDrawColor(a->renderer, v.r, v.g, v.b, 255);
+        SDL_RenderFillRect(a->renderer, &r);
+        scr_frame(s, (SDL_Rect){ r.x + 2, r.y + 2, w - 4, h - 4 }, 2, SCR_CINNABAR);
+        scr_text(s, roman, strlen(roman), SCR_FONT_BIG, r.x + 30, r.y + 24,
+                 SCR_INK, SCR_INK, 0);
         a->wants_anim_frame = true;
         return;
     }
@@ -17310,9 +17748,14 @@ static void render_status(App* a)
     }
     SDL_RenderFillRect(a->renderer, &div);
 
+    bool scr = scriptorium_on(a);
+    if (scr) cy -= 2;                 /* clear of the stitched window frame */
     uint32_t now = SDL_GetTicks();
     if (a->notification_msg && now < a->notification_until) {
-        if (knit)
+        if (scr)
+            slabel(a, a->notification_msg, SCR_FONT_SMALL, 12, cy,
+                   SCR_CINNABAR, SCR_CINNABAR, a->win_w - 24);
+        else if (knit)
             klabel(a, a->notification_msg, KNIT_FONT_SMALL, 12, cy,
                    YARN_LEMON, a->win_w - 24);
         else
@@ -17355,6 +17798,53 @@ static void render_status(App* a)
     /* Mode prefix in accent color, then the rest in muted. */
     const char* mode = a->edit_mode ? "EDIT" : "PREVIEW";
     int x = 12;
+    if (scr) {
+        /* Scriptorium: the whole bar in the hand, the mode rubricated, and
+         * every count in Roman numerals. The file name is left as written
+         * (buf always starts with it). */
+        const char* name = a->note_path ? vault_basename(a->note_path)
+                                        : "(unsaved)";
+        size_t nlen = strlen(name);
+        if (strncmp(buf, name, nlen) != 0) nlen = 0;
+        char head[300], tail[300], pos[96], wc[64], rm[128];
+        snprintf(head, sizeof head, "%.*s", (int)nlen, buf);
+        scr_romanize(buf + nlen, tail, sizeof tail);
+
+        int rx = a->win_w - 12;
+        size_t line, col;
+        buffer_cursor_pos(&a->buf, &line, &col);
+        snprintf(pos, sizeof pos, "Ln %zu / %zu  Col %zu",
+                 line + 1, buffer_line_count(&a->buf), col + 1);
+        scr_romanize(pos, rm, sizeof rm);
+        rx -= slabel_w(a, rm, SCR_FONT_SMALL);
+        slabel(a, rm, SCR_FONT_SMALL, rx, cy, SCR_FADED, SCR_FADED, 0);
+        rx -= 18;
+        const char* eol = buf_detect_line_endings(&a->buf) == 2 ? "CRLF" : "LF";
+        rx -= slabel_w(a, eol, SCR_FONT_SMALL);
+        slabel(a, eol, SCR_FONT_SMALL, rx, cy, SCR_FADED, SCR_FADED, 0);
+        rx -= 18;
+        const char* wd = a->buf.data;
+        size_t      wl = a->buf.len;
+        if (a->fm_present && a->fm_body_start <= a->buf.len) {
+            wd += a->fm_body_start;
+            wl -= a->fm_body_start;
+        }
+        word_count_str(buf_word_count(wd, wl), wc, sizeof wc);
+        scr_romanize(wc, rm, sizeof rm);
+        rx -= slabel_w(a, rm, SCR_FONT_SMALL);
+        slabel(a, rm, SCR_FONT_SMALL, rx, cy, SCR_FADED, SCR_FADED, 0);
+        rx -= 18;
+
+        x += slabel(a, mode, SCR_FONT_SMALL, x, cy,
+                    SCR_CINNABAR, SCR_CINNABAR, 0) + 14;
+        if (rx - x > 30 && head[0])
+            x += slabel(a, head, SCR_FONT_SMALL, x, cy, SCR_INK, SCR_INK,
+                        rx - x);
+        if (rx - x > 30 && tail[0])
+            slabel(a, tail, SCR_FONT_SMALL, x + 14, cy, SCR_FADED, SCR_FADED,
+                   rx - x - 14);
+        return;
+    }
     if (knit) {
         x += klabel(a, mode, KNIT_FONT_SMALL, x, cy, YARN_LEMON, 0) + 14;
         klabel(a, buf, KNIT_FONT_SMALL, x, cy, YARN_WHEAT, a->win_w / 2 - x);
@@ -18103,13 +18593,52 @@ static void knit_doc_end(App* a, const Theme* wool)
     theme_set(a, wool);
 }
 
+/* Scriptorium: the ruled margins of the current pane's page — a gold line
+ * with a cinnabar one just inside it, either side of the text column. */
+static void scr_page_rules(App* a)
+{
+    int top = chrome_bar_h(a) + scr_cell(a->scriptorium) + 2;
+    int h   = a->win_h - status_bar_h(a) - scr_cell(a->scriptorium) - 2 - top;
+    int xl  = doc_x_left(a) + MARGIN_X - 16;
+    int xr  = doc_x_right(a) - MARGIN_X + 14;
+    if (h <= 0 || xr - xl < 120) return;
+    SDL_Color g = scr_ink(SCR_GOLD), c = scr_ink(SCR_CINNABAR);
+    SDL_SetRenderDrawBlendMode(a->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(a->renderer, g.r, g.g, g.b, 170);
+    SDL_RenderFillRect(a->renderer, &(SDL_Rect){ xl, top, 1, h });
+    SDL_RenderFillRect(a->renderer, &(SDL_Rect){ xr, top, 1, h });
+    SDL_SetRenderDrawColor(a->renderer, c.r, c.g, c.b, 120);
+    SDL_RenderFillRect(a->renderer, &(SDL_Rect){ xl + 3, top, 1, h });
+    SDL_RenderFillRect(a->renderer, &(SDL_Rect){ xr - 3, top, 1, h });
+}
+
+/* Scriptorium: the stitched seams between the panels — under the chrome,
+ * above the status bar, and down the inner edge of the sidebar and the
+ * outline panel. Drawn after the panels so the stitches lie on top. */
+static void scr_seams(App* a)
+{
+    Scriptorium* s = a->scriptorium;
+    int cell = scr_cell(s);
+    int top  = chrome_bar_h(a), bot = a->win_h - status_bar_h(a);
+    scr_stitch_row(s, 0, top, a->win_w, SCR_GOLD);
+    scr_stitch_row(s, 0, bot - cell, a->win_w, SCR_GOLD);
+    if (a->sidebar_open)
+        scr_stitch_col(s, a->sidebar_w - cell, top + cell,
+                       bot - top - 2 * cell, SCR_GOLD);
+    if (a->outline_pinned)
+        scr_stitch_col(s, outline_panel_x(a), top + cell,
+                       bot - top - 2 * cell, SCR_GOLD);
+}
+
 static void app_render(App* a)
 {
     app_animate(a);
 
     bool  knit = knit_on(a);
+    bool  scr  = scriptorium_on(a);
     Theme wool;
     if (knit) knit_set_scale(a->knit, a->dpi_scale);
+    if (scr)  scr_set_scale(a->scriptorium, a->dpi_scale);
 
     SDL_SetRenderDrawColor(a->renderer, a->bg.r, a->bg.g, a->bg.b, a->bg.a);
     SDL_RenderClear(a->renderer);
@@ -18140,6 +18669,7 @@ static void app_render(App* a)
         }
         render_find_highlights(a);
         if (knit) knit_doc_end(a, &wool);
+        if (scr)  scr_page_rules(a);
 
         a->render_pane = PANE_RIGHT;
         if (knit) knit_doc_begin(a, &wool, false);
@@ -18150,11 +18680,19 @@ static void app_render(App* a)
         a->preview_scroll_y = a->scroll_y;       /* render may have clamped */
         a->scroll_y = saved_scroll;
         if (knit) knit_doc_end(a, &wool);
+        if (scr)  scr_page_rules(a);
 
         a->render_pane = PANE_FULL;
 
-        /* Knit: the wool between the two patches is the divider. */
-        if (!knit) {
+        /* Knit: the wool between the two patches is the divider.
+         * Scriptorium: a column of stitches. */
+        if (scr) {
+            int cell = scr_cell(a->scriptorium);
+            scr_stitch_col(a->scriptorium, split_divider_x(a) - cell / 2,
+                           chrome_bar_h(a) + cell,
+                           a->win_h - chrome_bar_h(a) - status_bar_h(a) - 2 * cell,
+                           SCR_GOLD);
+        } else if (!knit) {
             int dx = split_divider_x(a);
             SDL_Rect dv = { dx, chrome_bar_h(a), 1,
                             a->win_h - chrome_bar_h(a) - status_bar_h(a) };
@@ -18174,12 +18712,14 @@ static void app_render(App* a)
         if (!a->edit_mode) render_preview_selection(a);
         if (a->edit_mode) render_find_highlights(a);
         if (knit) knit_doc_end(a, &wool);
+        if (scr && !a->viewing_image) scr_page_rules(a);
     }
     render_scrollbar(a);
     render_hscrollbar(a);
     render_sidebar(a);
     render_outline_panel(a);
     render_chrome(a);
+    if (scr) scr_seams(a);
     /* Knit: overlays, menus and modals are felt patches too. */
     if (knit) { theme_capture(a, &wool); theme_set(a, &KNIT_FELT); }
     render_search_overlay(a);

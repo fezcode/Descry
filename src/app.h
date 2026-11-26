@@ -57,6 +57,8 @@ typedef struct {
     SDL_Renderer* renderer;
     SDL_Texture* app_icon;
     struct Knit*  knit;         /* Knit theme stitch textures (knit.c) */
+    struct Scriptorium* scriptorium;  /* Scriptorium theme art (scriptorium.c) */
+    int           scr_dropcap_line;   /* preview line that gets the drop cap, -1 */
     int           win_w;
     int           win_h;
     float         dpi_scale;    /* device pixels / logical points; 1.0 std DPI */

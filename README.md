@@ -129,6 +129,20 @@ the wool inside a gold stitch. Pick **Knit** under Settings → Theme.
 
 ![Knit theme, live preview split](docs/screenshots/knit-split.png)
 
+### Scriptorium theme
+
+An illuminated manuscript: parchment, sepia ink, cinnabar rubrics and gold
+leaf. Every border is a row of cross stitches, the chrome is lettered in a
+pixel hand of capitals and small capitals, and the counts in the status bar
+are Roman numerals. In preview the note's opening paragraph gets an
+illuminated drop cap and a snail closes the page; a candle at the foot of the
+sidebar burns while the note has unsaved changes. Note text keeps your own
+fonts. Pick **Scriptorium** under Settings → Theme.
+
+![Scriptorium theme, preview](docs/screenshots/scriptorium-preview.png)
+
+![Scriptorium theme, live preview split](docs/screenshots/scriptorium-split.png)
+
 ---
 
 ## Stack

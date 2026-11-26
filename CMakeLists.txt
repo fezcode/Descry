@@ -67,6 +67,8 @@ add_executable(descry
   src/mermaid.c
   src/regex.c
   src/reveal.c
+  src/scriptorium.c
+  src/scriptorium_core.c
   src/spell.c
   src/svg_extra.c
   src/tabs.c
@@ -165,6 +167,8 @@ if(DESCRY_TESTS)
   # link even though these tests only exercise the pure parsing half.
   add_executable(test_svg_extra tests/test_svg_extra.c src/svg_extra.c
                  src/icon_raster.c)
+  add_executable(test_scriptorium tests/test_scriptorium.c
+                 src/scriptorium_core.c)
   target_link_libraries(test_icons PRIVATE m)
   target_link_libraries(test_svg_extra PRIVATE
                         PkgConfig::FREETYPE PkgConfig::HARFBUZZ m)
@@ -172,7 +176,8 @@ if(DESCRY_TESTS)
   target_link_libraries(test_graph PRIVATE m)
   target_link_libraries(test_lua_sandbox PRIVATE lua_static)
   foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
-            test_mermaid test_inputfield test_lua_sandbox test_svg_extra)
+            test_mermaid test_inputfield test_lua_sandbox test_svg_extra
+            test_scriptorium)
     target_include_directories(${t} PRIVATE src vendor/nanosvg)
     # The tests are written with assert(); Release adds -DNDEBUG, which would
     # compile every check out and leave a test that passes by doing nothing.
@@ -191,4 +196,5 @@ if(DESCRY_TESTS)
   add_test(NAME inputfield COMMAND test_inputfield)
   add_test(NAME lua_sandbox COMMAND test_lua_sandbox)
   add_test(NAME svg_extra COMMAND test_svg_extra)
+  add_test(NAME scriptorium COMMAND test_scriptorium)
 endif()
