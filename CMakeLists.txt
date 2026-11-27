@@ -192,7 +192,7 @@ if(DESCRY_TESTS)
                         PkgConfig::FREETYPE PkgConfig::HARFBUZZ m)
   target_link_libraries(test_markdown PRIVATE md4c)
   target_link_libraries(test_graph PRIVATE m)
-  target_link_libraries(test_lua_sandbox PRIVATE lua_static)
+  target_link_libraries(test_lua_sandbox PRIVATE lua_static m)
   foreach(t test_tabs test_hoswl test_icons test_reveal test_markdown test_graph
             test_mermaid test_inputfield test_lua_sandbox test_svg_extra
             test_scriptorium)
