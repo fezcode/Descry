@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -54,6 +55,20 @@ int path_canon_existing(const char* path, char* out, size_t cap)
     return 1;
 }
 #endif
+
+int path_is_link(const char* path)
+{
+    if (!path || !*path) return 0;
+#if defined(_WIN32)
+    wchar_t w[PS_MAX];
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, PS_MAX)) return 0;
+    DWORD at = GetFileAttributesW(w);
+    return at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+#endif
+}
 
 int path_resolves_under(const char* path, const char* root)
 {

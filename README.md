@@ -304,12 +304,13 @@ untrusted input:
 - **Symlinks** inside a vault are followed only when they point back into
   the vault. A vault's leftover `.descry.state` may only reopen that
   vault's own notes.
-- **HTML export** drops raw HTML from the note and adds a
-  Content-Security-Policy, so an exported page runs no script.
+- **HTML export** keeps a note's inline HTML but adds a strict
+  Content-Security-Policy and drops `javascript:`/`data:`/`file:` link
+  targets, so an exported page runs no script.
 - **Plugins** run in a confined Lua: no processes, no native modules, no
   bytecode, no `debug`. File access (`io.open`, `io.lines`, `os.remove`,
-  `os.rename`, `require`) works only inside the open vault and the plugin
-  folder. See [docs/plugins.md](docs/plugins.md#sandbox).
+  `os.rename`, `require`, `descry.open`) works only inside the open vault
+  and the plugin folder. See [docs/plugins.md](docs/plugins.md#sandbox).
 - **Builds** are hardened (ASLR, DEP, stack protector, `_FORTIFY_SOURCE`;
   full RELRO and PIE on Linux), load run-time DLLs only from the app folder
   and System32 on Windows, and every release carries `SHA256SUMS.txt`.

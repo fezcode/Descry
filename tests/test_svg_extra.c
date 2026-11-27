@@ -323,6 +323,28 @@ static void test_hostile_inputs(void)
     nsvgDeleteRasterizer(r);
     nsvgDelete(img);
 
+    /* ...but an ordinary dash pattern still dashes: the guard looks at the
+     * whole dash period, so short entries in a normal pattern are kept. */
+    {
+        char dots[] = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='8'>"
+                      "<path d='M2 4L38 4' stroke='#000' stroke-width='2' "
+                      "stroke-dasharray='0.04 0.01 3 4'/></svg>";
+        NSVGimage* di = nsvgParse(dots, "px", 96.0f);
+        assert(di);
+        NSVGrasterizer* dr = nsvgCreateRasterizer();
+        unsigned char* dp = calloc(40 * 8 * 4, 1);
+        assert(dr && dp);
+        nsvgRasterize(dr, di, 0, 0, 1.0f, dp, 40, 8, 160);
+        int inked = 0, gaps = 0;
+        for (int x = 2; x < 38; ++x) {
+            if (dp[(4 * 40 + x) * 4 + 3] > 128) inked++; else gaps++;
+        }
+        assert(inked > 0 && gaps > 0 && "a dashed stroke must keep its gaps");
+        free(dp);
+        nsvgDeleteRasterizer(dr);
+        nsvgDelete(di);
+    }
+
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("  hostile inputs: %.2fs\n", secs);
     assert(secs < 10.0);

@@ -78,16 +78,23 @@ if (-not $signtool) {
 # process on the machine can read from the command line. Import the PFX into
 # the user's store with the password passed as a SecureString instead, sign
 # by thumbprint, and remove it again afterwards.
-$importedThumb = $null
+$added = @()
 if (-not $thumbprint) {
     if (-not (Test-Path -LiteralPath $pfx)) { throw "DESCRY_SIGN_PFX does not exist: $pfx" }
     $secure = if ($env:DESCRY_SIGN_PFX_PASSWORD) {
         ConvertTo-SecureString -String $env:DESCRY_SIGN_PFX_PASSWORD -AsPlainText -Force
     } else { New-Object System.Security.SecureString }
+    # Which certificates were in the store before: only what this script adds
+    # gets removed again (a purchased cert the user also keeps as a PFX must
+    # survive, private key and all).
+    $before = @(Get-ChildItem Cert:\CurrentUser\My, Cert:\CurrentUser\CA, Cert:\CurrentUser\Root -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.PSParentPath + "|" + $_.Thumbprint })
     $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation "Cert:\CurrentUser\My" -Password $secure
-    $importedThumb = ($imported | Where-Object { $_.HasPrivateKey } | Select-Object -First 1).Thumbprint
-    if (-not $importedThumb) { throw "No certificate with a private key in $pfx" }
-    $thumbprint = $importedThumb
+    $signer = $imported | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+    if (-not $signer) { throw "No certificate with a private key in $pfx" }
+    $thumbprint = $signer.Thumbprint
+    $added = @(Get-ChildItem Cert:\CurrentUser\My, Cert:\CurrentUser\CA, Cert:\CurrentUser\Root -ErrorAction SilentlyContinue |
+               Where-Object { $before -notcontains ($_.PSParentPath + "|" + $_.Thumbprint) })
 }
 
 # --- sign ----------------------------------------------------------------
@@ -107,7 +114,7 @@ foreach ($file in $Path) {
     if ($LASTEXITCODE -ne 0) { throw "signtool failed on $full ($LASTEXITCODE)" }
 }
 } finally {
-    if ($importedThumb) {
-        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$importedThumb" -DeleteKey -ErrorAction SilentlyContinue
+    foreach ($c in @($added)) {
+        if ($c) { Remove-Item -LiteralPath $c.PSPath -DeleteKey -ErrorAction SilentlyContinue }
     }
 }

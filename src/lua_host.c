@@ -33,6 +33,9 @@ typedef struct {
     int    disabled;      /* 1 if skipped (user-disabled); not run        */
 } PluginInfo;
 
+/* A sandbox root folder and its resolved form, cached (see LuaHost). */
+typedef struct { char src[4096]; char canon[4096]; int ok; } SandboxRoot;
+
 struct LuaHost {
     lua_State*  L;
     PluginInfo* plugins;
@@ -44,6 +47,11 @@ struct LuaHost {
     int        (*enabled_cb)(const char* name, void* ud);
     void*       enabled_ud;
     char*       plugin_dir;       /* sandbox root, with the vault */
+    /* Resolved sandbox roots, cached: resolving a folder costs a file-system
+     * round trip, and io.open is called in loops. Refreshed whenever the
+     * folder they were resolved from changes. */
+    SandboxRoot root_plug, root_vault;
+    int         trusted;          /* >0 while the user's own config runs */
 };
 
 /* The host pointer is stashed in the Lua extra-space so callbacks can find
@@ -89,6 +97,10 @@ static int canon_path(const char* path, char* out, size_t cap)
 {
     if (!path || !*path || strlen(path) >= SANDBOX_PATH_MAX) return 0;
     if (canon_existing(path, out, cap)) return 1;
+    /* It does not resolve. If it is nonetheless a link, it is a dangling
+     * one: opening it for writing would create its target wherever that
+     * points, which the folder check below cannot see. */
+    if (path_is_link(path)) return 0;
     char dir[SANDBOX_PATH_MAX];
     snprintf(dir, sizeof dir, "%s", path);
     char* slash = strrchr(dir, '/');
@@ -115,23 +127,32 @@ static int canon_path(const char* path, char* out, size_t cap)
     return 1;
 }
 
-static int under_root(const char* canon, const char* root_path)
+static int under_root(LuaHost* h, const char* canon, const char* root_path, int which)
 {
-    char root[SANDBOX_PATH_MAX];
-    if (!root_path || !*root_path || !canon_existing(root_path, root, sizeof root)) return 0;
-    size_t rl = strlen(root);
-    while (rl > 1 && root[rl - 1] == '/') root[--rl] = 0;
-    if (strncmp(canon, root, rl) != 0) return 0;
-    return canon[rl] == 0 || canon[rl] == '/' || root[rl - 1] == '/';
+    if (!root_path || !*root_path) return 0;
+    SandboxRoot* r = which ? &h->root_vault : &h->root_plug;
+    if (strcmp(r->src, root_path) != 0) {
+        snprintf(r->src, sizeof r->src, "%s", root_path);
+        r->ok = canon_existing(root_path, r->canon, sizeof r->canon);
+        if (r->ok) {
+            size_t rl = strlen(r->canon);
+            while (rl > 1 && r->canon[rl - 1] == '/') r->canon[--rl] = 0;
+        }
+    }
+    if (!r->ok) return 0;
+    size_t rl = strlen(r->canon);
+    if (strncmp(canon, r->canon, rl) != 0) return 0;
+    return canon[rl] == 0 || canon[rl] == '/' || r->canon[rl - 1] == '/';
 }
 
 static int sandbox_path_ok(LuaHost* h, const char* path)
 {
+    if (h->trusted > 0) return 1;
     char c[SANDBOX_PATH_MAX];
     if (!canon_path(path, c, sizeof c)) return 0;
-    if (h->plugin_dir && under_root(c, h->plugin_dir)) return 1;
+    if (h->plugin_dir && under_root(h, c, h->plugin_dir, 0)) return 1;
     const char* v = (h->bridge.vault_dir) ? h->bridge.vault_dir(h->bridge.ud) : NULL;
-    if (v && under_root(c, v)) return 1;
+    if (v && under_root(h, c, v, 1)) return 1;
     return 0;
 }
 
@@ -142,7 +163,8 @@ static int sandbox_guard(lua_State* L)
     LuaHost* h = host_self(L);
     int npaths = (int)lua_tointeger(L, lua_upvalueindex(2));
     for (int i = 1; i <= npaths; ++i) {
-        if (lua_type(L, i) != LUA_TSTRING) continue;
+        /* Numbers count: the stdlib would turn io.open(123) into "123". */
+        if (!lua_isstring(L, i)) continue;
         const char* p = lua_tostring(L, i);
         if (!sandbox_path_ok(h, p)) {
             /* Same shape as a failed io.open: nil, message. */
@@ -359,7 +381,13 @@ void lua_host_destroy(LuaHost* h)
 
 int lua_host_load_config(LuaHost* h, const char* path)
 {
-    if (dofile_text(h->L, path) != LUA_OK) {
+    /* init.lua / settings.lua are the user's own files, not plugins: while
+     * they run, their file access is not confined (a config may dofile a
+     * second file of keybindings, say). */
+    h->trusted++;
+    int rc = dofile_text(h->L, path);
+    h->trusted--;
+    if (rc != LUA_OK) {
         fprintf(stderr, "lua: %s\n", lua_tostring(h->L, -1));
         lua_pop(h->L, 1);
         return -1;
@@ -406,7 +434,10 @@ int lua_host_overlay_config(LuaHost* h, const char* path)
     FILE* probe = fopen(path, "rb");
     if (!probe) return 0;
     fclose(probe);
-    if (dofile_text(h->L, path) != LUA_OK) {
+    h->trusted++;
+    int rc = dofile_text(h->L, path);
+    h->trusted--;
+    if (rc != LUA_OK) {
         fprintf(stderr, "lua: %s\n", lua_tostring(h->L, -1));
         lua_pop(h->L, 1);
         return -1;
@@ -742,6 +773,10 @@ static int l_open(lua_State* L)
 {
     const char* p = luaL_checkstring(L, 1);
     LuaHost* h = host_self(L);
+    /* Opening a file puts its text in descry.buffer and lets descry.save
+     * write it back, so it is file access like any other: same box. */
+    if (h && !sandbox_path_ok(h, p))
+        return luaL_error(L, "descry.open: %s is outside the vault and plugin folder", p);
     if (h && h->bridge.open_path) h->bridge.open_path(h->bridge.ud, p);
     return 0;
 }

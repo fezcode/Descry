@@ -422,6 +422,7 @@ typedef struct {
      * menubar and drop the in-app strip while connected. Fields exist on every
      * platform so the settings plumbing stays uniform. */
     bool     cfg_hoswl;
+    bool     cfg_remote_images;   /* fetch http(s) images in preview */
     bool     cfg_hoswl_menus;
     /* Windows 11: ask DWM to round the window corners (anti-aliased by the
      * compositor). The frame outline follows the curve when on. */

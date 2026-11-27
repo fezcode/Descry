@@ -46,10 +46,15 @@ Plugins get Lua 5.4 with these limits:
 - **No processes or native code.** `os.execute`, `io.popen`, `os.exit`,
   `package.loadlib` and native `require` modules (`package.cpath`) are gone.
 - **Files: vault and plugin folder only.** `io.open`, `io.lines`,
-  `io.input`, `io.output`, `os.remove`, `os.rename`, `loadfile`, `dofile`
-  and `require` work as usual inside the open vault and the plugin folder.
-  Anywhere else, they fail the way a missing file does (`nil, message`).
-  Symlinks and junctions are resolved before the check.
+  `io.input`, `io.output`, `os.remove`, `os.rename`, `loadfile`, `dofile`,
+  `require` and `descry.open` work as usual inside the open vault and the
+  plugin folder. Anywhere else, they fail the way a missing file does
+  (`nil, message`; `descry.open` raises an error). Symlinks and junctions
+  are resolved before the check, and a dangling link is refused. The vault
+  is opened after plugins load, so touch vault files from actions and
+  events, not from a plugin's top level.
+- `init.lua` and `settings.lua` are your own files, not plugins: their file
+  access is not confined.
 - **Source text only.** `load`, `loadfile`, `dofile` and `require` refuse
   precompiled bytecode, which Lua does not verify.
 - **No introspection.** The `debug` library and `string.dump` are removed.

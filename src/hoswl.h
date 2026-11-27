@@ -489,29 +489,37 @@ static int hoswl__write(hoswl_t* h, const char* s, size_t n)
     return 0;
 }
 
-/* 1 if the pipe's server runs as the same user as this process. Menu
- * actions arrive over the pipe, so a pipe created by another account (or a
- * sandboxed process of ours) must not be able to drive the app. */
+/* 1 if the pipe's server may drive this app. Menu actions arrive over the
+ * pipe, and pipe names are machine-wide, so a process in another logon
+ * session (another user at the same machine, a service) must not be able to
+ * squat the name. Required: the same session. And when the server's token
+ * can be read, it must be the same user. An elevated Hisashi is in our
+ * session but its token is not readable from a non-elevated app; that is
+ * fine -- it is more trusted than we are, not less. */
 static int hoswl__pipe_owned_by_us(HANDLE pipe)
 {
-    ULONG pid = 0;
+    ULONG pid = 0, srv_session = 0;
+    DWORD my_session = 0;
     HANDLE proc, tok_srv = NULL, tok_me = NULL;
     BYTE buf_srv[256], buf_me[256];
     DWORD len = 0;
-    int same = 0;
+    int ok = 1;
     if (!GetNamedPipeServerProcessId(pipe, &pid) || pid == 0) return 0;
+    if (!GetNamedPipeServerSessionId(pipe, &srv_session)) return 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &my_session)) return 0;
+    if (srv_session != my_session) return 0;
     proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!proc) return 0;
+    if (!proc) return 1;                    /* more privileged than us */
     if (OpenProcessToken(proc, TOKEN_QUERY, &tok_srv) &&
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok_me) &&
         GetTokenInformation(tok_srv, TokenUser, buf_srv, sizeof buf_srv, &len) &&
         GetTokenInformation(tok_me,  TokenUser, buf_me,  sizeof buf_me,  &len))
-        same = EqualSid(((TOKEN_USER*)buf_srv)->User.Sid,
-                        ((TOKEN_USER*)buf_me)->User.Sid) != 0;
+        ok = EqualSid(((TOKEN_USER*)buf_srv)->User.Sid,
+                      ((TOKEN_USER*)buf_me)->User.Sid) != 0;
     if (tok_srv) CloseHandle(tok_srv);
     if (tok_me)  CloseHandle(tok_me);
     CloseHandle(proc);
-    return same;
+    return ok;
 }
 
 static int hoswl__try_connect(hoswl_t* h)

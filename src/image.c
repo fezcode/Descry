@@ -93,10 +93,11 @@ static unsigned char* load_png(const char* path, int* w, int* h)
     png_infop info = png_create_info_struct(png);
     if (!info) { png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return NULL; }
 
-    unsigned char* pixels = NULL;
-    png_bytep* rows = NULL;
+    /* volatile: assigned after setjmp and read after longjmp. */
+    unsigned char* volatile pixels = NULL;
+    png_bytep* volatile rows = NULL;
     if (setjmp(png_jmpbuf(png))) {
-        free(pixels); free(rows);
+        free((void*)pixels); free((void*)rows);
         png_destroy_read_struct(&png, &info, NULL);
         fclose(fp);
         return NULL;
@@ -142,7 +143,7 @@ static unsigned char* load_png(const char* path, int* w, int* h)
     if (!pixels || !rows) png_error(png, "out of memory");
     for (int y = 0; y < *h; ++y) rows[y] = pixels + (size_t)y * row_size;
     png_read_image(png, rows);
-    free(rows); rows = NULL;
+    free((void*)rows); rows = NULL;
 
     png_destroy_read_struct(&png, &info, NULL);
     fclose(fp);
@@ -166,13 +167,14 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
 
     struct jpeg_decompress_struct cinfo;
     struct jpeg_err_jmp           err;
-    unsigned char*                pixels = NULL;
-    JSAMPLE*                      row    = NULL;
+    /* volatile: assigned after setjmp and read after longjmp. */
+    unsigned char* volatile       pixels = NULL;
+    JSAMPLE* volatile             row    = NULL;
 
     cinfo.err = jpeg_std_error(&err.pub);
     err.pub.error_exit = jpeg_err_exit;
     if (setjmp(err.jmp)) {
-        free(pixels); free(row);
+        free((void*)pixels); free((void*)row);
         jpeg_destroy_decompress(&cinfo);
         fclose(fp);
         return NULL;
@@ -197,7 +199,8 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
 
     int y = 0;
     while (cinfo.output_scanline < cinfo.output_height) {
-        jpeg_read_scanlines(&cinfo, &row, 1);
+        JSAMPLE* rp = row;
+        jpeg_read_scanlines(&cinfo, &rp, 1);
         unsigned char* dst = pixels + (size_t)y * (*w) * 4;
         for (int x = 0; x < *w; ++x) {
             dst[x*4 + 0] = row[x*comps + 0];
@@ -207,7 +210,7 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
         }
         y++;
     }
-    free(row); row = NULL;
+    free((void*)row); row = NULL;
 
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);

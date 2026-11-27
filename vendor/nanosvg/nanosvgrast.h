@@ -778,12 +778,16 @@ static void nsvg__flattenShapeStroke(NSVGrasterizer* r, NSVGshape* shape, float 
 			closed = 1;
 		}
 
-		// Descry: a dash pattern finer than ~1/20 px draws as a solid line
-		// anyway, and with dashes near float precision the loop below stops
-		// making progress and never ends. Treat those as solid.
+		// Descry: a dash pattern whose whole period is under ~1/20 px draws
+		// as a solid line anyway, and near float precision the loop below
+		// stops making progress and never ends. Treat those as solid. (Single
+		// zero-length entries are fine: "0 4" with round caps draws dots.)
 		int dashUsable = shape->strokeDashCount > 0;
-		for (j = 0; dashUsable && j < shape->strokeDashCount; j++)
-			if (!(shape->strokeDashArray[j] * scale >= 0.05f)) dashUsable = 0;
+		{
+			float period = 0.0f;
+			for (j = 0; j < shape->strokeDashCount; j++) period += shape->strokeDashArray[j];
+			if (!(period * scale >= 0.05f)) dashUsable = 0;
+		}
 
 		if (dashUsable) {
 			int idash = 0, dashState = 1;

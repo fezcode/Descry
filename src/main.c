@@ -66,6 +66,9 @@ static char g_log_path[1024]      = "descry.log";
  * dropped and the app kept running -- `kill`, a session logout or a CI
  * timeout could not stop it while, say, the first-run dialog was up. */
 static bool g_quit_requested;
+/* Something changed outside the event stream (a menu pick, a drop, the file
+ * watcher) and the next loop iteration must draw. See the main loop. */
+static bool g_redraw = true;
 static char g_settings_path[1024] = "settings.lua";
 static char g_recent_path[1024]   = "data/.recent";
 static char g_dict_path[1024]     = "data/.dictionary_user";
@@ -6065,6 +6068,20 @@ static int window_corner_radius(const App* a)
 #endif
 }
 
+/* Everything time-driven that shows on screen without an event: the caret's
+ * blink phase and the notifications/badges that appear and expire. A change
+ * here means the idle main loop has to draw a frame. */
+static uint32_t idle_visual_key(const App* a, uint32_t now)
+{
+    /* The caret only blinks where there is one: the editor, alone or in
+     * split view. Preview-only mode has nothing that blinks. */
+    uint32_t k = ((a->edit_mode || a->split_preview) && cursor_visible_now(a)) ? 1u : 0u;
+    if (a->notification_msg && now < a->notification_until) k |= 2u;
+    if (now < a->pcopy_flash_until)                         k |= 4u;
+    if (now < a->resize_show_until)                         k |= 8u;
+    return k;
+}
+
 static int app_init(App* a, const char* note_path_arg)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -6442,8 +6459,8 @@ static int app_init(App* a, const char* note_path_arg)
     a->render_pane = PANE_FULL;
     a->resizing_split = false;
     a->imgcache = image_cache_create(a->renderer);
-    image_cache_set_remote(a->imgcache,
-        lua_host_cfg_number(a->lua, "remote_images", 1) != 0);
+    a->cfg_remote_images = lua_host_cfg_number(a->lua, "remote_images", 1) != 0;
+    image_cache_set_remote(a->imgcache, a->cfg_remote_images);
 
     vault_init(&a->vault);
     int n = 0;
@@ -11143,6 +11160,10 @@ static void render_sidebar(App* a)
     guide_c.a = 50;
 
     for (int row = 0; row < a->sidebar_visible_count; ++row) {
+        /* Only rows inside the clip are drawn: a big vault used to measure
+         * and draw every one of its thousands of rows each frame. */
+        if (item_y + item_h < clip.y) { item_y += item_h; continue; }
+        if (item_y > clip.y + clip.h) break;
         int vi = a->sidebar_visible[row];
         VaultItem* it = &a->vault.items[vi];
         bool is_sel = vi == a->vault.selected;
@@ -12539,6 +12560,7 @@ static void native_menu_flush(App* a)
 {
     int m = 0, r = 0;
     if (!macos_menu_take_pick(&m, &r)) return;
+    g_redraw = true;
     if (r >= MAC_ROW_RECENT) { submenu_invoke_row(a, r - MAC_ROW_RECENT); return; }
     if (m < 0 || m >= MENU_COUNT) return;
     if (r < 0 || r >= menu_count_static(m)) return;
@@ -12695,14 +12717,14 @@ static void hoswl_menu_flush(App* a)
     }
     bool was = hoswl_connected(&g_hoswl) != 0;
     const char* id;
-    while ((id = hoswl_poll(&g_hoswl)) != NULL) hoswl_menu_dispatch(a, id);
+    while ((id = hoswl_poll(&g_hoswl)) != NULL) { hoswl_menu_dispatch(a, id); g_redraw = true; }
     uint32_t fp = hoswl_menu_fingerprint(a);
     if (fp != g_hoswl_fingerprint || (!was && hoswl_connected(&g_hoswl))) {
         g_hoswl_fingerprint = fp;
         hoswl_menu_publish(a);
     }
     /* The strip just disappeared under an open dropdown: close it. */
-    if (hoswl_menus_live(a) && a->menu_open >= 0) { ctx_menu_close(a); a->menu_open = -1; a->menu_hover = -1; }
+    if (hoswl_menus_live(a) && a->menu_open >= 0) { ctx_menu_close(a); a->menu_open = -1; a->menu_hover = -1; g_redraw = true; }
 }
 #endif  /* _WIN32 */
 
@@ -12854,7 +12876,14 @@ static bool is_external_url(const char* href)
     while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
            (*p >= '0' && *p <= '9') || *p == '+' || *p == '-' || *p == '.') ++p;
     /* "C:" is a drive letter, not a scheme. */
-    return *p == ':' && p - href > 1;
+    if (!(*p == ':' && p - href > 1)) return false;
+    /* "plan:v2.md" is a note with a colon in its name (legal on Linux and
+     * macOS), not a URL: a .md target counts as a scheme only when it looks
+     * like a real URL ("scheme://...") or is one we would open. */
+    size_t n = strlen(href);
+    bool md = n > 3 && strncasecmp(href + n - 3, ".md", 3) == 0;
+    if (md && strncmp(p, "://", 3) != 0 && !url_is_openable(href)) return false;
+    return true;
 }
 
 
@@ -13567,6 +13596,7 @@ static void drop_clear(App* a)
 static void drop_flush(App* a)
 {
     if (a->drop_file_count == 0) return;
+    g_redraw = true;
 
     if (!a->vault.dir || !a->vault.dir[0]) {
         app_notify(a, "drop ignored \xE2\x80\x94 open a vault first");
@@ -14530,6 +14560,8 @@ static int settings_persist(App* a)
     fprintf(f, "    rounded_corners = %s,\n",
             a->cfg_rounded_corners ? "true" : "false");
 #endif
+    fprintf(f, "    remote_images  = %s,\n",
+            a->cfg_remote_images ? "true" : "false");
     fprintf(f, "    split_preview  = %s,\n",
             a->split_preview ? "true" : "false");
     fprintf(f, "    split_ratio    = %.3f,\n", a->split_ratio);
@@ -18269,6 +18301,7 @@ static void fs_watch_poll(App* a)
     file_stamp(a->note_path, &mt, &sz);
     if (mt == 0 && sz == 0) return;     /* gone or unreadable — leave it be */
     if (mt == a->note_mtime && sz == a->note_size) return;
+    g_redraw = true;
     if (a->note_mtime == 0 && a->note_size == 0) {
         /* No stamp yet (the file appeared after we opened it): adopt this
          * one silently, there is nothing to compare against. */
@@ -22132,12 +22165,56 @@ static void action_align_table(App* a)
     app_notify(a, msg);
 }
 
-/* HTML export uses md4c-html, which streams chunks to a callback. We pipe
- * each chunk into a FILE* opened next to the source note. */
+/* HTML export uses md4c-html, which streams chunks to a callback. They are
+ * collected in memory so the finished body can be checked before it is
+ * written next to the source note. */
+typedef struct { char* p; size_t n, cap; int oom; } HtmlOut;
+
 static void html_chunk_cb(const char* chunk, unsigned int n, void* ud)
 {
-    FILE* f = (FILE*)ud;
-    fwrite(chunk, 1, n, f);
+    HtmlOut* o = (HtmlOut*)ud;
+    if (o->oom) return;
+    if (o->n + n + 1 > o->cap) {
+        size_t nc = o->cap ? o->cap * 2 : 65536;
+        while (nc < o->n + n + 1) nc *= 2;
+        char* np = realloc(o->p, nc);
+        if (!np) { o->oom = 1; return; }
+        o->p = np; o->cap = nc;
+    }
+    memcpy(o->p + o->n, chunk, n);
+    o->n += n;
+    o->p[o->n] = 0;
+}
+
+/* Neutralise every href="..." / src="..." whose URL carries a scheme other
+ * than http, https or mailto (javascript:, data:, file:, vbscript:, ...):
+ * the target becomes "#". Relative links are left alone. md4c-html always
+ * writes these attributes double-quoted, with the URL already escaped. */
+static void html_drop_unsafe_urls(char* s)
+{
+    static const char* const attrs[] = { " href=\"", " src=\"" };
+    for (size_t k = 0; k < 2; ++k) {
+        size_t al = strlen(attrs[k]);
+        for (char* p = strstr(s, attrs[k]); p; p = strstr(p, attrs[k])) {
+            char* u = p + al;
+            char* end = strchr(u, '"');
+            if (!end) break;
+            char* q = u;
+            while (q < end && (isalnum((unsigned char)*q) || *q == '+' || *q == '-' || *q == '.')) ++q;
+            int has_scheme = q > u && q < end && *q == ':' && isalpha((unsigned char)*u);
+            int ok = !has_scheme ||
+                     ((size_t)(q - u) == 4 && strncasecmp(u, "http", 4) == 0) ||
+                     ((size_t)(q - u) == 5 && strncasecmp(u, "https", 5) == 0) ||
+                     ((size_t)(q - u) == 6 && strncasecmp(u, "mailto", 6) == 0);
+            if (!ok) {
+                /* Replace the URL with "#" (the string only shrinks). */
+                u[0] = '#';
+                memmove(u + 1, end, strlen(end) + 1);
+                end = u + 1;
+            }
+            p = end;
+        }
+    }
 }
 
 /* Render the current buffer to HTML next to the source: `note.md` →
@@ -22188,11 +22265,13 @@ static void action_export_html(App* a)
     }
     /* The title is a filename: escape it like any other text. */
     fputs("<!doctype html>\n<html><head>\n<meta charset=\"utf-8\">\n", f);
-    /* Raw HTML in the note is not passed through (MD_FLAG_NOHTML below),
-     * and this policy is the backstop: no script of any kind -- inline,
-     * external, or a javascript: link -- runs in the exported page. */
+    /* The note's inline HTML (<br>, <kbd>, <details>, sized <img>) is kept,
+     * and this policy makes it inert: no script of any kind -- <script>,
+     * on* handlers, javascript: links -- no frames, no forms that submit,
+     * no <base> that re-points the page's links. */
     fputs("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; "
-          "img-src * data:; style-src 'unsafe-inline'\">\n<title>", f);
+          "img-src * data:; style-src 'unsafe-inline'; form-action 'none'; "
+          "base-uri 'none'\">\n<title>", f);
     for (const char* t = vault_basename(a->note_path); *t; ++t) {
         switch (*t) {
             case '<': fputs("&lt;", f);   break;
@@ -22211,11 +22290,18 @@ static void action_export_html(App* a)
         "blockquote{border-left:4px solid #ccc;padding-left:.8em;color:#555;}"
         "</style>\n</head>\n<body>\n");
 
+    HtmlOut body = { 0 };
     int rc = md_html(a->buf.data, (unsigned)a->buf.len,
-                     html_chunk_cb, f,
+                     html_chunk_cb, &body,
                      /* parser flags */ MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH |
-                                        MD_FLAG_TASKLISTS | MD_FLAG_NOHTML,
+                                        MD_FLAG_TASKLISTS,
                      /* render flags */ 0);
+    if (body.oom) rc = -1;
+    if (rc == 0 && body.p) {
+        html_drop_unsafe_urls(body.p);
+        fwrite(body.p, 1, strlen(body.p), f);
+    }
+    free(body.p);
     fprintf(f, "\n</body>\n</html>\n");
     fclose(f);
 
@@ -24977,12 +25063,17 @@ int main(int argc, char** argv)
     const char* note = (argc > 1) ? argv[1] : NULL;
     if (app_init(&app, note) != 0) { app_shutdown(&app); return 1; }
 
+    /* Draw only when something on screen can have changed. Redrawing a big
+     * vault and note 20 times a second while idle cost a third of a core. */
+    uint32_t last_key = 0, last_seq = 0, last_render = 0;
+    int      frames_owed = 1;
     while (app.running) {
         SDL_Event e;
         /* When the renderer is mid-animation we need 60fps, not 20fps. */
         int wait_ms = app.wants_anim_frame ? 16 : 50;
         if (SDL_WaitEventTimeout(&e, wait_ms)) {
             do { app_event(&app, &e); } while (SDL_PollEvent(&e));
+            frames_owed = 2;    /* this frame, plus one to let layout settle */
         }
         if (g_quit_requested) {     /* a modal swallowed a quit; honour it now */
             g_quit_requested = false;
@@ -25005,7 +25096,20 @@ int main(int argc, char** argv)
             nav_mark_edit(&app);
             if (app.lua) lua_host_fire_event(app.lua, "text_change");
         }
-        app_render(&app);
+        {
+            uint32_t now = SDL_GetTicks();
+            uint32_t key = idle_visual_key(&app, now);
+            if (g_redraw || key != last_key || (uint32_t)app.buf.seq != last_seq)
+                frames_owed = frames_owed > 2 ? frames_owed : 2;
+            if (frames_owed > 0 || app.wants_anim_frame || now - last_render >= 1000) {
+                g_redraw    = false;
+                last_key    = key;
+                last_seq    = (uint32_t)app.buf.seq;
+                last_render = now;
+                if (frames_owed > 0) frames_owed--;
+                app_render(&app);
+            }
+        }
     }
     app_shutdown(&app);
     return 0;

@@ -14,6 +14,10 @@
  * fit in `cap`. */
 int path_canon_existing(const char* path, char* out, size_t cap);
 
+/* 1 if `path` itself is a symlink (or, on Windows, any reparse point such
+ * as a junction), whether or not its target exists. */
+int path_is_link(const char* path);
+
 /* 1 if the existing `path` resolves to `root` itself or somewhere beneath
  * it (both resolved first), else 0. */
 int path_resolves_under(const char* path, const char* root);
