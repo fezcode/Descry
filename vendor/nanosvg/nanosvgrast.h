@@ -252,9 +252,13 @@ static void nsvg__addPathPoint(NSVGrasterizer* r, float x, float y, int flags)
 	}
 
 	if (r->npoints+1 > r->cpoints) {
-		r->cpoints = r->cpoints > 0 ? r->cpoints * 2 : 64;
-		r->points = (NSVGpoint*)realloc(r->points, sizeof(NSVGpoint) * r->cpoints);
-		if (r->points == NULL) return;
+		// Descry: grow into a temporary so a failed realloc keeps the old
+		// buffer and capacity consistent instead of writing through NULL.
+		int nc = r->cpoints > 0 ? r->cpoints * 2 : 64;
+		NSVGpoint* np = (NSVGpoint*)realloc(r->points, sizeof(NSVGpoint) * nc);
+		if (np == NULL) return;
+		r->points = np;
+		r->cpoints = nc;
 	}
 
 	pt = &r->points[r->npoints];
@@ -267,9 +271,13 @@ static void nsvg__addPathPoint(NSVGrasterizer* r, float x, float y, int flags)
 static void nsvg__appendPathPoint(NSVGrasterizer* r, NSVGpoint pt)
 {
 	if (r->npoints+1 > r->cpoints) {
-		r->cpoints = r->cpoints > 0 ? r->cpoints * 2 : 64;
-		r->points = (NSVGpoint*)realloc(r->points, sizeof(NSVGpoint) * r->cpoints);
-		if (r->points == NULL) return;
+		// Descry: grow into a temporary so a failed realloc keeps the old
+		// buffer and capacity consistent instead of writing through NULL.
+		int nc = r->cpoints > 0 ? r->cpoints * 2 : 64;
+		NSVGpoint* np = (NSVGpoint*)realloc(r->points, sizeof(NSVGpoint) * nc);
+		if (np == NULL) return;
+		r->points = np;
+		r->cpoints = nc;
 	}
 	r->points[r->npoints] = pt;
 	r->npoints++;
@@ -278,9 +286,10 @@ static void nsvg__appendPathPoint(NSVGrasterizer* r, NSVGpoint pt)
 static void nsvg__duplicatePoints(NSVGrasterizer* r)
 {
 	if (r->npoints > r->cpoints2) {
+		NSVGpoint* np = (NSVGpoint*)realloc(r->points2, sizeof(NSVGpoint) * r->npoints);
+		if (np == NULL) { r->npoints2 = 0; return; }
+		r->points2 = np;
 		r->cpoints2 = r->npoints;
-		r->points2 = (NSVGpoint*)realloc(r->points2, sizeof(NSVGpoint) * r->cpoints2);
-		if (r->points2 == NULL) return;
 	}
 
 	memcpy(r->points2, r->points, sizeof(NSVGpoint) * r->npoints);
@@ -296,9 +305,11 @@ static void nsvg__addEdge(NSVGrasterizer* r, float x0, float y0, float x1, float
 		return;
 
 	if (r->nedges+1 > r->cedges) {
-		r->cedges = r->cedges > 0 ? r->cedges * 2 : 64;
-		r->edges = (NSVGedge*)realloc(r->edges, sizeof(NSVGedge) * r->cedges);
-		if (r->edges == NULL) return;
+		int nc = r->cedges > 0 ? r->cedges * 2 : 64;
+		NSVGedge* ne = (NSVGedge*)realloc(r->edges, sizeof(NSVGedge) * nc);
+		if (ne == NULL) return;
+		r->edges = ne;
+		r->cedges = nc;
 	}
 
 	e = &r->edges[r->nedges];
@@ -767,8 +778,16 @@ static void nsvg__flattenShapeStroke(NSVGrasterizer* r, NSVGshape* shape, float 
 			closed = 1;
 		}
 
-		if (shape->strokeDashCount > 0) {
+		// Descry: a dash pattern finer than ~1/20 px draws as a solid line
+		// anyway, and with dashes near float precision the loop below stops
+		// making progress and never ends. Treat those as solid.
+		int dashUsable = shape->strokeDashCount > 0;
+		for (j = 0; dashUsable && j < shape->strokeDashCount; j++)
+			if (!(shape->strokeDashArray[j] * scale >= 0.05f)) dashUsable = 0;
+
+		if (dashUsable) {
 			int idash = 0, dashState = 1;
+			long dashSplits = 0;
 			float totalDist = 0, dashLen, allDashLen, dashOffset;
 			NSVGpoint cur;
 
@@ -805,6 +824,9 @@ static void nsvg__flattenShapeStroke(NSVGrasterizer* r, NSVGshape* shape, float 
 				float dist = sqrtf(dx*dx + dy*dy);
 
 				if ((totalDist + dist) > dashLen) {
+					// Descry: hard cap on dash segments per path, so huge
+					// coordinates (where a step rounds to nothing) cannot spin.
+					if (++dashSplits > 200000) break;
 					// Calculate intermediate point
 					float d = (dashLen - totalDist) / dist;
 					float x = cur.x + dx * d;

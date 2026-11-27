@@ -83,6 +83,10 @@ preview rendering, plugin host — without the Electron tax.
   dictionary-driven red squiggles under unknown words in the editor.
   Points at a system word list or your own `dictionary_path`; "Add to
   dictionary" remembers words in `data/.dictionary_user`.
+- **Remote images** — `![](https://...)` images (README badges,
+  screenshots) are fetched in the background on Windows and cached. Set
+  `remote_images = false` in `settings.lua` to never contact a server
+  just because a note was opened.
 - **In-app modals** for Save / Save As / Rename / New File — no
   native Win32 dialogs, full keyboard nav, sidebar-style file
   browser.
@@ -197,7 +201,8 @@ with as possible:
   opts into ASLR and DEP instead of shipping with MinGW's defaults off.
 - `lua_host_create()` removes `os.execute`, `os.exit`, `io.popen` and
   `package.loadlib` from the plugin sandbox, so the embedded interpreter
-  cannot spawn processes or load native code.
+  cannot spawn processes or load native code (see
+  [Security](#security) for the rest of the sandbox).
 - The Forge installer is no longer built stripped (`-s -w`).
 
 The durable fix is a code-signing certificate. `tools/sign.ps1` signs
@@ -280,6 +285,36 @@ afterwards.
   under `~/Library/Application Support/fezcode/Descry/`.
 
 ---
+
+## Security
+
+Descry treats a note, a vault, an image or an SVG from someone else as
+untrusted input:
+
+- **Links** open only for `http`, `https` and `mailto`, after a prompt
+  that shows the whole target. `file:`, network paths and custom protocol
+  handlers are refused, and no link ever passes through a shell.
+- **Images** with a network path (`//host/share`, `\\host\share`) are not
+  loaded, so viewing a note cannot make Windows hand your login hash to
+  another machine. Remote `http(s)` fetches never send Windows credentials
+  or cookies, and can be switched off with `remote_images = false`.
+  Decoders refuse images larger than 16384 px a side or 40 Mpx, and SVG
+  rendering has hard caps on work so a crafted file cannot hang or exhaust
+  the app.
+- **Symlinks** inside a vault are followed only when they point back into
+  the vault. A vault's leftover `.descry.state` may only reopen that
+  vault's own notes.
+- **HTML export** drops raw HTML from the note and adds a
+  Content-Security-Policy, so an exported page runs no script.
+- **Plugins** run in a confined Lua: no processes, no native modules, no
+  bytecode, no `debug`. File access (`io.open`, `io.lines`, `os.remove`,
+  `os.rename`, `require`) works only inside the open vault and the plugin
+  folder. See [docs/plugins.md](docs/plugins.md#sandbox).
+- **Builds** are hardened (ASLR, DEP, stack protector, `_FORTIFY_SOURCE`;
+  full RELRO and PIE on Linux), load run-time DLLs only from the app folder
+  and System32 on Windows, and every release carries `SHA256SUMS.txt`.
+  Release packages bundle all their libraries and are launched on a clean
+  machine in CI before they ship.
 
 ## Layout
 

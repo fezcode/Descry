@@ -15,6 +15,10 @@ enum {
 ImageCache*  image_cache_create (SDL_Renderer* r);
 void         image_cache_destroy(ImageCache* c);
 
+/* Whether http(s) images are fetched at all (setting `remote_images`, on by
+ * default). Off: remote images show as failed, and no request is made. */
+void         image_cache_set_remote(ImageCache* c, int on);
+
 /* Load (or fetch from cache) the image at `src`, which may be a local file
  * path OR an http(s):// URL. On success returns the SDL_Texture and writes
  * native dimensions to w and h.

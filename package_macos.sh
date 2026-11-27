@@ -214,7 +214,21 @@ fi
 
 # --- code sign (ad-hoc by default so it launches locally) ----------------
 echo "Code-signing ($([ "$sign_id" = "-" ] && echo ad-hoc || echo "$sign_id")) ..."
-codesign --force --deep --sign "$sign_id" "$app"
+if [ "$sign_id" = "-" ]; then
+    codesign --force --deep --sign - "$app"
+else
+    # A real identity gets the hardened runtime (required for notarization):
+    # no injected dylibs, no unsigned executable memory, library validation.
+    # Every bundled dylib is signed by the same identity first, so library
+    # validation accepts them. Ad-hoc builds skip it: with no team ID,
+    # library validation would refuse the app's own Frameworks.
+    for lib in "$app/Contents/Frameworks/"*.dylib; do
+        [ -L "$lib" ] && continue
+        codesign --force --timestamp --options runtime --sign "$sign_id" "$lib"
+    done
+    codesign --force --timestamp --options runtime --sign "$sign_id" "$app"
+fi
+codesign --verify --strict --verbose=2 "$app"
 
 echo "Built: $app"
 

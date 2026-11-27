@@ -37,7 +37,11 @@
 [CmdletBinding()]
 param(
     [string]$Subject = "CN=Fezcode (Descry dev)",
-    [int]$Years = 5
+    [int]$Years = 1,
+    # Also trust the cert machine-wide (LocalMachine Root/TrustedPublisher).
+    # Off by default: a trusted root is a powerful thing to leave lying
+    # around, and the per-user stores are enough to sign and run locally.
+    [switch]$MachineWide
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +59,7 @@ $cert = New-SelfSignedCertificate `
     -KeyAlgorithm RSA `
     -KeyLength 3072 `
     -HashAlgorithm SHA256 `
+    -KeyExportPolicy NonExportable `
     -NotAfter (Get-Date).AddYears($Years)
 
 Write-Host "Thumbprint: $($cert.Thumbprint)" -ForegroundColor Green
@@ -69,14 +74,13 @@ try {
         Import-Certificate -FilePath $tmp -CertStoreLocation $store | Out-Null
         Write-Host "Trusted in $store" -ForegroundColor DarkGray
     }
-    if ($elevated) {
+    if ($MachineWide -and $elevated) {
         foreach ($store in @("Cert:\LocalMachine\Root", "Cert:\LocalMachine\TrustedPublisher")) {
             Import-Certificate -FilePath $tmp -CertStoreLocation $store | Out-Null
             Write-Host "Trusted in $store" -ForegroundColor DarkGray
         }
-    } else {
-        Write-Host "Not elevated: skipped the LocalMachine stores." -ForegroundColor Yellow
-        Write-Host "  Re-run this from an admin PowerShell so Defender sees the same trust." -ForegroundColor DarkGray
+    } elseif ($MachineWide) {
+        Write-Host "-MachineWide needs an elevated PowerShell: skipped the LocalMachine stores." -ForegroundColor Yellow
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue

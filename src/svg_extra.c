@@ -54,7 +54,10 @@ static float sx_atof(const char* s, const char* e, const char** endp)
         int esign = 1;
         if (p < e && (*p == '+' || *p == '-')) { if (*p == '-') esign = -1; ++p; }
         int ev = 0, edig = 0;
-        while (p < e && *p >= '0' && *p <= '9') { ev = ev * 10 + (*p - '0'); ++p; ++edig; }
+        while (p < e && *p >= '0' && *p <= '9') {
+            if (ev < 100000) ev = ev * 10 + (*p - '0');   /* saturate: no int overflow */
+            ++p; ++edig;
+        }
         if (edig) ip *= pow(10.0, esign * ev); else p = save;
     }
     if (endp) *endp = p;
@@ -253,7 +256,7 @@ static int parse_color(const char* s, const char* e, unsigned char* r,
         int got = read_args(p + 1, e, a, 4);
         if (got < 3) return 0;
         /* percentages are rare enough to ignore; clamp raw 0..255 */
-        for (int i = 0; i < 3; ++i) { if (a[i] < 0) a[i] = 0; if (a[i] > 255) a[i] = 255; }
+        for (int i = 0; i < 3; ++i) { if (!(a[i] >= 0)) a[i] = 0; if (a[i] > 255) a[i] = 255; }
         *r = (unsigned char)(a[0] + 0.5f);
         *g = (unsigned char)(a[1] + 0.5f);
         *b = (unsigned char)(a[2] + 0.5f);
@@ -414,7 +417,10 @@ static char* text_content(const char* b, const char* e)
         if (c == '<') { in_tag = 1; continue; }
         if (isspace((unsigned char)c)) { if (n) pending_space = 1; continue; }
         if (c == '&') {
-            const char* semi = (const char*)memchr(p, ';', (size_t)(e - p));
+            /* An entity is at most 12 bytes; never scan further than that,
+             * or a run of bare '&' becomes quadratic. */
+            size_t lim = (size_t)(e - p); if (lim > 13) lim = 13;
+            const char* semi = (const char*)memchr(p, ';', lim);
             if (semi && semi - p <= 12) {
                 uint32_t cp = entity_cp(p + 1, semi);
                 if (cp) {
@@ -441,7 +447,10 @@ static char* attr_value_dup(const char* b, const char* e)
     size_t n = 0;
     for (const char* p = b; p < e; ++p) {
         if (*p == '&') {
-            const char* semi = (const char*)memchr(p, ';', (size_t)(e - p));
+            /* An entity is at most 12 bytes; never scan further than that,
+             * or a run of bare '&' becomes quadratic. */
+            size_t lim = (size_t)(e - p); if (lim > 13) lim = 13;
+            const char* semi = (const char*)memchr(p, ';', lim);
             if (semi && semi - p <= 12) {
                 uint32_t cp = entity_cp(p + 1, semi);
                 if (cp) { n += utf8_put(out + n, cp); p = semi; continue; }
@@ -491,8 +500,14 @@ static void ctx_root(Ctx* c)
     c->chain_opacity = 1.0f;
 }
 
+/* Caps on how much one SVG may ask the compositor to do. A README badge
+ * has a handful of each; these leave orders of magnitude of headroom. */
+#define SVG_MAX_TEXT_RUNS  4096
+#define SVG_MAX_IMAGES     64
+
 static int push_text(SvgExtra* e, const SvgTextRun* t)
 {
+    if (e->n_text >= SVG_MAX_TEXT_RUNS) return 0;
     if (e->n_text == e->cap_text) {
         int nc = e->cap_text ? e->cap_text * 2 : 8;
         SvgTextRun* nt = realloc(e->texts, (size_t)nc * sizeof *nt);
@@ -505,6 +520,7 @@ static int push_text(SvgExtra* e, const SvgTextRun* t)
 
 static int push_image(SvgExtra* e, const SvgImageRef* im)
 {
+    if (e->n_image >= SVG_MAX_IMAGES) return 0;
     if (e->n_image == e->cap_image) {
         int nc = e->cap_image ? e->cap_image * 2 : 4;
         SvgImageRef* ni = realloc(e->images, (size_t)nc * sizeof *ni);
@@ -860,9 +876,9 @@ SvgExtra* svg_extra_parse(const char* src, size_t len)
             if (attr_get(ab, ae, "y", &vb, &ve))      iy = sx_length(vb, ve, c.font_size);
             if (attr_get(ab, ae, "width", &vb, &ve))  iw = sx_length(vb, ve, c.font_size);
             if (attr_get(ab, ae, "height", &vb, &ve)) ih = sx_length(vb, ve, c.font_size);
-            if (!attr_get(ab, ae, "href", &vb, &ve))
-                attr_get(ab, ae, "xlink:href", &vb, &ve);
-            if (nodraw_from < 0 && iw > 0 && ih > 0 && ve > vb) {
+            int has_href = attr_get(ab, ae, "href", &vb, &ve) ||
+                           attr_get(ab, ae, "xlink:href", &vb, &ve);
+            if (nodraw_from < 0 && has_href && iw > 0 && ih > 0 && ve > vb) {
                 SvgImageRef im;
                 memset(&im, 0, sizeof im);
                 mat_apply(c.m, ix, iy, &im.x, &im.y);
@@ -1112,16 +1128,37 @@ typedef struct SxFace {
 
 static FT_Library     g_ft;
 static int            g_ft_failed;
-static SxFace*        g_faces;
+static SxFace*        g_faces;          /* most recently used first */
+static int            g_n_faces;
+#define SX_MAX_FACES  32
+
+static void face_free(SxFace* f)
+{
+    if (f->hb) hb_font_destroy(f->hb);
+    FT_Done_Face(f->ft);
+    free(f);
+}
 static NSVGrasterizer* g_img_rast;      /* for nested SVG logos, below */
 
 static SxFace* face_get(const char* path, int px, int synth_bold, int synth_italic)
 {
     if (!path || px < 1) return NULL;
-    for (SxFace* f = g_faces; f; f = f->next)
+    for (SxFace *f = g_faces, *prev = NULL; f; prev = f, f = f->next)
         if (f->px == px && f->bold == synth_bold && f->italic == synth_italic &&
-            strcmp(f->path, path) == 0)
+            strcmp(f->path, path) == 0) {
+            if (prev) { prev->next = f->next; f->next = g_faces; g_faces = f; }
             return f;
+        }
+
+    /* Bounded: an SVG naming every size 1..2048 must not pin thousands of
+     * FreeType faces for the life of the process. Drop the least recent. */
+    if (g_n_faces >= SX_MAX_FACES && g_faces) {
+        SxFace *prev = NULL, *f = g_faces;
+        while (f->next) { prev = f; f = f->next; }
+        if (prev) prev->next = NULL; else g_faces = NULL;
+        face_free(f);
+        g_n_faces--;
+    }
 
     if (!g_ft) {
         if (g_ft_failed) return NULL;
@@ -1146,6 +1183,7 @@ static SxFace* face_get(const char* path, int px, int synth_bold, int synth_ital
     f->hb     = hb_ft_font_create_referenced(f->ft);
     f->next   = g_faces;
     g_faces   = f;
+    g_n_faces++;
     return f;
 }
 
@@ -1154,12 +1192,11 @@ void svg_extra_shutdown(void)
     SxFace* f = g_faces;
     while (f) {
         SxFace* n = f->next;
-        if (f->hb) hb_font_destroy(f->hb);
-        FT_Done_Face(f->ft);
-        free(f);
+        face_free(f);
         f = n;
     }
     g_faces = NULL;
+    g_n_faces = 0;
     if (g_ft) { FT_Done_FreeType(g_ft); g_ft = NULL; }
     g_ft_failed = 0;
     if (g_img_rast) { nsvgDeleteRasterizer(g_img_rast); g_img_rast = NULL; }
@@ -1273,6 +1310,10 @@ static void draw_text_run(const SvgTextRun* t, unsigned char* px, int w, int h,
             if (gs->bitmap.width && gs->bitmap.rows) {
                 double gx = pen + adv * k + gp[i].x_offset / 64.0;
                 double gy = base_y - gp[i].y_offset / 64.0;
+                /* Advances only move right, so past the canvas we're done;
+                 * the range check also keeps the int conversion defined. */
+                if (gx > (double)w + size_px * 2.0) break;
+                if (!(gx > -1e7 && gy > -1e7 && gy < 1e7)) { adv += gp[i].x_advance / 64.0; continue; }
                 blit_glyph(px, w, h, &gs->bitmap,
                            (int)lround(gx) + gs->bitmap_left,
                            (int)lround(gy) - gs->bitmap_top,
@@ -1353,6 +1394,12 @@ static void draw_image_ref(const SvgImageRef* im, unsigned char* px, int w, int 
         meta[mn] = 0;
         if (!strstr(meta, "image/svg+xml")) return;
     }
+    {
+        /* Cull before decoding: a box that misses the canvas costs nothing. */
+        double fx = (double)im->x * scale, fy = (double)im->y * scale;
+        double fw = (double)im->w * scale, fh = (double)im->h * scale;
+        if (!(fx < w && fy < h && fx + fw > 0 && fy + fh > 0)) return;
+    }
     int is_b64 = (meta_n > 7 && memcmp(comma - 7, ";base64", 7) == 0);
 
     const char* payload = comma + 1;
@@ -1371,6 +1418,12 @@ static void draw_image_ref(const SvgImageRef* im, unsigned char* px, int w, int 
     int th = (int)lround((double)im->h * scale);
     if (tw < 1 || th < 1 || tw > 4096 || th > 4096 ||
         img->width <= 0.0f || img->height <= 0.0f) { nsvgDelete(img); return; }
+    {
+        /* Entirely off the canvas: nothing to draw, so don't allocate
+         * or rasterize for it. */
+        double fx = (double)im->x * scale, fy = (double)im->y * scale;
+        if (!(fx < w && fy < h && fx + tw > 0 && fy + th > 0)) { nsvgDelete(img); return; }
+    }
 
     float sx = tw / img->width, sy = th / img->height;
     float s  = sx < sy ? sx : sy;                    /* "meet" */

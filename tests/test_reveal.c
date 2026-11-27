@@ -63,12 +63,40 @@ static void test_label(void) {
 #endif
 }
 
+static void test_url_allowlist(void) {
+    /* Web and mail links open. */
+    assert(url_is_openable("https://example.com/a?b=c#d"));
+    assert(url_is_openable("HTTP://Example.com"));
+    assert(url_is_openable("mailto:someone@example.com"));
+    /* Anything that can launch a program, reach a share, or poke a protocol
+     * handler does not. */
+    assert(!url_is_openable("file:///C:/Windows/System32/calc.exe"));
+    assert(!url_is_openable("file://attacker/share/evil.exe"));
+    assert(!url_is_openable("\\\\attacker\\share\\x"));
+    assert(!url_is_openable("ms-settings:defaultapps"));
+    assert(!url_is_openable("search-ms:query=x"));
+    assert(!url_is_openable("javascript:alert(1)"));
+    assert(!url_is_openable("ssh://host"));
+    assert(!url_is_openable("httpx://example.com"));
+    assert(!url_is_openable("https://"));
+    assert(!url_is_openable(""));
+    assert(!url_is_openable(NULL));
+    /* Shell metacharacters that need a quote or space are refused outright;
+     * the rest are harmless because no shell is ever involved. */
+    assert(!url_is_openable("https://e.com/'$(id)'"  "\x20"));
+    assert(!url_is_openable("https://e.com/a b"));
+    assert(!url_is_openable("https://e.com/\"x"));
+    assert(!url_is_openable("https://e.com/\\x"));
+    assert(!url_is_openable("https://e.com/\nx"));
+}
+
 int main(void) {
     test_quote();
     test_macos();
     test_linux();
     test_windows();
     test_label();
+    test_url_allowlist();
     printf("all reveal tests passed\n");
     return 0;
 }

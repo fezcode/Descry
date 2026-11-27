@@ -1,4 +1,5 @@
 #include "vault.h"
+#include "pathsafe.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -105,6 +106,25 @@ static void scan_recursive(Vault* v, const char* dir, int depth)
         if (ent->d_name[0] == '.') continue;
         char path[1024];
         snprintf(path, sizeof path, "%s/%s", dir, ent->d_name);
+        /* A link (symlink, or junction on Windows) is followed only when it
+         * lands back inside the vault. Otherwise a shared vault could carry
+         * a link to any file on the machine, and saving, renaming (which
+         * rewrites backlinks in every note) or exporting would write there. */
+        int is_link;
+#if defined(_WIN32)
+        {
+            DWORD at = GetFileAttributesA(path);
+            is_link = at != INVALID_FILE_ATTRIBUTES &&
+                      (at & FILE_ATTRIBUTE_REPARSE_POINT);
+        }
+#else
+        {
+            struct stat lst;
+            if (lstat(path, &lst) != 0) continue;
+            is_link = S_ISLNK(lst.st_mode);
+        }
+#endif
+        if (is_link && !path_resolves_under(path, v->dir)) continue;
         struct stat st;
         if (stat(path, &st) != 0) continue;
         if ((st.st_mode & S_IFMT) == S_IFDIR) {
@@ -318,76 +338,6 @@ char* vault_pick_dir(SDL_Window* parent, const char* title)
     return p;
 #else
     (void)parent; (void)title;
-    return NULL;
-#endif
-}
-
-char* vault_save_dialog(SDL_Window* parent, const char* default_name)
-{
-#if defined(_WIN32)
-    OPENFILENAMEA ofn;
-    char filename[MAX_PATH] = {0};
-    char initial_dir[MAX_PATH] = {0};
-    /* Split a passed `dir/filename.md` into (initial dir, filename only).
-     * Windows' GetSaveFileNameA stays on the working dir if you stuff slashes
-     * into lpstrFile and ignores them; the user has to navigate manually.
-     * Splitting via lpstrInitialDir + lpstrFile preselects both correctly. */
-    if (default_name && *default_name) {
-        const char* slash = NULL;
-        for (const char* p = default_name; *p; ++p) {
-            if (*p == '/' || *p == '\\') slash = p;
-        }
-        if (slash && (size_t)(slash - default_name) < sizeof initial_dir) {
-            size_t dn = (size_t)(slash - default_name);
-            memcpy(initial_dir, default_name, dn);
-            initial_dir[dn] = 0;
-            /* Win32 file dialogs prefer backslashes for lpstrInitialDir. */
-            for (char* q = initial_dir; *q; ++q)
-                if (*q == '/') *q = '\\';
-            snprintf(filename, sizeof filename, "%s", slash + 1);
-        } else {
-            snprintf(filename, sizeof filename, "%s", default_name);
-        }
-    }
-
-    memset(&ofn, 0, sizeof ofn);
-    ofn.lStructSize    = sizeof ofn;
-    ofn.hwndOwner      = wm_hwnd(parent);
-    ofn.lpstrFilter    = "Markdown (*.md)\0*.md\0All files (*.*)\0*.*\0";
-    ofn.lpstrFile      = filename;
-    ofn.nMaxFile       = sizeof filename;
-    ofn.lpstrTitle     = "Save note";
-    ofn.lpstrDefExt    = "md";
-    ofn.lpstrInitialDir = initial_dir[0] ? initial_dir : NULL;
-    ofn.Flags          = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetSaveFileNameA(&ofn)) return strdup(filename);
-    return NULL;
-#elif defined(__APPLE__)
-    (void)parent;
-    char cmd[1024];
-    snprintf(cmd, sizeof cmd,
-        "osascript -e 'POSIX path of (choose file name with prompt "
-        "\"Save note\" default name \"%s\")' 2>/dev/null",
-        default_name ? default_name : "untitled.md");
-    return run_popen_line(cmd);
-#elif defined(__linux__) || defined(__unix__)
-    (void)parent;
-    char cmd[1024];
-    snprintf(cmd, sizeof cmd,
-        "zenity --file-selection --save --confirm-overwrite "
-        "--title=\"Save note\" --file-filter='Markdown | *.md' "
-        "--filename=%s 2>/dev/null",
-        default_name ? default_name : "untitled.md");
-    char* p = run_popen_line(cmd);
-    if (!p) {
-        snprintf(cmd, sizeof cmd,
-            "kdialog --getsavefilename '%s' '*.md|Markdown' 2>/dev/null",
-            default_name ? default_name : "untitled.md");
-        p = run_popen_line(cmd);
-    }
-    return p;
-#else
-    (void)parent; (void)default_name;
     return NULL;
 #endif
 }

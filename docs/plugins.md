@@ -39,6 +39,24 @@ parse don't break the boot — they're flagged in the **Plugins overlay**
 
 ---
 
+## Sandbox
+
+Plugins get Lua 5.4 with these limits:
+
+- **No processes or native code.** `os.execute`, `io.popen`, `os.exit`,
+  `package.loadlib` and native `require` modules (`package.cpath`) are gone.
+- **Files: vault and plugin folder only.** `io.open`, `io.lines`,
+  `io.input`, `io.output`, `os.remove`, `os.rename`, `loadfile`, `dofile`
+  and `require` work as usual inside the open vault and the plugin folder.
+  Anywhere else, they fail the way a missing file does (`nil, message`).
+  Symlinks and junctions are resolved before the check.
+- **Source text only.** `load`, `loadfile`, `dofile` and `require` refuse
+  precompiled bytecode, which Lua does not verify.
+- **No introspection.** The `debug` library and `string.dump` are removed.
+
+`os.time`, `os.date`, `os.clock`, `os.getenv` and the rest of the standard
+library are untouched.
+
 ## Lifecycle
 
 1. App starts, reads `init.lua` then overlays `settings.lua`.

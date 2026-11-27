@@ -44,8 +44,12 @@ if ($absent.Count)   { throw "forge.toml lists DLLs the build did not produce: $
 # Sign the payload before it is packaged: signing the installer afterwards
 # would not reach the exe inside it.
 if ($Sign) {
-    & $signer -Required (Join-Path $project "build\descry.exe")
-    if ($LASTEXITCODE -ne 0) { throw "signing descry.exe failed ($LASTEXITCODE)" }
+    # The bundled DLLs too: an unsigned DLL beside a signed exe is the easy
+    # thing to swap.
+    $payload = @(Join-Path $project "build\descry.exe") +
+               @(Get-ChildItem (Join-Path $project 'build\*.dll') | ForEach-Object FullName)
+    & $signer -Required @payload
+    if ($LASTEXITCODE -ne 0) { throw "signing the payload failed ($LASTEXITCODE)" }
 }
 
 Push-Location $project

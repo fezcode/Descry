@@ -60,6 +60,12 @@
  * shown to the user in Settings ("Log file"). Each defaults to a cwd-relative
  * name as a last resort if the per-user data dir can't be resolved. */
 static char g_log_path[1024]      = "descry.log";
+/* A quit request (window close, Cmd-Q, SIGTERM at logout/shutdown) that
+ * arrived while a modal dialog had the event pump. The modal cancels itself;
+ * the main loop then acts on the quit. Without this the request was simply
+ * dropped and the app kept running -- `kill`, a session logout or a CI
+ * timeout could not stop it while, say, the first-run dialog was up. */
+static bool g_quit_requested;
 static char g_settings_path[1024] = "settings.lua";
 static char g_recent_path[1024]   = "data/.recent";
 static char g_dict_path[1024]     = "data/.dictionary_user";
@@ -1721,15 +1727,24 @@ static int app_reload_fonts(App* a)
     return 0;
 }
 
+/* Notes are text; anything past this is not a note, and reading it whole
+ * (open, search, backlinks, rename rewrites all slurp) would stall or
+ * exhaust memory. */
+#define SLURP_MAX_BYTES (64L * 1024 * 1024)
+
 static char* slurp(const char* path, size_t* out_len)
 {
+    /* Regular files only: a FIFO or device would block the UI thread. */
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return NULL;
     FILE* f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); return NULL; }
+    if (n < 0 || n > SLURP_MAX_BYTES) { fclose(f); return NULL; }
     char* buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
     size_t got = fread(buf, 1, (size_t)n, f);
     fclose(f);
     buf[got] = 0;
@@ -3245,6 +3260,7 @@ static int confirm_action_n(App* a, const char* title, const char* msg,
             switch (e.type) {
                 case SDL_QUIT:
                     a->confirm_choice = 1;
+                    g_quit_requested = true;
                     break;
                 case SDL_MOUSEMOTION:
                     a->confirm_hover = confirm_hit_test(a, e.motion.x, e.motion.y);
@@ -3451,7 +3467,7 @@ static int eol_picker_modal(App* a)
         if (SDL_WaitEvent(&e)) {
             switch (e.type) {
             case SDL_QUIT:
-                a->eol_pick_choice = -1; break;
+                a->eol_pick_choice = -1; g_quit_requested = true; break;
             case SDL_MOUSEMOTION: {
                 int h = eol_pick_hit_test(a, e.motion.x, e.motion.y);
                 if (h >= 0) a->eol_pick_hover = h;
@@ -4595,6 +4611,7 @@ static bool app_rename_popup(App* a, const char* oldname,
             switch (e.type) {
                 case SDL_QUIT:
                     a->tinput_renpop_choice = 1;
+                    g_quit_requested = true;
                     break;
                 case SDL_MOUSEMOTION:
                     a->tinput_renpop_hover =
@@ -4734,6 +4751,7 @@ static bool app_text_modal(App* a, const char* title, const char* default_text,
             switch (e.type) {
                 case SDL_QUIT:
                     a->tinput_choice = 1;
+                    g_quit_requested = true;
                     break;
                 case SDL_MOUSEMOTION: {
                     a->tinput_hover = tinput_hit_test(a, e.motion.x, e.motion.y);
@@ -5419,7 +5437,7 @@ static bool app_prompt_modal(App* a, const char* title, const char* desc,
             .sel_anchor = &a->prompt_sel_anchor,
         };
         switch (e.type) {
-            case SDL_QUIT: a->prompt_choice = 1; break;
+            case SDL_QUIT: a->prompt_choice = 1; g_quit_requested = true; break;
             case SDL_MOUSEMOTION:
                 a->prompt_hover = prompt_hit_test(a, e.motion.x, e.motion.y);
                 break;
@@ -5789,7 +5807,7 @@ static void app_plugin_config_modal(App* a, const char* owner)
         if (a->pcfg_selected >= n) a->pcfg_selected = n - 1;
         if (a->pcfg_selected < 0)  a->pcfg_selected = 0;
         switch (e.type) {
-            case SDL_QUIT: a->pcfg_choice = 0; break;
+            case SDL_QUIT: a->pcfg_choice = 0; g_quit_requested = true; break;
             case SDL_MOUSEMOTION:
                 a->pcfg_hover     = pcfg_row_at(a, e.motion.x, e.motion.y);
                 a->pcfg_btn_hover = pcfg_btn_at(a, e.motion.x, e.motion.y);
@@ -5896,9 +5914,12 @@ static void blob_append(char** buf, size_t* len, size_t* cap, const char* s)
  * deleted so the notes folder stays clean.
  *
  * Returns the section body for `vault_dir` as a malloc'd blob of '\n'-
- * terminated lines (no @vault header), or NULL when nothing is stored. */
-static char* state_load_section(const char* vault_dir)
+ * terminated lines (no @vault header), or NULL when nothing is stored.
+ * *from_vault is set when the blob came from the vault's own sidecar: that
+ * file travels with the vault, so whoever shared the vault wrote it. */
+static char* state_load_section(const char* vault_dir, bool* from_vault)
 {
+    *from_vault = false;
     char*  out = NULL; size_t len = 0, cap = 0;
     char   line[1024];
     FILE*  fp = fopen(g_state_path, "rb");
@@ -5922,6 +5943,7 @@ static char* state_load_section(const char* vault_dir)
         snprintf(legacy, sizeof legacy, "%s/.descry.state", vault_dir);
         fp = fopen(legacy, "rb");
         if (fp) {
+            *from_vault = true;
             while (fgets(line, sizeof line, fp)) {
                 size_t n = strlen(line);
                 while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
@@ -5992,7 +6014,8 @@ static void win_apply_rounded_corners(App* a)
     SDL_VERSION(&wmi.version);
     if (!SDL_GetWindowWMInfo(a->window, &wmi)) return;
     HWND hwnd = wmi.info.win.window;
-    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    /* System32 only: never a dwmapi.dll that happens to sit next to us. */
+    HMODULE dwm = LoadLibraryExA("dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dwm) return;
     typedef HRESULT (WINAPI *SetAttrFn)(HWND, DWORD, LPCVOID, DWORD);
     SetAttrFn set_attr = (SetAttrFn)(void*)GetProcAddress(dwm, "DwmSetWindowAttribute");
@@ -6419,6 +6442,8 @@ static int app_init(App* a, const char* note_path_arg)
     a->render_pane = PANE_FULL;
     a->resizing_split = false;
     a->imgcache = image_cache_create(a->renderer);
+    image_cache_set_remote(a->imgcache,
+        lua_host_cfg_number(a->lua, "remote_images", 1) != 0);
 
     vault_init(&a->vault);
     int n = 0;
@@ -6555,7 +6580,8 @@ static int app_init(App* a, const char* note_path_arg)
     int  restore_count  = 0;
     int  restore_active = -1;
     if (a->vault.dir) {
-        char* blob = state_load_section(a->vault.dir);
+        bool  from_vault = false;
+        char* blob = state_load_section(a->vault.dir, &from_vault);
         char* cur  = blob;
         while (cur && *cur) {
             char* line = cur;
@@ -6566,7 +6592,14 @@ static int app_init(App* a, const char* note_path_arg)
             char tabp[1024]; int act = -1;
             int kind = tabs_parse_state_line(line, tabp, sizeof tabp, &act);
             if (kind == 1) {
-                if (restore_count < 64)
+                /* A sidecar shipped inside someone else's vault may only
+                 * reopen notes of that vault: never a path elsewhere on
+                 * disk, and never a network path. */
+                bool ok = !from_vault;
+                for (size_t i = 0; !ok && i < a->vault.count; ++i)
+                    ok = !a->vault.items[i].is_dir &&
+                         strcmp(a->vault.items[i].path, tabp) == 0;
+                if (ok && restore_count < 64)
                     snprintf(restore_paths[restore_count++], 1024, "%s", tabp);
                 continue;
             }
@@ -7031,6 +7064,12 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
                       strncmp(src, "https://", 8) == 0);
         if (is_url) {
             snprintf(path, sizeof path, "%s", src);
+        } else if ((src[0] == '/' || src[0] == '\\') &&
+                   (src[1] == '/' || src[1] == '\\')) {
+            /* //host/share or \\host\share (also \\?\ and \\.\): a network
+             * path. Opening it would make Windows connect to that host and
+             * offer the user's login hash, just from viewing the note. */
+            path[0] = 0;
         } else {
             int is_abs = (src[0] == '/' || src[0] == '\\' ||
                           (n >= 2 && src[1] == ':'));
@@ -7048,8 +7087,9 @@ static void render_line(App* a, const MdLine* line, int* y_inout, bool draw)
         }
 
         int img_w = 0, img_h = 0, img_status = IMG_FAILED;
-        SDL_Texture* tex = image_cache_get(a->imgcache, path,
-                                           &img_w, &img_h, &img_status);
+        SDL_Texture* tex = path[0] ? image_cache_get(a->imgcache, path,
+                                                     &img_w, &img_h, &img_status)
+                                   : NULL;
         if (tex) {
             int max_w  = doc_x_right(a) - xL - 2 * MARGIN_X;
             int draw_w = img_w;
@@ -12803,40 +12843,18 @@ static void render_recent_submenu(App* a)
     }
 }
 
-/* True if href is something we can hand off to the OS shell (web URL,
- * mailto, ftp, file). The wiki-link path handles internal [[name]] links;
- * everything else routes through the external opener. */
+/* True if href carries a URL scheme ("https:", "file:", "ms-settings:"),
+ * so it is never mistaken for a vault path. Whether it may be opened at all
+ * is url_is_openable()'s decision (reveal.c). */
 static bool is_external_url(const char* href)
 {
     if (!href || !*href) return false;
-    static const char* schemes[] = {
-        "http://", "https://", "mailto:", "ftp://", "ftps://",
-        "file://", "irc://", "ircs://", "ssh://", "tel:",
-    };
-    for (size_t i = 0; i < sizeof schemes / sizeof schemes[0]; ++i) {
-        size_t n = strlen(schemes[i]);
-        if (strncasecmp(href, schemes[i], n) == 0) return true;
-    }
-    return false;
-}
-
-/* Hand the URL to the OS. ShellExecute on Windows lets the user's default
- * browser/mail client open it; xdg-open does the same on Linux. */
-static void open_external_url(const char* href)
-{
-#if defined(_WIN32)
-    ShellExecuteA(NULL, "open", href, NULL, NULL, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-    char cmd[1024];
-    snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", href);
-    int rc = system(cmd);
-    (void)rc;
-#else
-    char cmd[1024];
-    snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", href);
-    int rc = system(cmd);
-    (void)rc;
-#endif
+    const char* p = href;
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))) return false;
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+           (*p >= '0' && *p <= '9') || *p == '+' || *p == '-' || *p == '.') ++p;
+    /* "C:" is a drive letter, not a scheme. */
+    return *p == ':' && p - href > 1;
 }
 
 
@@ -12844,7 +12862,7 @@ static void open_external_url(const char* href)
  * `[text](./note.md)` names a note in this vault, not a web page, so it
  * opens in Descry instead of being handed to the OS. Only `.md` targets get
  * this treatment — a relative `.png` or `.pdf` still routes through
- * open_external_url, which is what a document link is expected to do. */
+ * the external-link path, which only opens http(s)/mailto. */
 
 static int hex_digit(char c)
 {
@@ -13020,10 +13038,28 @@ static bool follow_md_href(App* a, const char* href)
 {
     if (follow_local_md(a, href)) return true;
     if (!is_external_url(href)) return false;
-    char msg[300];
-    snprintf(msg, sizeof msg, "Open in default browser?\n%.220s", href);
+    if (!url_is_openable(href)) {
+        /* file:, UNC, custom protocol handlers (ms-*, search-ms:, ...) can
+         * launch programs or leak credentials; only web and mail links go
+         * to the OS. */
+        char msg[400];
+        snprintf(msg, sizeof msg,
+                 "Descry only opens http, https and mailto links.\n%.300s%s",
+                 href, strlen(href) > 300 ? "..." : "");
+        info_modal(a, "Link not opened", msg);
+        return true;
+    }
+    /* Show the whole target, so nothing can hide past a cut-off. */
+    size_t hl = strlen(href);
+    char* msg = malloc(hl + 64);
+    if (!msg) return true;
+    snprintf(msg, hl + 64, "%s\n%s",
+             strncasecmp(href, "mailto:", 7) == 0 ? "Open in your mail app?"
+                                                  : "Open in your default browser?",
+             href);
     if (confirm_action(a, "Open link", msg, "Open", "Cancel"))
-        open_external_url(href);
+        open_url(href);
+    free(msg);
     return true;
 }
 
@@ -14256,20 +14292,8 @@ static void settings_adjust(App* a, SettingsRow r, int dir)
 #if defined(_WIN32)
             for (int k = 0; folder[k]; k++)
                 if (folder[k] == '/') folder[k] = '\\';
-            ShellExecuteA(NULL, "explore", folder, NULL, NULL, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-            {
-                char cmd[1200];
-                snprintf(cmd, sizeof cmd, "open \"%s\" >/dev/null 2>&1 &", folder);
-                int rc = system(cmd); (void)rc;
-            }
-#else
-            {
-                char cmd[1200];
-                snprintf(cmd, sizeof cmd, "xdg-open \"%s\" >/dev/null 2>&1 &", folder);
-                int rc = system(cmd); (void)rc;
-            }
 #endif
+            open_folder(folder);
             app_notify(a, "opened log folder");
             break;
         }
@@ -14378,13 +14402,17 @@ static void settings_pick_custom_font(App* a, SettingsRow row)
     free(picked);
 }
 
-/* Write a Lua string literal — handles `"` and `\` escapes (Windows paths). */
+/* Write a Lua string literal. `"` and `\` are escaped (Windows paths), and
+ * so is every control byte: a folder name with a newline in it (legal on
+ * Linux and macOS) would otherwise end the literal, settings.lua would fail
+ * to parse, and the next start would reset every setting. */
 static void fputs_lua_string(FILE* f, const char* s)
 {
     fputc('"', f);
-    for (const char* p = s; *p; ++p) {
-        if (*p == '"' || *p == '\\') fputc('\\', f);
-        fputc(*p, f);
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
+        if (*p == '"' || *p == '\\') { fputc('\\', f); fputc(*p, f); }
+        else if (*p < 0x20 || *p == 0x7f) fprintf(f, "\\%03u", (unsigned)*p);
+        else fputc(*p, f);
     }
     fputc('"', f);
 }
@@ -22133,6 +22161,24 @@ static void action_export_html(App* a)
     size_t outn = strlen(out);
     if (outn + 6 < sizeof out) snprintf(out + outn, sizeof out - outn, ".html");
 
+    /* Never write through a link someone planted where note.html goes. */
+#if defined(_WIN32)
+    {
+        DWORD at = GetFileAttributesA(out);
+        if (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            app_notify(a, "export failed: the .html target is a link");
+            return;
+        }
+    }
+#else
+    {
+        struct stat lst;
+        if (lstat(out, &lst) == 0 && !S_ISREG(lst.st_mode)) {
+            app_notify(a, "export failed: the .html target is not a regular file");
+            return;
+        }
+    }
+#endif
     FILE* f = fopen(out, "wb");
     if (!f) {
         char msg[800];
@@ -22140,23 +22186,35 @@ static void action_export_html(App* a)
         app_notify(a, msg);
         return;
     }
-    const char* title = vault_basename(a->note_path);
-    fprintf(f,
-        "<!doctype html>\n<html><head>\n"
-        "<meta charset=\"utf-8\">\n"
-        "<title>%s</title>\n"
+    /* The title is a filename: escape it like any other text. */
+    fputs("<!doctype html>\n<html><head>\n<meta charset=\"utf-8\">\n", f);
+    /* Raw HTML in the note is not passed through (MD_FLAG_NOHTML below),
+     * and this policy is the backstop: no script of any kind -- inline,
+     * external, or a javascript: link -- runs in the exported page. */
+    fputs("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; "
+          "img-src * data:; style-src 'unsafe-inline'\">\n<title>", f);
+    for (const char* t = vault_basename(a->note_path); *t; ++t) {
+        switch (*t) {
+            case '<': fputs("&lt;", f);   break;
+            case '>': fputs("&gt;", f);   break;
+            case '&': fputs("&amp;", f);  break;
+            case '"': fputs("&quot;", f); break;
+            default:  fputc(*t, f);
+        }
+    }
+    fputs("</title>\n", f);
+    fprintf(f, "%s",
         "<style>body{font-family:Georgia,serif;max-width:780px;"
         "margin:2em auto;padding:0 1em;line-height:1.5;}"
         "code,pre{font-family:Consolas,monospace;background:#f3f3f3;}"
         "pre{padding:.5em;overflow:auto;}"
         "blockquote{border-left:4px solid #ccc;padding-left:.8em;color:#555;}"
-        "</style>\n</head>\n<body>\n",
-        title);
+        "</style>\n</head>\n<body>\n");
 
     int rc = md_html(a->buf.data, (unsigned)a->buf.len,
                      html_chunk_cb, f,
                      /* parser flags */ MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH |
-                                        MD_FLAG_TASKLISTS,
+                                        MD_FLAG_TASKLISTS | MD_FLAG_NOHTML,
                      /* render flags */ 0);
     fprintf(f, "\n</body>\n</html>\n");
     fclose(f);
@@ -24900,6 +24958,12 @@ static void app_event(App* a, const SDL_Event* e)
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+    /* Anything loaded at run time (SDL's optional system DLLs, dwmapi) comes
+     * from the app folder or System32 only -- never the current directory
+     * or PATH, where a planted DLL could be picked up. */
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+#endif
     /* Windows GUI-subsystem apps have no stderr — pipe it to a log file so
      * fprintf(stderr,...) diagnostics survive. ONE file in the per-user data
      * dir (see resolve_data_paths), never scattered across launch folders.
@@ -24919,6 +24983,11 @@ int main(int argc, char** argv)
         int wait_ms = app.wants_anim_frame ? 16 : 50;
         if (SDL_WaitEventTimeout(&e, wait_ms)) {
             do { app_event(&app, &e); } while (SDL_PollEvent(&e));
+        }
+        if (g_quit_requested) {     /* a modal swallowed a quit; honour it now */
+            g_quit_requested = false;
+            if (confirm_discard_all(&app)) app.running = false;
+            if (!app.running) break;
         }
         drop_flush(&app);     /* prompt + copy any OS file-drop, once per drop */
         fs_watch_poll(&app);  /* did anyone else rewrite the open file? */

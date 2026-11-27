@@ -1,13 +1,20 @@
 #include "lua_host.h"
+#include "pathsafe.h"
 
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
 
 #include <dirent.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+  #include <windows.h>
+  #include <wchar.h>
+#endif
 
 #define CFG_KEY     "descry.config"
 #define ACTIONS_KEY "descry.actions"
@@ -36,6 +43,7 @@ struct LuaHost {
     /* Optional gate: returns 0 to skip (disable) a plugin by name. */
     int        (*enabled_cb)(const char* name, void* ud);
     void*       enabled_ud;
+    char*       plugin_dir;       /* sandbox root, with the vault */
 };
 
 /* The host pointer is stashed in the Lua extra-space so callbacks can find
@@ -58,6 +66,241 @@ static void drop_stdlib_fn(lua_State* L, const char* lib, const char* fn)
         lua_setfield(L, -2, fn);
     }
     lua_pop(L, 1);
+}
+
+/* ---------------------------------------------------------------------- *
+ * File-system confinement
+ *
+ * Plugins keep the stdlib file API docs/plugins.md promises them (io.open,
+ * io.lines, os.remove, os.rename, ...), but every path they name must
+ * resolve -- symlinks and junctions followed -- to somewhere inside the open
+ * vault or the plugin folder. A plugin cannot write a script into the
+ * Startup folder, read ~/.ssh, or overwrite another program's files.
+ * ---------------------------------------------------------------------- */
+
+#define SANDBOX_PATH_MAX 4096
+
+#define canon_existing path_canon_existing
+
+/* Canonical form of `path`, which need not exist yet (a file about to be
+ * created): its folder must exist, and is resolved; the last component is
+ * appended as-is but may not be "." or "..". */
+static int canon_path(const char* path, char* out, size_t cap)
+{
+    if (!path || !*path || strlen(path) >= SANDBOX_PATH_MAX) return 0;
+    if (canon_existing(path, out, cap)) return 1;
+    char dir[SANDBOX_PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", path);
+    char* slash = strrchr(dir, '/');
+#if defined(_WIN32)
+    char* bs = strrchr(dir, '\\');
+    if (bs > slash) slash = bs;
+#endif
+    const char* name;
+    if (slash) { *slash = 0; name = slash + 1; if (!dir[0]) snprintf(dir, sizeof dir, "/"); }
+    else       { snprintf(dir, sizeof dir, "."); name = path; }
+    if (!*name || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+#if defined(_WIN32)
+    if (strchr(name, ':')) return 0;          /* no alternate data streams */
+#endif
+    char base[SANDBOX_PATH_MAX];
+    if (!canon_existing(dir, base, sizeof base)) return 0;
+    size_t bl = strlen(base);
+    int n = snprintf(out, cap, "%s%s%s", base, (bl && base[bl - 1] == '/') ? "" : "/", name);
+    if (n < 0 || (size_t)n >= cap) return 0;
+#if defined(_WIN32)
+    for (char* p = out + bl; *p; ++p)
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+#endif
+    return 1;
+}
+
+static int under_root(const char* canon, const char* root_path)
+{
+    char root[SANDBOX_PATH_MAX];
+    if (!root_path || !*root_path || !canon_existing(root_path, root, sizeof root)) return 0;
+    size_t rl = strlen(root);
+    while (rl > 1 && root[rl - 1] == '/') root[--rl] = 0;
+    if (strncmp(canon, root, rl) != 0) return 0;
+    return canon[rl] == 0 || canon[rl] == '/' || root[rl - 1] == '/';
+}
+
+static int sandbox_path_ok(LuaHost* h, const char* path)
+{
+    char c[SANDBOX_PATH_MAX];
+    if (!canon_path(path, c, sizeof c)) return 0;
+    if (h->plugin_dir && under_root(c, h->plugin_dir)) return 1;
+    const char* v = (h->bridge.vault_dir) ? h->bridge.vault_dir(h->bridge.ud) : NULL;
+    if (v && under_root(c, v)) return 1;
+    return 0;
+}
+
+/* Wrapper around a stdlib function whose first `npaths` arguments, when they
+ * are strings, are paths. Upvalue 1: the original; upvalue 2: npaths. */
+static int sandbox_guard(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    int npaths = (int)lua_tointeger(L, lua_upvalueindex(2));
+    for (int i = 1; i <= npaths; ++i) {
+        if (lua_type(L, i) != LUA_TSTRING) continue;
+        const char* p = lua_tostring(L, i);
+        if (!sandbox_path_ok(h, p)) {
+            /* Same shape as a failed io.open: nil, message. */
+            lua_pushnil(L);
+            lua_pushfstring(L, "%s: outside the vault and plugin folder", p);
+            return 2;
+        }
+    }
+    int nargs = lua_gettop(L);
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, nargs, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
+static void sandbox_wrap(lua_State* L, const char* lib, const char* fn, int npaths)
+{
+    lua_getglobal(L, lib);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    lua_getfield(L, -1, fn);
+    if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return; }
+    lua_pushinteger(L, npaths);
+    lua_pushcclosure(L, sandbox_guard, 2);
+    lua_setfield(L, -2, fn);
+    lua_pop(L, 1);
+}
+
+/* load(chunk [, name [, mode [, env]]]) with mode pinned to text: precompiled
+ * bytecode is not verified by Lua and can corrupt memory. */
+static int sandbox_load(lua_State* L)
+{
+    if (lua_gettop(L) < 3) lua_settop(L, 3);
+    lua_pushliteral(L, "t");
+    lua_replace(L, 3);
+    int nargs = lua_gettop(L);
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, nargs, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
+/* loadfile(path [, mode [, env]]): confined, text only. */
+static int sandbox_loadfile(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    const char* p = luaL_checkstring(L, 1);
+    if (!sandbox_path_ok(h, p)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s: outside the vault and plugin folder", p);
+        return 2;
+    }
+    int env = !lua_isnone(L, 3) ? 3 : 0;
+    if (luaL_loadfilex(L, p, "t") != LUA_OK) { lua_pushnil(L); lua_insert(L, -2); return 2; }
+    if (env) {
+        lua_pushvalue(L, env);
+        if (!lua_setupvalue(L, -2, 1)) lua_pop(L, 1);
+    }
+    return 1;
+}
+
+/* dofile(path): confined, text only. (dofile() with no argument would read
+ * stdin; there is none worth reading.) */
+static int sandbox_dofile(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    const char* p = luaL_checkstring(L, 1);
+    if (!sandbox_path_ok(h, p))
+        return luaL_error(L, "%s: outside the vault and plugin folder", p);
+    lua_settop(L, 1);
+    if (luaL_loadfilex(L, p, "t") != LUA_OK) return lua_error(L);
+    lua_call(L, 0, LUA_MULTRET);
+    return lua_gettop(L) - 1;
+}
+
+/* package.searchers replacement for Lua files: found on package.path,
+ * confined, text only. Upvalue 1: the original package.searchpath. */
+static int sandbox_searcher(lua_State* L)
+{
+    LuaHost* h = host_self(L);
+    const char* name = luaL_checkstring(L, 1);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "path");
+    const char* path = lua_tostring(L, -1);
+    if (!path) { lua_pushliteral(L, "no package.path"); return 1; }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_pushstring(L, name);
+    lua_pushstring(L, path);
+    lua_call(L, 2, 2);                       /* filename | nil, err */
+    if (lua_isnil(L, -2)) return 1;          /* the error message */
+    const char* file = lua_tostring(L, -2);
+    if (!sandbox_path_ok(h, file)) {
+        lua_pushfstring(L, "no file '%s' inside the vault or plugin folder", file);
+        return 1;
+    }
+    if (luaL_loadfilex(L, file, "t") != LUA_OK)
+        return luaL_error(L, "error loading module '%s' from file '%s':\n\t%s",
+                          name, file, lua_tostring(L, -1));
+    lua_pushstring(L, file);
+    return 2;
+}
+
+static void sandbox_install(lua_State* L)
+{
+    /* Paths in, paths checked. io.lines/io.input/io.output take a file handle
+     * or nothing as well; only a string argument is a path. */
+    sandbox_wrap(L, "io", "open",   1);
+    sandbox_wrap(L, "io", "lines",  1);
+    sandbox_wrap(L, "io", "input",  1);
+    sandbox_wrap(L, "io", "output", 1);
+    sandbox_wrap(L, "os", "remove", 1);
+    sandbox_wrap(L, "os", "rename", 2);
+    drop_stdlib_fn(L, "os", "tmpname");      /* creates files outside the box */
+
+    lua_getglobal(L, "load");
+    lua_pushcclosure(L, sandbox_load, 1);
+    lua_setglobal(L, "load");
+    lua_pushcfunction(L, sandbox_loadfile);
+    lua_setglobal(L, "loadfile");
+    lua_pushcfunction(L, sandbox_dofile);
+    lua_setglobal(L, "dofile");
+
+    /* No introspection that can reach into the host or forge bytecode. */
+    drop_stdlib_fn(L, "string", "dump");
+    lua_pushnil(L);
+    lua_setglobal(L, "debug");
+
+    /* require: Lua source from the box only, never a native module. */
+    lua_getglobal(L, "package");
+    if (lua_istable(L, -1)) {
+        lua_pushliteral(L, "");
+        lua_setfield(L, -2, "cpath");
+        lua_getfield(L, -1, "loaded");
+        if (lua_istable(L, -1)) {
+            lua_pushnil(L);
+            lua_setfield(L, -2, "debug");
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "searchers");
+        if (lua_istable(L, -1)) {
+            lua_rawgeti(L, -1, 1);           /* keep the preload searcher */
+            lua_newtable(L);
+            lua_insert(L, -2);
+            lua_rawseti(L, -2, 1);
+            lua_getfield(L, -3, "searchpath");
+            lua_pushcclosure(L, sandbox_searcher, 1);
+            lua_rawseti(L, -2, 2);
+            lua_setfield(L, -3, "searchers");   /* package.searchers = new */
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+}
+
+/* luaL_dofile, minus binary chunks. */
+static int dofile_text(lua_State* L, const char* path)
+{
+    if (luaL_loadfilex(L, path, "t") != LUA_OK) return LUA_ERRFILE;
+    return lua_pcall(L, 0, LUA_MULTRET, 0);
 }
 
 LuaHost* lua_host_create(void)
@@ -86,6 +329,7 @@ LuaHost* lua_host_create(void)
     drop_stdlib_fn(h->L, "os", "exit");
     drop_stdlib_fn(h->L, "io", "popen");
     drop_stdlib_fn(h->L, "package", "loadlib");
+    sandbox_install(h->L);
 
     return h;
 }
@@ -109,12 +353,13 @@ void lua_host_destroy(LuaHost* h)
     if (!h) return;
     plugins_free_all(h);
     if (h->L) lua_close(h->L);
+    free(h->plugin_dir);
     free(h);
 }
 
 int lua_host_load_config(LuaHost* h, const char* path)
 {
-    if (luaL_dofile(h->L, path) != LUA_OK) {
+    if (dofile_text(h->L, path) != LUA_OK) {
         fprintf(stderr, "lua: %s\n", lua_tostring(h->L, -1));
         lua_pop(h->L, 1);
         return -1;
@@ -161,7 +406,7 @@ int lua_host_overlay_config(LuaHost* h, const char* path)
     FILE* probe = fopen(path, "rb");
     if (!probe) return 0;
     fclose(probe);
-    if (luaL_dofile(h->L, path) != LUA_OK) {
+    if (dofile_text(h->L, path) != LUA_OK) {
         fprintf(stderr, "lua: %s\n", lua_tostring(h->L, -1));
         lua_pop(h->L, 1);
         return -1;
@@ -979,6 +1224,8 @@ int lua_host_load_plugins(LuaHost* h, const char* dir)
 {
     /* Clear any previous run so a reload doesn't double-count. */
     plugins_free_all(h);
+    free(h->plugin_dir);
+    h->plugin_dir = dir ? strdup(dir) : NULL;
 
     DIR* d = opendir(dir);
     if (!d) return 0;
@@ -1012,7 +1259,7 @@ int lua_host_load_plugins(LuaHost* h, const char* dir)
             /* Disabled by the host — listed in the overlay but not run, so its
              * actions/events never register. */
             p->disabled = 1;
-        } else if (luaL_dofile(h->L, path) != LUA_OK) {
+        } else if (dofile_text(h->L, path) != LUA_OK) {
             const char* msg = lua_tostring(h->L, -1);
             fprintf(stderr, "[plugin] %s: %s\n", path, msg ? msg : "?");
             p->load_failed = 1;

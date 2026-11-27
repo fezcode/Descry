@@ -489,6 +489,31 @@ static int hoswl__write(hoswl_t* h, const char* s, size_t n)
     return 0;
 }
 
+/* 1 if the pipe's server runs as the same user as this process. Menu
+ * actions arrive over the pipe, so a pipe created by another account (or a
+ * sandboxed process of ours) must not be able to drive the app. */
+static int hoswl__pipe_owned_by_us(HANDLE pipe)
+{
+    ULONG pid = 0;
+    HANDLE proc, tok_srv = NULL, tok_me = NULL;
+    BYTE buf_srv[256], buf_me[256];
+    DWORD len = 0;
+    int same = 0;
+    if (!GetNamedPipeServerProcessId(pipe, &pid) || pid == 0) return 0;
+    proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return 0;
+    if (OpenProcessToken(proc, TOKEN_QUERY, &tok_srv) &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok_me) &&
+        GetTokenInformation(tok_srv, TokenUser, buf_srv, sizeof buf_srv, &len) &&
+        GetTokenInformation(tok_me,  TokenUser, buf_me,  sizeof buf_me,  &len))
+        same = EqualSid(((TOKEN_USER*)buf_srv)->User.Sid,
+                        ((TOKEN_USER*)buf_me)->User.Sid) != 0;
+    if (tok_srv) CloseHandle(tok_srv);
+    if (tok_me)  CloseHandle(tok_me);
+    CloseHandle(proc);
+    return same;
+}
+
 static int hoswl__try_connect(hoswl_t* h)
 {
     unsigned long now = hoswl__now();
@@ -498,10 +523,20 @@ static int hoswl__try_connect(hoswl_t* h)
     int n;
 
     if ((long)(now - h->next_retry) < 0) return 0;
-    p = CreateFileA(HOSWL_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    /* SECURITY_IDENTIFICATION: whoever owns the pipe may learn who we are,
+     * but can never impersonate our token -- which would matter if the app
+     * were ever run elevated and something else squatted the pipe name. */
+    p = CreateFileA(HOSWL_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                    SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     if (p == INVALID_HANDLE_VALUE) {
         /* ERROR_FILE_NOT_FOUND: Hisashi isn't running. ERROR_PIPE_BUSY: it is
          * between accepts. Either way, try again later — never wait here. */
+        h->next_retry = now + HOSWL_RETRY_MS;
+        return 0;
+    }
+    if (!hoswl__pipe_owned_by_us(p)) {
+        /* Someone else's pipe answered to the name: not Hisashi. */
+        CloseHandle(p);
         h->next_retry = now + HOSWL_RETRY_MS;
         return 0;
     }

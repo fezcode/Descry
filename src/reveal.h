@@ -18,6 +18,24 @@ void reveal_in_file_manager(const char* path, bool is_dir);
 #  define REVEAL_MENU_LABEL "Show in Finder"
 #else
 #  define REVEAL_MENU_LABEL "Show in file manager"
+/* True only for links that are safe to hand to the OS: http(s) and mailto,
+ * with no control characters, spaces, quotes or backslashes. file:, UNC,
+ * custom protocol handlers and everything else are refused. */
+bool url_is_openable(const char* url);
+
+/* Open an http(s)/mailto link in the user's default handler. Does nothing
+ * unless url_is_openable(url). Never goes through a shell. */
+void open_url(const char* url);
+
+/* Open a folder in the file manager, without a shell. */
+void open_folder(const char* path);
+
+#if !defined(_WIN32)
+/* Run argv[0] (found on PATH) with argv, stdout/stderr to /dev/null, without
+ * a shell, and reap it in the background. */
+void spawn_detached(const char* const argv[]);
+#endif
+
 #endif
 
 /* The pure string builders behind reveal_in_file_manager, built on every
@@ -38,5 +56,23 @@ int reveal_command_linux(char* out, size_t cap, const char* path, bool is_dir);
 /* Windows: the explorer.exe `/select,"C:\..."` argument for a file, or the
  * backslashed folder path for ShellExecute's `explore` verb. */
 int reveal_windows_target(char* out, size_t cap, const char* path, bool is_dir);
+
+/* True only for links that are safe to hand to the OS: http(s) and mailto,
+ * with no control characters, spaces, quotes or backslashes. file:, UNC,
+ * custom protocol handlers and everything else are refused. */
+bool url_is_openable(const char* url);
+
+/* Open an http(s)/mailto link in the user's default handler. Does nothing
+ * unless url_is_openable(url). Never goes through a shell. */
+void open_url(const char* url);
+
+/* Open a folder in the file manager, without a shell. */
+void open_folder(const char* path);
+
+#if !defined(_WIN32)
+/* Run argv[0] (found on PATH) with argv, stdout/stderr to /dev/null, without
+ * a shell, and reap it in the background. */
+void spawn_detached(const char* const argv[]);
+#endif
 
 #endif

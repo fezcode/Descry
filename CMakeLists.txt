@@ -66,6 +66,7 @@ add_executable(descry
   src/markdown.c
   src/mermaid.c
   src/regex.c
+  src/pathsafe.c
   src/reveal.c
   src/scriptorium.c
   src/scriptorium_core.c
@@ -85,6 +86,23 @@ if(APPLE)
 endif()
 
 target_include_directories(descry PRIVATE src vendor/nanosvg)
+
+# Compiler hardening on every platform: stack canaries on functions with
+# arrays or address-taken locals, and glibc/mingw-w64 bounds-checked
+# variants of memcpy/snprintf/... where the size is known at compile time
+# (_FORTIFY_SOURCE needs optimisation, hence Release only). On Linux, also
+# a position-independent executable with a read-only GOT after startup.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(descry PRIVATE -fstack-protector-strong)
+  target_link_options(descry PRIVATE -fstack-protector-strong)
+  target_compile_definitions(descry PRIVATE
+    $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
+  if(UNIX AND NOT APPLE)
+    set_target_properties(descry PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(descry PRIVATE -fPIE)
+    target_link_options(descry PRIVATE -pie -Wl,-z,relro -Wl,-z,now)
+  endif()
+endif()
 target_link_libraries(descry PRIVATE
   PkgConfig::SDL2
   PkgConfig::FREETYPE
@@ -161,7 +179,7 @@ if(DESCRY_TESTS)
   add_executable(test_graph tests/test_graph.c src/graph.c)
   add_executable(test_mermaid tests/test_mermaid.c src/mermaid.c)
   add_executable(test_inputfield tests/test_inputfield.c src/inputfield.c)
-  add_executable(test_lua_sandbox tests/test_lua_sandbox.c src/lua_host.c)
+  add_executable(test_lua_sandbox tests/test_lua_sandbox.c src/lua_host.c src/pathsafe.c)
   # svg_extra.c carries the renderer as well as the parser under test, so it
   # needs the font stack and the nanosvg implementation (in icon_raster.c) to
   # link even though these tests only exercise the pure parsing half.

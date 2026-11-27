@@ -75,8 +75,16 @@ foreach ($p in $paths) {
 }
 
 # --- 3. process exclusion ------------------------------------------------
-Write-Host "Excluding process: descry.exe" -ForegroundColor Green
-Add-MpPreference -ExclusionProcess "descry.exe"
+# By full path only. A bare "descry.exe" would exclude ANY process with that
+# name, anywhere on the machine -- malware would only need to use the name.
+# Also clear the bare-name exclusion earlier versions of this script added.
+Remove-MpPreference -ExclusionProcess "descry.exe" -ErrorAction SilentlyContinue
+$exes = @(Join-Path $root "build\descry.exe")
+if ($InstallDir -and (Test-Path $InstallDir)) { $exes += (Join-Path $InstallDir "descry.exe") }
+foreach ($e in $exes) {
+    Write-Host "Excluding process: $e" -ForegroundColor Green
+    Add-MpPreference -ExclusionProcess $e
+}
 
 Write-Host ""
 Write-Host "Current exclusions:" -ForegroundColor Cyan

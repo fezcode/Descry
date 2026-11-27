@@ -46,9 +46,6 @@ char*  vault_pick_file(SDL_Window* parent, const char* title,
  * NULL on cancel. Used to switch the vault root at runtime. */
 char*  vault_pick_dir(SDL_Window* parent, const char* title);
 
-/* Native Save-As dialog. Pre-fills filename with `default_name` (just the
- * basename, not a full path). Returns malloc'd path on success, else NULL. */
-char*  vault_save_dialog(SDL_Window* parent, const char* default_name);
 
 /* Last component of a path (after final '/' or '\\'). Returned pointer is
  * inside the input string; do not free. */

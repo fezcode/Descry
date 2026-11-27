@@ -10,6 +10,11 @@
  * is the exact document that used to render as two blank colour bars. */
 
 #include "svg_extra.h"
+#include "nanosvg.h"
+#include "nanosvgrast.h"
+
+#include <stdlib.h>
+#include <time.h>
 
 #include <assert.h>
 #include <math.h>
@@ -256,6 +261,73 @@ static void test_scanner_robustness(void)
     svg_extra_free(e3);
 }
 
+/* Hostile inputs from the security review: each of these used to hang,
+ * go quadratic, or grow without bound. They must now finish quickly. */
+static char* repeat(const char* head, const char* unit, size_t n, const char* tail)
+{
+    size_t hl = strlen(head), ul = strlen(unit), tl = strlen(tail);
+    char* s = malloc(hl + ul * n + tl + 1);
+    assert(s);
+    memcpy(s, head, hl);
+    for (size_t i = 0; i < n; ++i) memcpy(s + hl + i * ul, unit, ul);
+    memcpy(s + hl + ul * n, tail, tl + 1);
+    return s;
+}
+
+static void test_hostile_inputs(void)
+{
+    clock_t t0 = clock();
+
+    /* 2 MB of bare '&' with no ';' (was quadratic: ~10^12 comparisons). */
+    char* amp = repeat("<svg><text x='1' y='1'>", "&", 2u << 20, "</text></svg>");
+    SvgExtra* e = svg_extra_parse(amp, strlen(amp));
+    assert(e && svg_extra_text_count(e) == 1);
+    svg_extra_free(e);
+    free(amp);
+
+    /* Text/image run counts are capped. */
+    char* runs = repeat("<svg>", "<text x='1' y='1'>a</text>", 20000, "</svg>");
+    e = svg_extra_parse(runs, strlen(runs));
+    assert(e && svg_extra_text_count(e) <= 4096);
+    svg_extra_free(e);
+    free(runs);
+    char* imgs = repeat("<svg>", "<image width='5' height='5' href='data:image/svg+xml,x'/>", 1000, "</svg>");
+    e = svg_extra_parse(imgs, strlen(imgs));
+    assert(e && svg_extra_image_count(e) <= 64);
+    svg_extra_free(e);
+    free(imgs);
+
+    /* <image> without an href is not an image. */
+    const char* nohref = "<svg><image x='0' y='0' width='4' height='4'/></svg>";
+    e = svg_extra_parse(nohref, strlen(nohref));
+    assert(e && svg_extra_image_count(e) == 0);
+    svg_extra_free(e);
+
+    /* Absurd numbers stay defined. */
+    const char* nums = "<svg><text x='1e99999999999' y='1' fill='rgb(0e999,0,0)'>a</text></svg>";
+    e = svg_extra_parse(nums, strlen(nums));
+    assert(e);
+    svg_extra_free(e);
+
+    /* nanosvg dash loop: a 1e-5 dash along a long line never terminated. */
+    char dash[] = "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'>"
+                  "<path d='M0 0L2000 0' stroke='#000' stroke-dasharray='0.00001'/>"
+                  "<path d='M1e9 0L2e9 0' stroke='#000' stroke-dasharray='1'/></svg>";
+    NSVGimage* img = nsvgParse(dash, "px", 96.0f);
+    assert(img);
+    NSVGrasterizer* r = nsvgCreateRasterizer();
+    unsigned char* px = calloc(100 * 100 * 4, 1);
+    assert(r && px);
+    nsvgRasterize(r, img, 0, 0, 1.0f, px, 100, 100, 400);
+    free(px);
+    nsvgDeleteRasterizer(r);
+    nsvgDelete(img);
+
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    printf("  hostile inputs: %.2fs\n", secs);
+    assert(secs < 10.0);
+}
+
 int main(void)
 {
     test_badge_text();
@@ -269,6 +341,7 @@ int main(void)
     test_invisible_text();
     test_anchor_and_units();
     test_scanner_robustness();
+    test_hostile_inputs();
     printf("test_svg_extra: all passed\n");
     return 0;
 }

@@ -3,6 +3,7 @@
 #include <png.h>
 #include <jpeglib.h>
 #include <setjmp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,11 +67,18 @@ struct ImageCache {
     Job*          jobs_tail;
     int           shutting_down;
     Uint32        wake_event;       /* user event type used to wake the loop */
+    int           remote;           /* fetch http(s) images (setting remote_images) */
 };
 
 /* ----------------------------------------------------------------------- *
  * PNG / JPEG decoders (unchanged) — return malloc'd RGBA (R,G,B,A bytes).
  * ----------------------------------------------------------------------- */
+
+/* Upper bounds on what a decoder will allocate for. A hostile header can
+ * declare 100000x100000 in a few bytes; GPUs top out at 16384 a side anyway,
+ * and 40 Mpx (160 MB of RGBA) is well past any photo worth previewing. */
+#define IMG_MAX_SIDE   16384u
+#define IMG_MAX_PIXELS (40u * 1000u * 1000u)
 
 static unsigned char* load_png(const char* path, int* w, int* h)
 {
@@ -98,8 +106,16 @@ static unsigned char* load_png(const char* path, int* w, int* h)
     png_set_sig_bytes(png, 8);
     png_read_info(png, info);
 
-    *w = (int)png_get_image_width(png, info);
-    *h = (int)png_get_image_height(png, info);
+    {
+        png_uint_32 pw = png_get_image_width(png, info);
+        png_uint_32 ph = png_get_image_height(png, info);
+        /* A few bytes of header can claim any size; refuse anything we
+         * would not show anyway before allocating for it. */
+        if (pw == 0 || ph == 0 || pw > IMG_MAX_SIDE || ph > IMG_MAX_SIDE ||
+            (uint64_t)pw * ph > IMG_MAX_PIXELS)
+            png_error(png, "image too large");
+        *w = (int)pw; *h = (int)ph;
+    }
 
     int color_type = png_get_color_type(png, info);
     int bit_depth  = png_get_bit_depth(png, info);
@@ -119,8 +135,11 @@ static unsigned char* load_png(const char* path, int* w, int* h)
 
     png_read_update_info(png, info);
     int row_size = (int)png_get_rowbytes(png, info);
+    if (row_size <= 0 || (size_t)row_size < (size_t)(*w) * 4)
+        png_error(png, "unexpected row size");
     pixels = malloc((size_t)(*h) * row_size);
     rows   = malloc((size_t)(*h) * sizeof(png_bytep));
+    if (!pixels || !rows) png_error(png, "out of memory");
     for (int y = 0; y < *h; ++y) rows[y] = pixels + (size_t)y * row_size;
     png_read_image(png, rows);
     free(rows); rows = NULL;
@@ -162,6 +181,10 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
     jpeg_create_decompress(&cinfo);
     jpeg_stdio_src(&cinfo, fp);
     jpeg_read_header(&cinfo, TRUE);
+    if (cinfo.image_width == 0 || cinfo.image_height == 0 ||
+        cinfo.image_width > IMG_MAX_SIDE || cinfo.image_height > IMG_MAX_SIDE ||
+        (uint64_t)cinfo.image_width * cinfo.image_height > IMG_MAX_PIXELS)
+        longjmp(err.jmp, 1);
     jpeg_start_decompress(&cinfo);
 
     *w = (int)cinfo.output_width;
@@ -170,6 +193,7 @@ static unsigned char* load_jpg(const char* path, int* w, int* h)
 
     pixels = malloc((size_t)(*w) * (*h) * 4);
     row    = malloc((size_t)(*w) * comps);
+    if (!pixels || !row || comps < 1) longjmp(err.jmp, 1);
 
     int y = 0;
     while (cinfo.output_scanline < cinfo.output_height) {
@@ -236,8 +260,10 @@ static unsigned char* load_svg(const char* path, int* w, int* h)
     SvgExtra* extra = svg_extra_parse(src, src_n);
     free(src);
 
-    int iw = (int)(img->width  + 0.5f);
-    int ih = (int)(img->height + 0.5f);
+    /* Range-check before converting: width="1e40" or NaN is undefined
+     * behaviour as an int cast. */
+    int iw = (img->width  >= 1.0f && img->width  < 1e7f) ? (int)(img->width  + 0.5f) : 0;
+    int ih = (img->height >= 1.0f && img->height < 1e7f) ? (int)(img->height + 0.5f) : 0;
     /* Some SVGs declare only a viewBox and no width/height → nanosvg leaves
      * width/height 0. Fall back to a sane default canvas. */
     if (iw <= 0 || ih <= 0) { iw = 512; ih = 512; }
@@ -350,6 +376,10 @@ static SDL_Texture* decode_file(SDL_Renderer* r, const char* path, int* w, int* 
 {
     unsigned char* px = NULL;
     int iw = 0, ih = 0;
+    /* Regular files only: a FIFO or device named x.png would block the UI
+     * thread forever in fopen/fread. */
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return NULL;
     switch (fmt_of(path)) {
         case FMT_PNG: px = load_png(path, &iw, &ih); break;
         case FMT_JPG: px = load_jpg(path, &iw, &ih); break;
@@ -471,8 +501,12 @@ static int download_url(const char* url, const char* out_path)
     InternetSetOptionA(hi, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof timeout);
     InternetSetOptionA(hi, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof timeout);
 
+    /* NO_AUTH: never answer an auth challenge with the user's Windows
+     * credentials (WinINet would, silently, for intranet-zone hosts).
+     * NO_COOKIES: an image fetch carries no session from the browser. */
     DWORD flags = INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_CACHE_WRITE |
-                  INTERNET_FLAG_RELOAD;
+                  INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_AUTH |
+                  INTERNET_FLAG_NO_COOKIES;
     HINTERNET h = InternetOpenUrlA(hi, url, NULL, 0, flags, 0);
     if (!h) { InternetCloseHandle(hi); return -1; }
 
@@ -563,8 +597,14 @@ ImageCache* image_cache_create(SDL_Renderer* r)
     c->lock       = SDL_CreateMutex();
     c->cond       = SDL_CreateCond();
     c->wake_event = SDL_RegisterEvents(1);   /* (Uint32)-1 if unavailable */
+    c->remote     = 1;
     c->worker     = SDL_CreateThread(worker_main, "descry-img", c);
     return c;
+}
+
+void image_cache_set_remote(ImageCache* c, int on)
+{
+    if (c) c->remote = on ? 1 : 0;
 }
 
 void image_cache_destroy(ImageCache* c)
@@ -642,7 +682,19 @@ SDL_Texture* image_cache_get(ImageCache* c, const char* src,
         return NULL;
     }
 
-    /* Remote URL: reuse a prior on-disk download if present, else queue one. */
+    /* Remote URL. Only Windows has a downloader; elsewhere the cache folder
+     * could only hold files someone else planted, so don't look in it. */
+#if !defined(_WIN32)
+    SDL_AtomicSet(&e->state, ST_FAILED);
+    *status = IMG_FAILED;
+    return NULL;
+#endif
+    if (!c->remote) {
+        SDL_AtomicSet(&e->state, ST_FAILED);
+        *status = IMG_FAILED;
+        return NULL;
+    }
+    /* Reuse a prior on-disk download if present, else queue one. */
     e->temp_path = build_cache_path(src);
     if (file_exists(e->temp_path)) {
         SDL_AtomicSet(&e->state, ST_DOWNLOADED);
