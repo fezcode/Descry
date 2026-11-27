@@ -57,6 +57,34 @@ foreach(_dep IN LISTS _resolved)
     math(EXPR _n "${_n} + 1")
 endforeach()
 
+# sdl2-compat ships an SDL2.dll that LoadLibrary()s SDL3.dll at startup.
+# That is not an import, so the scan above cannot see it. If MSYS2 ever
+# hands us the shim, carry SDL3.dll (and whatever it imports) along too.
+if(EXISTS "${_mingw}/SDL2.dll" AND EXISTS "${_mingw}/SDL3.dll")
+    file(STRINGS "${_mingw}/SDL2.dll" _shim REGEX "SDL3\\.dll" LIMIT_COUNT 1)
+    if(_shim)
+        file(GET_RUNTIME_DEPENDENCIES
+            LIBRARIES           "${_mingw}/SDL3.dll"
+            RESOLVED_DEPENDENCIES_VAR   _sdl3_deps
+            UNRESOLVED_DEPENDENCIES_VAR _sdl3_unresolved
+            DIRECTORIES         "${_mingw}"
+            PRE_EXCLUDE_REGEXES "^(api-ms|ext-ms)-.*"
+            POST_INCLUDE_REGEXES "^${_mingw}/" "^${_outdir}/"
+            POST_EXCLUDE_REGEXES ".*"
+        )
+        foreach(_dep IN ITEMS "${_mingw}/SDL3.dll" ${_sdl3_deps})
+            get_filename_component(_name "${_dep}" NAME)
+            set(_src "${_mingw}/${_name}")
+            if(NOT EXISTS "${_src}")
+                set(_src "${_dep}")
+            endif()
+            file(COPY "${_src}" DESTINATION "${OUT_DIR}")
+            message(STATUS "  bundled (for sdl2-compat): ${_name}")
+            math(EXPR _n "${_n} + 1")
+        endforeach()
+    endif()
+endif()
+
 message(STATUS "CopyRuntimeDeps: ${_n} DLL(s) bundled into ${OUT_DIR}")
 
 if(_unresolved)

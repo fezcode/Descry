@@ -128,6 +128,84 @@ if command -v dylibbundler >/dev/null 2>&1; then
         -x "$app/Contents/MacOS/descry" \
         -d "$app/Contents/Frameworks/" \
         -p "@executable_path/../Frameworks/"
+
+    frameworks="$app/Contents/Frameworks"
+
+    # Homebrew's "sdl2" is sdl2-compat: a thin libSDL2 that dlopen()s libSDL3
+    # at startup. dylibbundler only follows link-time dependencies, so it
+    # never sees SDL3 and the app dies with "SDL3 not found" on any Mac
+    # without Homebrew. Carry SDL3 along by hand; the shim looks for
+    # @loader_path/libSDL3.dylib first, which is this Frameworks folder.
+    sdl2_lib="$(ls "$frameworks"/libSDL2*.dylib 2>/dev/null | head -n1 || true)"
+    if [ -n "$sdl2_lib" ] && grep -aq 'libSDL3' "$sdl2_lib"; then
+        sdl3_src=""
+        for d in "$(brew --prefix sdl3 2>/dev/null || true)/lib" \
+                 "$(pkg-config --variable=libdir sdl3 2>/dev/null || true)" \
+                 /opt/homebrew/lib /usr/local/lib; do
+            if [ -e "$d/libSDL3.0.dylib" ]; then sdl3_src="$d/libSDL3.0.dylib"; break; fi
+        done
+        if [ -z "$sdl3_src" ]; then
+            echo "package_macos.sh: libSDL2 is sdl2-compat but libSDL3.0.dylib was not found." >&2
+            echo "                  brew install sdl3" >&2
+            exit 1
+        fi
+        echo "Bundling SDL3 for sdl2-compat ($sdl3_src) ..."
+        cp -L "$sdl3_src" "$frameworks/libSDL3.0.dylib"
+        chmod u+w "$frameworks/libSDL3.0.dylib"
+        install_name_tool -id "@executable_path/../Frameworks/libSDL3.0.dylib" \
+            "$frameworks/libSDL3.0.dylib"
+        ln -sf libSDL3.0.dylib "$frameworks/libSDL3.dylib"
+        # Pull in (and re-path) anything SDL3 itself links against.
+        dylibbundler -of -b \
+            -x "$frameworks/libSDL3.0.dylib" \
+            -d "$frameworks/" \
+            -p "@executable_path/../Frameworks/"
+    fi
+
+    # --- verify: nothing may point outside the bundle or the OS ----------
+    echo "Verifying the bundle is self-contained ..."
+    bad=0
+    minos=""
+    for f in "$app/Contents/MacOS/descry" "$frameworks"/*.dylib; do
+        [ -L "$f" ] && continue
+        while IFS= read -r dep; do
+            case "$dep" in
+                /usr/lib/*|/System/Library/*) ;;
+                @executable_path/../Frameworks/*)
+                    if [ ! -e "$frameworks/${dep#@executable_path/../Frameworks/}" ]; then
+                        echo "  missing from bundle: $dep (needed by $(basename "$f"))" >&2; bad=1
+                    fi ;;
+                @loader_path/*|@rpath/*)
+                    if [ ! -e "$frameworks/$(basename "$dep")" ]; then
+                        echo "  missing from bundle: $dep (needed by $(basename "$f"))" >&2; bad=1
+                    fi ;;
+                *)  echo "  outside the bundle: $dep (needed by $(basename "$f"))" >&2; bad=1 ;;
+            esac
+        done < <(otool -L "$f" | tail -n +2 | awk '{print $1}')
+        while IFS= read -r rp; do
+            case "$rp" in
+                @*|/usr/lib*|/System/Library/*) ;;
+                *)  echo "  rpath outside the bundle: $rp (in $(basename "$f"))" >&2; bad=1 ;;
+            esac
+        done < <(otool -l "$f" | awk '/LC_RPATH/{r=1} r && $1=="path"{print $2; r=0}')
+        m="$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b && $1=="minos"{print $2; b=0}' | head -n1)"
+        if [ -n "$m" ]; then
+            minos="$(printf '%s\n%s\n' "$minos" "$m" | sort -t. -k1,1n -k2,2n | tail -n1)"
+        fi
+    done
+    if [ "$bad" -ne 0 ]; then
+        echo "package_macos.sh: the app is not self-contained (see above)." >&2
+        exit 1
+    fi
+
+    # Prebuilt Homebrew libraries target the macOS they were built on. State
+    # the real minimum so older systems get Finder's clear "requires macOS N"
+    # instead of a crash at launch.
+    if [ -n "$minos" ]; then
+        /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minos" \
+            "$app/Contents/Info.plist"
+        echo "Minimum macOS: $minos"
+    fi
 else
     echo "warning: dylibbundler not found — the .app will still depend on" >&2
     echo "         Homebrew dylibs. Install it for a self-contained app:"  >&2

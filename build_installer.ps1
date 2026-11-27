@@ -30,6 +30,17 @@ foreach ($relative in @('build/forge.exe', 'build/stub.exe', 'build/wizard/Forge
 $forgeVersion = & $forge --version
 if ($LASTEXITCODE -ne 0 -or $forgeVersion -notmatch '^forge v2\.') { throw 'Forge 2 is required.' }
 
+# forge.toml names every file it ships. A DLL the build bundled next to the exe
+# but forge.toml does not list would be left out of the installer, and the
+# installed app would fail to start on a machine without MSYS2.
+$listed = Select-String -Path (Join-Path $project 'forge.toml') -Pattern 'src\s*=\s*"build/([^"]+\.dll)"' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value }
+$built  = Get-ChildItem (Join-Path $project 'build\*.dll') | ForEach-Object Name
+$unlisted = @($built  | Where-Object { $listed -notcontains $_ })
+$absent   = @($listed | Where-Object { $built  -notcontains $_ })
+if ($unlisted.Count) { throw "forge.toml does not ship these runtime DLLs: $($unlisted -join ', ')" }
+if ($absent.Count)   { throw "forge.toml lists DLLs the build did not produce: $($absent -join ', ')" }
+
 # Sign the payload before it is packaged: signing the installer afterwards
 # would not reach the exe inside it.
 if ($Sign) {

@@ -40,6 +40,37 @@ jobs:
         run: brew install ninja pkg-config sdl2 freetype harfbuzz libpng jpeg dylibbundler
       - name: Build + package
         run: ./package_macos.sh --dmg --zip
+      - name: Self-contained check
+        # Launch the packaged app the way a Mac without Homebrew would see it:
+        # hide every Homebrew library, then make sure it starts and that all
+        # the libraries it loads come from the bundle or from macOS.
+        run: |
+          app=dist/macos-arm64/Descry.app
+          cellar="$(brew --cellar)"
+          mv "$cellar" "$cellar.hidden"
+          trap 'mv "$cellar.hidden" "$cellar"' EXIT
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/descry" > smoke.log 2>&1 &
+          pid=$!
+          sleep 12
+          alive=0
+          if kill -0 "$pid" 2>/dev/null; then alive=1; kill "$pid" || true; fi
+          grep -v '/usr/lib/\|/System/' smoke.log | tail -n 60 || true
+          fail=0
+          if grep -E 'Library not loaded|image not found|/opt/homebrew/|/usr/local/' smoke.log; then
+            echo "::error::the app reached outside its bundle"; fail=1
+          fi
+          grep -q 'Contents/Frameworks/libSDL2' smoke.log || { echo "::error::bundled SDL2 was not loaded"; fail=1; }
+          if grep -aq 'libSDL3' "$app"/Contents/Frameworks/libSDL2*.dylib; then
+            grep -q 'Contents/Frameworks/libSDL3' smoke.log || { echo "::error::bundled SDL3 was not loaded"; fail=1; }
+          fi
+          if [ "$alive" -ne 1 ]; then
+            if grep -q 'SDL_CreateRenderer\|SDL_CreateWindow' smoke.log; then
+              echo "::warning::libraries loaded, but the runner could not open a window"
+            else
+              echo "::error::the app exited during startup"; fail=1
+            fi
+          fi
+          exit "$fail"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -85,9 +116,40 @@ jobs:
           curl -fsSLo linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy
           export APPIMAGE_EXTRACT_AND_RUN=1
-          ./linuxdeploy --appdir "$app" -d descry.desktop -i descry.png --output appimage
+          # sdl2-compat's libSDL2 dlopen()s libSDL3, which linuxdeploy cannot
+          # see. Ubuntu 22.04 ships the real SDL2, but if that ever changes,
+          # carry SDL3 along explicitly.
+          extra=()
+          sdl2="$(ldd build/descry | awk '/libSDL2/ {print $3}')"
+          if [ -n "$sdl2" ] && grep -aq 'libSDL3' "$sdl2"; then
+            extra=(--library "$(dirname "$sdl2")/libSDL3.so.0")
+          fi
+          ./linuxdeploy --appdir "$app" "${extra[@]}" -d descry.desktop -i descry.png --output appimage
           mkdir -p dist
           mv Descry*.AppImage "dist/Descry-${version}-x86_64.AppImage"
+      - name: Self-contained check
+        # Run the AppImage on a different, bare distro that has only what the
+        # AppImage convention expects of any Linux desktop (X11, OpenGL, ALSA,
+        # font libraries) and none of Descry's own dependencies.
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:12-slim bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              xvfb xauth libgl1 libgl1-mesa-dri libegl1 libasound2 \
+              libharfbuzz0b libfreetype6 libfontconfig1 >/dev/null
+            cd /tmp
+            cp /dist/Descry-*.AppImage app.AppImage && chmod +x app.AppImage
+            ./app.AppImage --appimage-extract >/dev/null
+            missing="$(LD_LIBRARY_PATH=squashfs-root/usr/lib ldd squashfs-root/usr/bin/descry | grep "not found" || true)"
+            if [ -n "$missing" ]; then echo "$missing"; echo "::error::libraries missing from the AppImage"; exit 1; fi
+            rc=0
+            xvfb-run -a timeout 12 squashfs-root/AppRun > smoke.log 2>&1 || rc=$?
+            cat smoke.log
+            if [ "$rc" -ne 124 ]; then echo "::error::the app exited during startup (exit $rc)"; exit 1; fi
+            echo "AppImage started and stayed up on a bare Debian 12."
+          '
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -132,6 +194,26 @@ jobs:
           cp data/plugins/*.lua "$stage/plugins/"
           cp LICENSE.txt "$stage/"
           zip -qr "dist/${stage}-portable.zip" "$stage"
+      - name: Self-contained check
+        # Every imported DLL must be in the folder or part of Windows, and
+        # the app must start with nothing but Windows itself on PATH.
+        run: |
+          version="$(sed -n 's/.*#define DESCRY_VERSION "\([0-9.]*\)".*/\1/p' src/version.h)"
+          stage="Descry-${version}-windows-x64"
+          bash tools/verify_bundle_windows.sh "$stage"
+          cd "$stage"
+          PATH="/c/Windows/System32:/c/Windows" ./descry.exe > ../smoke.log 2>&1 &
+          pid=$!
+          sleep 12
+          cat ../smoke.log || true
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" || true
+            echo "descry.exe started and stayed up without MSYS2 on PATH."
+          elif grep -q 'SDL_CreateRenderer\|SDL_CreateWindow' ../smoke.log; then
+            echo "::warning::libraries loaded, but the runner could not open a window"
+          else
+            echo "::error::descry.exe exited during startup"; exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: windows
