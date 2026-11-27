@@ -3042,7 +3042,8 @@ static SDL_Rect confirm_box_rect(const App* a)
         p = nl + 1;
     }
     {
-        const char* hint = "Enter / Esc cancel  -  Y confirm";
+        const char* hint = a->confirm_btn0_label[0]
+                           ? "Enter / Esc cancel  -  Y confirm" : "Enter / Esc to close";
         int w = font_measure(a->font_ide, hint, strlen(hint));
         if (w > need) need = w;
     }
@@ -3223,8 +3224,10 @@ static void render_confirm_modal(App* a)
                        tc);
     }
 
-    /* Hint */
-    const char* hint = "Enter / Esc cancel  -  Y confirm";
+    /* Hint. A one-button dialog (info_modal: OK only) has nothing to
+     * confirm or cancel. */
+    const char* hint = a->confirm_btn0_label[0]
+                       ? "Enter / Esc cancel  -  Y confirm" : "Enter / Esc to close";
     font_draw_elided(a->font_ide, hint, strlen(hint),
                      box.x + 20,
                      hint_top + font_ascent(a->font_ide),
@@ -13078,17 +13081,33 @@ static bool follow_md_href(App* a, const char* href)
         info_modal(a, "Link not opened", msg);
         return true;
     }
-    /* Show the whole target, so nothing can hide past a cut-off. */
+    /* Show the whole target, wrapped onto lines, so nothing can hide past a
+     * cut-off. A link too long to show in full is not opened at all. */
+    enum { LINK_COLS = 64, LINK_ROWS = 12 };
     size_t hl = strlen(href);
-    char* msg = malloc(hl + 64);
-    if (!msg) return true;
-    snprintf(msg, hl + 64, "%s\n%s",
-             strncasecmp(href, "mailto:", 7) == 0 ? "Open in your mail app?"
-                                                  : "Open in your default browser?",
-             href);
+    if (hl > (size_t)LINK_COLS * LINK_ROWS) {
+        char m[400];
+        snprintf(m, sizeof m,
+                 "This link is too long to show in full (%lu characters),\n"
+                 "so Descry won't open it. It starts:\n%.120s...",
+                 (unsigned long)hl, href);
+        info_modal(a, "Link not opened", m);
+        return true;
+    }
+    char msg[sizeof a->confirm_msg];
+    size_t o = (size_t)snprintf(msg, sizeof msg, "%s",
+                   strncasecmp(href, "mailto:", 7) == 0 ? "Open in your mail app?"
+                                                        : "Open in your default browser?");
+    size_t col = LINK_COLS;                 /* start a new line first */
+    for (const char* p = href; *p && o + 3 < sizeof msg; ++p) {
+        /* Break between characters, never inside a UTF-8 sequence. */
+        if (col >= LINK_COLS && ((unsigned char)*p & 0xC0) != 0x80) { msg[o++] = '\n'; col = 0; }
+        msg[o++] = *p;
+        if (((unsigned char)*p & 0xC0) != 0x80) col++;
+    }
+    msg[o] = 0;
     if (confirm_action(a, "Open link", msg, "Open", "Cancel"))
         open_url(href);
-    free(msg);
     return true;
 }
 
@@ -21858,7 +21877,8 @@ static void action_about     (App* a) {
         "Made by fezcode <samil.bulbul@gmail.com>.\n\n"
         "Stack: C11 + SDL2 + FreeType / HarfBuzz fonts,\n"
         "md4c CommonMark parser, Lua 5.4 plugins,\n"
-        "nanosvg icon rasterizer, custom SDF pill AA.");
+        "libpng / libjpeg images, nanosvg SVG and icon\n"
+        "rasterizer, custom SDF pill AA.");
 }
 static void action_vsearch   (App* a) { vsearch_open(a); }
 static void action_outline   (App* a) { outline_open(a); }
@@ -22402,6 +22422,7 @@ static const ActionEntry ACTIONS[] = {
     { "colors",          "App",        action_colors          },
     { "edit_settings",   "App",        action_edit_settings   },
     { "associate_md",    "App",        action_associate_md    },
+    { "show_about",      "App",        action_about           },
     { NULL, NULL, NULL },
 };
 

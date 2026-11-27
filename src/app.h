@@ -442,7 +442,7 @@ typedef struct {
     int      eol_pick_choice;
     int      eol_pick_hover;
     char     confirm_title[64];
-    char     confirm_msg[400];     /* multi-line — split on '\n' at render */
+    char     confirm_msg[1024];    /* multi-line — split on '\n' at render */
     /* Optional custom button labels. Empty falls back to "Discard"/"Cancel".
      * Set by confirm_action() for "Open link?", "Quit?" style prompts. */
     char     confirm_btn0_label[32];
